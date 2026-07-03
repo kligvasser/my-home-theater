@@ -12,7 +12,16 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from ..db.models import Genre, JobRun, OwnedFile, Title, TitleGenre, TitleKind
+from ..db.models import (
+    Candidate,
+    CandidateStatus,
+    Genre,
+    JobRun,
+    OwnedFile,
+    Title,
+    TitleGenre,
+    TitleKind,
+)
 from ..db.session import session_scope
 
 DEFAULT_SUB_LANG = "he"
@@ -66,6 +75,21 @@ class RunRow:
     started_at: str | None
     finished_at: str | None
     stats: dict[str, Any] | None
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateRow:
+    id: int
+    title: str
+    year: int | None
+    kind: str
+    status: str
+    source: str
+    reason: str | None
+    score: float | None
+    imdb_rating: float | None
+    imdb_votes: int | None
+    poster_url: str | None
 
 
 def get_stats(sub_lang: str = DEFAULT_SUB_LANG) -> LibraryStats:
@@ -178,6 +202,83 @@ def list_titles(
                 )
             )
         return rows, total
+
+
+def list_missing_subtitles(lang: str = DEFAULT_SUB_LANG, limit: int = 500) -> list[TitleRow]:
+    """Owned titles that lack a ``lang`` sidecar on every one of their files."""
+
+    with session_scope() as s:
+        titles = s.scalars(
+            select(Title).options(selectinload(Title.genres), selectinload(Title.owned_files))
+        ).all()
+        rows = []
+        for t in titles:
+            owned = t.owned_files
+            if not owned:
+                continue
+            has_lang = any(f.subtitle_langs and lang in f.subtitle_langs for f in owned)
+            if has_lang:
+                continue
+            rows.append(
+                TitleRow(
+                    id=t.id,
+                    title=t.title,
+                    year=t.year,
+                    kind=str(t.kind),
+                    imdb_rating=t.imdb_rating,
+                    imdb_votes=t.imdb_votes,
+                    poster_url=t.poster_url,
+                    genres=[g.name for g in t.genres],
+                    owned_count=len(owned),
+                    resolutions=sorted({f.resolution for f in owned if f.resolution}),
+                    has_sub=False,
+                )
+            )
+            if len(rows) >= limit:
+                break
+        return rows
+
+
+def list_candidates(status: str | None = "new", limit: int = 100) -> list[CandidateRow]:
+    """Ranked candidate queue. Defaults to the pending (``new``) queue."""
+
+    with session_scope() as s:
+        stmt = (
+            select(Candidate, Title)
+            .join(Title, Title.id == Candidate.title_id)
+            .order_by(Candidate.score.is_(None), Candidate.score.desc())
+            .limit(limit)
+        )
+        if status:
+            stmt = stmt.where(Candidate.status == status)
+        rows = []
+        for cand, title in s.execute(stmt).all():
+            rows.append(
+                CandidateRow(
+                    id=cand.id,
+                    title=title.title,
+                    year=title.year,
+                    kind=str(title.kind),
+                    status=str(cand.status),
+                    source=str(cand.source),
+                    reason=cand.reason,
+                    score=cand.score,
+                    imdb_rating=title.imdb_rating,
+                    imdb_votes=title.imdb_votes,
+                    poster_url=title.poster_url,
+                )
+            )
+        return rows
+
+
+def candidate_counts() -> dict[str, int]:
+    """Count candidates by status (for dashboard badges)."""
+
+    with session_scope() as s:
+        return {
+            str(status): (s.scalar(select(func.count()).where(Candidate.status == status)) or 0)
+            for status in CandidateStatus
+        }
 
 
 def recent_runs(limit: int = 25) -> list[RunRow]:

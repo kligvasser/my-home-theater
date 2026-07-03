@@ -38,6 +38,10 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 home-theater                 # serve the dashboard/API (default)
 home-theater scan            # scan the NAS -> owned catalog (Phase 1)
 home-theater enrich          # backfill TMDb/IMDb metadata (Phase 2)
+home-theater discover        # find candidates above your thresholds (Phase 4)
+home-theater subtitles       # ask Bazarr to search for missing subs (Phase 5)
+home-theater acquire         # queue approved candidates to Radarr/Sonarr (Phase 6)
+home-theater sync            # advance in-flight download states (Phase 6)
 # health:   http://localhost:8000/health
 # readiness http://localhost:8000/ready
 ```
@@ -82,6 +86,15 @@ Phases 0–2 are in place:
 - **Phase 3** — read-only dashboard: Jinja2 pages (`/`, `/library`, `/runs`) with
   library stats, resolution/genre/decade breakdowns, Hebrew subtitle coverage, and
   search; plus a JSON API (`/api/stats`, `/api/titles`, `/api/runs`).
+- **Phase 4** — discovery: TMDb trending/top-rated sources, threshold filter +
+  rating×log(votes) scoring, dedup vs. owned/live candidates, review/auto modes,
+  `home-theater discover`, a candidate-queue page, and a token-gated
+  approve/reject/manual API (`/api/candidates`).
+- **Phase 5** — subtitles: thin Bazarr client (read wanted, trigger search-missing),
+  catalog-based coverage + missing-list, `/subtitles` page, `home-theater subtitles`,
+  and a token-gated `POST /api/subtitles/search`.
+- **Phase 6** — acquisition: Radarr/Sonarr `LibraryAutomation` clients, dry-run-gated
+  `queue`/`sync` of approved candidates (they own Prowlarr/qBittorrent/import),
+  `home-theater acquire`/`sync`, and a token-gated `POST /api/candidates/<id>/queue`.
 
-Subsequent phases (discovery, subtitles, acquisition, reconcile, scheduling)
-follow the plan.
+Subsequent phases (reconcile, scheduling) follow the plan.

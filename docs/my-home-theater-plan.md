@@ -389,13 +389,23 @@ Each phase is shippable and has explicit acceptance criteria. Build in order.
   stats/coverage/genre/decade breakdowns, verified booting.
 - **Phase 4 — Discovery & candidates.** Sources + filter/score + de-dup +
   review/auto modes. *Done when* candidates appear with reasons and pass your
-  thresholds while excluding owned titles.
+  thresholds while excluding owned titles. ✅ **Done** — TMDb trending/top-rated
+  sources, threshold filter + rating×log(votes) scoring, dedup vs owned/live,
+  `home-theater discover`, candidate queue page + token-gated approve/reject/manual
+  API; verified booting.
 - **Phase 5 — Subtitle coverage (Bazarr).** Bazarr client: read Hebrew coverage,
   trigger search for missing. *Done when* coverage shows in the dashboard and a
-  click asks Bazarr to fill gaps.
+  click asks Bazarr to fill gaps. ✅ **Done** — thin Bazarr client (wanted +
+  search-missing), catalog-based coverage + missing list, `/subtitles` page,
+  token-gated `POST /api/subtitles/search`, `home-theater subtitles`; verified
+  booting. Pending a real Bazarr for the live trigger.
 - **Phase 6 — Acquisition (Radarr/Sonarr).** `LibraryAutomation` clients + quality
   profile selection behind the interface. *Done when* an approved candidate becomes
   a monitored title in Radarr/Sonarr that grabs + imports a legal test release.
+  ✅ **Code done** — Radarr/Sonarr clients (lookup/add/status/list_owned),
+  dry-run-gated `queue_candidate`/`queue_approved` + `sync_downloads`, `POST …/queue`
+  endpoint, `home-theater acquire`/`sync`; dry-run verified booting. Pending a real
+  Radarr/Sonarr + legal test release for a live grab.
 - **Phase 7 — Import reconciliation.** Consume Radarr/Sonarr import webhooks/polls,
   update catalog, flip candidate to `imported`. *Done when* an import is reflected
   in the catalog idempotently (no NAS writes by our app).

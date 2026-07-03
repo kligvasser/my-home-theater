@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Candidates · my-home-theater{% endblock %}
+{% block content %}
+<h1>Candidate queue</h1>
+
+<nav class="statusfilter">
+  {% for st in ["new", "approved", "rejected", "queued", "imported"] %}
+    <a href="/candidates?status={{ st }}" class="{{ 'active' if status == st }}">
+      {{ st }} <span class="count">{{ counts.get(st, 0) }}</span>
+    </a>
+  {% endfor %}
+</nav>
+
+{% if candidates %}
+<div class="candidate-grid">
+  {% for c in candidates %}
+  <article class="candidate">
+    <div class="cposter">
+      {% if c.poster_url %}<img src="{{ c.poster_url }}" alt="" loading="lazy" />{% endif %}
+    </div>
+    <div class="cbody">
+      <h3>{{ c.title }} {% if c.year %}<span class="muted">({{ c.year }})</span>{% endif %}</h3>
+      <div class="cmeta">
+        <span class="pill">{{ c.kind }}</span>
+        {% if c.imdb_rating is not none %}<span>⭐ {{ "%.1f"|format(c.imdb_rating) }}</span>{% endif %}
+        {% if c.imdb_votes is not none %}<span class="muted">{{ "{:,}".format(c.imdb_votes) }} votes</span>{% endif %}
+        {% if c.score is not none %}<span class="muted">score {{ c.score }}</span>{% endif %}
+      </div>
+      <p class="reason">{{ c.reason or "" }}</p>
+    </div>
+  </article>
+  {% endfor %}
+</div>
+<p class="muted note">Review actions (approve/reject) are exposed on the token-gated JSON API
+<code>POST /api/candidates/&lt;id&gt;/approve</code>; interactive buttons land with acquisition (Phase 6).</p>
+{% else %}
+<p class="muted">No <b>{{ status }}</b> candidates. Run <code>home-theater discover</code>.</p>
+{% endif %}
+{% endblock %}

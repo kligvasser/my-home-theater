@@ -3,22 +3,30 @@
 from __future__ import annotations
 
 from .queries import (
+    CandidateRow,
     Coverage,
     LibraryStats,
     RunRow,
     TitleRow,
+    candidate_counts,
     get_stats,
+    list_candidates,
+    list_missing_subtitles,
     list_titles,
     recent_runs,
 )
 
 __all__ = [
+    "CandidateRow",
     "Coverage",
     "LibraryStats",
     "RunRow",
     "TitleRow",
+    "candidate_counts",
     "get_stats",
     "human_size",
+    "list_candidates",
+    "list_missing_subtitles",
     "list_titles",
     "recent_runs",
 ]

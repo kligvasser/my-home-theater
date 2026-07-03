@@ -34,8 +34,26 @@ metadata:
   cache_days: 14        # TTL for cached TMDb/OMDb responses (respects rate limits)
   max_concurrency: 8    # parallel provider fetches during enrichment
 
-# Radarr/Sonarr quality profile the app selects when adding a title.
-quality_profile: HD-1080p
+discovery:
+  trending: true        # pull TMDb trending
+  top_rated: false      # also pull TMDb top-rated
+  include_movies: true
+  include_series: true
+  trending_window: week # day | week
+  max_per_source: 20    # cap items per source before filtering
+  excluded_genres: []   # e.g. [Documentary, Reality]
+
+subtitles:
+  languages: [he]       # target languages; Bazarr does the actual fetching
+
+acquisition:
+  # Quality profile NAMES as configured inside Radarr/Sonarr (release selection).
+  movie_quality_profile: HD-1080p
+  series_quality_profile: HD-1080p
+  # Root folders; leave null to use the arr's first configured root folder.
+  movie_root_folder: null
+  series_root_folder: null
+  search_on_add: true   # tell Radarr/Sonarr to search immediately after adding
 
 # Free-form list of provider names you've enabled (metadata/library/subtitle).
 enabled_providers:

@@ -8,7 +8,15 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse
 
 from .. import __version__
-from ..dashboard import get_stats, list_titles, recent_runs
+from ..config import get_config
+from ..dashboard import (
+    candidate_counts,
+    get_stats,
+    list_candidates,
+    list_missing_subtitles,
+    list_titles,
+    recent_runs,
+)
 from ..dashboard.queries import PAGE_SIZE
 from .templates import templates
 
@@ -49,6 +57,37 @@ def library(
             "page": page,
             "pages": pages,
             "active": "library",
+            "version": __version__,
+        },
+    )
+
+
+@router.get("/candidates", response_class=HTMLResponse)
+def candidates(request: Request, status: str = "new") -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "candidates.html",
+        {
+            "candidates": list_candidates(status=status),
+            "counts": candidate_counts(),
+            "status": status,
+            "active": "candidates",
+            "version": __version__,
+        },
+    )
+
+
+@router.get("/subtitles", response_class=HTMLResponse)
+def subtitles(request: Request) -> HTMLResponse:
+    lang = get_config().subtitles.primary
+    stats = get_stats(sub_lang=lang)
+    return templates.TemplateResponse(
+        request,
+        "subtitles.html",
+        {
+            "coverage": stats.coverage,
+            "missing": list_missing_subtitles(lang=lang, limit=200),
+            "active": "subtitles",
             "version": __version__,
         },
     )

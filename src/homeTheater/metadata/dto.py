@@ -12,6 +12,7 @@ class TmdbTitle:
     tmdb_id: int
     title: str
     imdb_id: str | None = None
+    tvdb_id: int | None = None
     year: int | None = None
     runtime: int | None = None
     genres: list[str] = field(default_factory=list)

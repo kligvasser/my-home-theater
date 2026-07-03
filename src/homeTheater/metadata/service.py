@@ -115,6 +115,7 @@ def _persist(results: list[_Result], stats: EnrichStats) -> None:
                     stats.ids_resolved += 1
                 title.tmdb_id = t.tmdb_id
                 title.imdb_id = t.imdb_id or title.imdb_id
+                title.tvdb_id = t.tvdb_id or title.tvdb_id
                 title.year = title.year or t.year
                 title.runtime = t.runtime
                 title.tmdb_rating = t.tmdb_rating

@@ -57,6 +57,42 @@ class Metadata(BaseModel):
     max_concurrency: int = Field(8, ge=1, description="parallel provider fetches")
 
 
+class Discovery(BaseModel):
+    """Candidate discovery behaviour (plan §5.4)."""
+
+    trending: bool = True
+    top_rated: bool = False
+    include_movies: bool = True
+    include_series: bool = True
+    trending_window: str = Field("week", pattern="^(day|week)$")
+    max_per_source: int = Field(20, ge=1, le=100)
+    excluded_genres: list[str] = Field(default_factory=list)
+
+
+class Subtitles(BaseModel):
+    """Subtitle coverage/automation (plan §5.5). Bazarr does the fetching."""
+
+    languages: list[str] = Field(default_factory=lambda: ["he"])
+
+    @property
+    def primary(self) -> str:
+        return self.languages[0] if self.languages else "he"
+
+
+class Acquisition(BaseModel):
+    """How approved candidates are handed to Radarr/Sonarr (plan §5.6).
+
+    Release selection is a Radarr/Sonarr *quality profile* configured once in those
+    apps; we just pick the profile name, root folder, and whether to search on add.
+    """
+
+    movie_quality_profile: str = "HD-1080p"
+    series_quality_profile: str = "HD-1080p"
+    movie_root_folder: str | None = None  # None -> use the arr's first root folder
+    series_root_folder: str | None = None
+    search_on_add: bool = True
+
+
 class Secrets(BaseSettings):
     """Secrets from environment / ``.env``. Never logged, never serialized."""
 
@@ -102,7 +138,9 @@ class AppConfig(BaseModel):
     schedule: Schedule = Field(default_factory=Schedule)
     database: Database = Field(default_factory=Database)
     metadata: Metadata = Field(default_factory=Metadata)
-    quality_profile: str = Field("HD-1080p", description="Radarr/Sonarr profile name")
+    discovery: Discovery = Field(default_factory=Discovery)
+    subtitles: Subtitles = Field(default_factory=Subtitles)
+    acquisition: Acquisition = Field(default_factory=Acquisition)
     enabled_providers: list[str] = Field(default_factory=list)
     secrets: Secrets = Field(default_factory=Secrets, repr=False)
 

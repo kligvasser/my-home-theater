@@ -88,3 +88,20 @@ tbody tr:hover { background: var(--panel); }
 
 .pager { display: flex; gap: 16px; align-items: center; margin-top: 18px; }
 .foot { max-width: 1100px; margin: 40px auto 24px; padding: 0 24px; color: var(--muted); font-size: .85rem; }
+
+.statusfilter { display: flex; gap: 8px; margin-bottom: 18px; flex-wrap: wrap; }
+.statusfilter a {
+  color: var(--muted); padding: 6px 12px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--panel);
+}
+.statusfilter a.active { color: var(--text); border-color: var(--accent); }
+.statusfilter .count { color: var(--muted); font-size: .82em; }
+
+.candidate-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+.candidate { display: flex; gap: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
+.candidate .cposter img { width: 68px; height: 102px; object-fit: cover; border-radius: 6px; display: block; }
+.candidate .cbody { min-width: 0; }
+.candidate h3 { margin: 0 0 6px; font-size: 1rem; }
+.candidate .cmeta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: .85rem; margin-bottom: 6px; }
+.candidate .reason { margin: 0; color: var(--muted); font-size: .85rem; }
+.note { margin-top: 20px; }

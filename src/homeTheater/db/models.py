@@ -77,6 +77,7 @@ class Title(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(primary_key=True)
     tmdb_id: Mapped[int | None] = mapped_column(Integer, index=True, unique=True)
     imdb_id: Mapped[str | None] = mapped_column(String(16), index=True, unique=True)
+    tvdb_id: Mapped[int | None] = mapped_column(Integer, index=True)  # Sonarr keys on this
     kind: Mapped[TitleKind] = mapped_column(_enum(TitleKind))
     title: Mapped[str] = mapped_column(String(512))
     year: Mapped[int | None] = mapped_column(Integer)

@@ -79,6 +79,38 @@ class TMDbClient:
                     return int(r["id"])
         return int(results[0]["id"])
 
+    async def _discover_list(self, path: str, kind: TitleKind, cache_key: str) -> list[TmdbTitle]:
+        data = await self._get(path, {"language": self._language}, cache_key)
+        date_field = "release_date" if kind is TitleKind.movie else "first_air_date"
+        out: list[TmdbTitle] = []
+        for r in data.get("results") or []:
+            if "id" not in r:
+                continue
+            name = r.get("title") or r.get("name") or ""
+            out.append(
+                TmdbTitle(
+                    tmdb_id=int(r["id"]),
+                    title=name,
+                    year=_year_of(r.get(date_field)),
+                    tmdb_rating=r.get("vote_average"),
+                    tmdb_votes=r.get("vote_count"),
+                    popularity=r.get("popularity"),
+                    poster_url=_poster(r.get("poster_path")),
+                    overview=r.get("overview") or None,
+                )
+            )
+        return out
+
+    async def trending(self, kind: TitleKind, window: str = "week") -> list[TmdbTitle]:
+        media = "movie" if kind is TitleKind.movie else "tv"
+        return await self._discover_list(
+            f"/trending/{media}/{window}", kind, f"trending:{media}:{window}"
+        )
+
+    async def top_rated(self, kind: TitleKind) -> list[TmdbTitle]:
+        media = "movie" if kind is TitleKind.movie else "tv"
+        return await self._discover_list(f"/{media}/top_rated", kind, f"top_rated:{media}")
+
     async def details(self, tmdb_id: int, kind: TitleKind) -> TmdbTitle:
         path = f"/movie/{tmdb_id}" if kind is TitleKind.movie else f"/tv/{tmdb_id}"
         key = f"details:{kind.value}:{tmdb_id}:{self._language}"
@@ -90,6 +122,7 @@ class TMDbClient:
 
         external = data.get("external_ids") or {}
         imdb_id = data.get("imdb_id") or external.get("imdb_id")
+        tvdb_id = external.get("tvdb_id")
 
         if kind is TitleKind.movie:
             name = data.get("title") or data.get("original_title") or ""
@@ -107,6 +140,7 @@ class TMDbClient:
             tmdb_id=tmdb_id,
             title=name,
             imdb_id=imdb_id or None,
+            tvdb_id=int(tvdb_id) if isinstance(tvdb_id, int) else None,
             year=year,
             runtime=int(runtime) if isinstance(runtime, int) else None,
             genres=genres,
