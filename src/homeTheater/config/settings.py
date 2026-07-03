@@ -38,10 +38,12 @@ class FeatureFlags(BaseModel):
 class Schedule(BaseModel):
     """APScheduler intervals, in minutes. 0 disables a job."""
 
+    enabled: bool = False  # opt-in; `serve` only starts jobs when true
     scan_interval_minutes: int = Field(360, ge=0)
     discovery_interval_minutes: int = Field(720, ge=0)
     subtitle_interval_minutes: int = Field(720, ge=0)
-    import_reconcile_interval_minutes: int = Field(15, ge=0)
+    sync_interval_minutes: int = Field(10, ge=0)
+    import_reconcile_interval_minutes: int = Field(60, ge=0)
 
 
 class Database(BaseModel):

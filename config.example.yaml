@@ -20,10 +20,12 @@ features:
   auto_approve: false       # false = review candidates in the dashboard first
 
 schedule:
+  enabled: false        # true = `home-theater` (serve) runs jobs on intervals
   scan_interval_minutes: 360
   discovery_interval_minutes: 720
   subtitle_interval_minutes: 720
-  import_reconcile_interval_minutes: 15
+  sync_interval_minutes: 10
+  import_reconcile_interval_minutes: 60   # 0 disables a job
 
 database:
   url: sqlite:///data/home_theater.db

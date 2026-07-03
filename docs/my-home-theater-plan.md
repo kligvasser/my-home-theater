@@ -408,9 +408,17 @@ Each phase is shippable and has explicit acceptance criteria. Build in order.
   Radarr/Sonarr + legal test release for a live grab.
 - **Phase 7 — Import reconciliation.** Consume Radarr/Sonarr import webhooks/polls,
   update catalog, flip candidate to `imported`. *Done when* an import is reflected
-  in the catalog idempotently (no NAS writes by our app).
+  in the catalog idempotently (no NAS writes by our app). ✅ **Done** — normalized
+  webhook parsing, idempotent `reconcile_import` (upsert title/owned_file by id/path,
+  flip candidate + complete downloads), `reconcile_library` poll, token-gated
+  `POST /api/webhooks/{radarr,sonarr}` (header or `?token=`), `home-theater
+  reconcile`; verified booting.
 - **Phase 8 — Scheduling + notifications.** Periodic jobs, concurrency guard,
-  alerts. *Done when* the pipeline runs unattended on intervals.
+  alerts. *Done when* the pipeline runs unattended on intervals. ✅ **Done** —
+  APScheduler jobs (scan/discovery/subtitle/sync/reconcile, each toggleable by
+  interval) with a global lock so they never overlap; Telegram/log notifier for
+  new candidates + imports + job failures; started from the `serve` lifespan when
+  `schedule.enabled`; verified registering jobs on boot.
 - **Phase 9 — Hardening.** Tests to meaningful coverage, retries/backoff,
   error surfacing, docs, backup of the SQLite DB, final launchd/systemd deploy.
 

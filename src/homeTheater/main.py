@@ -124,6 +124,22 @@ def sync() -> None:
     log.info("sync.cli_done", **stats.as_dict())
 
 
+def reconcile() -> None:
+    """Poll Radarr/Sonarr and reconcile owned items into the catalog."""
+
+    import asyncio
+
+    from .config import get_config
+    from .db import init_db
+    from .reconcile import reconcile_library
+
+    _configure()
+    config = get_config()
+    init_db()  # dev convenience; production uses Alembic
+    stats = asyncio.run(reconcile_library(config))
+    log.info("reconcile.cli_done", **stats.as_dict())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="home-theater")
     sub = parser.add_subparsers(dest="command")
@@ -134,6 +150,7 @@ def main() -> None:
     sub.add_parser("subtitles", help="ask Bazarr to search for missing subtitles")
     sub.add_parser("acquire", help="queue approved candidates to Radarr/Sonarr")
     sub.add_parser("sync", help="advance in-flight download states from Radarr/Sonarr")
+    sub.add_parser("reconcile", help="reconcile Radarr/Sonarr owned items into the catalog")
     args = parser.parse_args()
 
     if args.command == "scan":
@@ -148,6 +165,8 @@ def main() -> None:
         acquire()
     elif args.command == "sync":
         sync()
+    elif args.command == "reconcile":
+        reconcile()
     else:
         serve()
 

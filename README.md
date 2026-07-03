@@ -42,6 +42,7 @@ home-theater discover        # find candidates above your thresholds (Phase 4)
 home-theater subtitles       # ask Bazarr to search for missing subs (Phase 5)
 home-theater acquire         # queue approved candidates to Radarr/Sonarr (Phase 6)
 home-theater sync            # advance in-flight download states (Phase 6)
+home-theater reconcile       # reconcile Radarr/Sonarr owned items -> catalog (Phase 7)
 # health:   http://localhost:8000/health
 # readiness http://localhost:8000/ready
 ```
@@ -96,5 +97,13 @@ Phases 0–2 are in place:
 - **Phase 6** — acquisition: Radarr/Sonarr `LibraryAutomation` clients, dry-run-gated
   `queue`/`sync` of approved candidates (they own Prowlarr/qBittorrent/import),
   `home-theater acquire`/`sync`, and a token-gated `POST /api/candidates/<id>/queue`.
+- **Phase 7** — import reconciliation: idempotent `reconcile_import` from Radarr/Sonarr
+  import webhooks (`POST /api/webhooks/{radarr,sonarr}?token=…`) that links the owned
+  file and flips the candidate to `imported`, plus a `reconcile_library` poll and
+  `home-theater reconcile`.
+- **Phase 8** — scheduling + notifications: APScheduler periodic jobs
+  (scan/discovery/subtitle/sync/reconcile) behind a global concurrency guard, started
+  from `serve` when `schedule.enabled`; Telegram/log notifier for new candidates,
+  imports, and job failures.
 
-Subsequent phases (reconcile, scheduling) follow the plan.
+Remaining: Phase 9 — hardening (coverage, retries/backoff, DB backup, deploy).
