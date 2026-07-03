@@ -29,6 +29,11 @@ database:
   url: sqlite:///data/home_theater.db
   echo: false
 
+metadata:
+  language: en-US       # TMDb language for details
+  cache_days: 14        # TTL for cached TMDb/OMDb responses (respects rate limits)
+  max_concurrency: 8    # parallel provider fetches during enrichment
+
 # Radarr/Sonarr quality profile the app selects when adding a title.
 quality_profile: HD-1080p
 

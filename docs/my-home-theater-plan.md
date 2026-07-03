@@ -380,7 +380,9 @@ Each phase is shippable and has explicit acceptance criteria. Build in order.
   idempotent. ✅ **Code done** (module + tests); pending a real scan once `.env`
   SMB creds are filled in (`home-theater scan`).
 - **Phase 2 — Metadata enrichment.** TMDb + OMDb clients + cache; backfill
-  ratings/votes/ids. *Done when* owned titles show IMDb rating + votes.
+  ratings/votes/ids. *Done when* owned titles show IMDb rating + votes. ✅ **Code
+  done** (clients + TTL cache + `home-theater enrich`); pending a real backfill
+  once `TMDB_API_KEY`/`OMDB_API_KEY` are set.
 - **Phase 3 — Dashboard v1 (read-only).** Library view, stats, search, subtitle
   coverage. *Done when* you can browse your library in a browser.
 - **Phase 4 — Discovery & candidates.** Sources + filter/score + de-dup +

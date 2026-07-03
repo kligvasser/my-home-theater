@@ -24,9 +24,17 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, TimestampMixin
+
+
+def _enum(enum_cls: type) -> SAEnum:
+    """Store enums as portable VARCHAR (values == names for our StrEnums) so DB
+    round-trips return real enum members, not bare strings."""
+
+    return SAEnum(enum_cls, native_enum=False, validate_strings=True)
 
 
 class TitleKind(enum.StrEnum):
@@ -69,7 +77,7 @@ class Title(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(primary_key=True)
     tmdb_id: Mapped[int | None] = mapped_column(Integer, index=True, unique=True)
     imdb_id: Mapped[str | None] = mapped_column(String(16), index=True, unique=True)
-    kind: Mapped[TitleKind] = mapped_column(String(8))
+    kind: Mapped[TitleKind] = mapped_column(_enum(TitleKind))
     title: Mapped[str] = mapped_column(String(512))
     year: Mapped[int | None] = mapped_column(Integer)
     runtime: Mapped[int | None] = mapped_column(Integer)
@@ -111,7 +119,7 @@ class OwnedFile(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(primary_key=True)
     title_id: Mapped[int] = mapped_column(ForeignKey("title.id"), index=True)
     path: Mapped[str] = mapped_column(String(2048))
-    kind: Mapped[TitleKind] = mapped_column(String(8))
+    kind: Mapped[TitleKind] = mapped_column(_enum(TitleKind))
     season: Mapped[int | None] = mapped_column(Integer)
     episode: Mapped[int | None] = mapped_column(Integer)
     resolution: Mapped[str | None] = mapped_column(String(16))
@@ -129,8 +137,10 @@ class Candidate(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     title_id: Mapped[int] = mapped_column(ForeignKey("title.id"), index=True)
-    source: Mapped[CandidateSource] = mapped_column(String(16))
-    status: Mapped[CandidateStatus] = mapped_column(String(16), default=CandidateStatus.new)
+    source: Mapped[CandidateSource] = mapped_column(_enum(CandidateSource))
+    status: Mapped[CandidateStatus] = mapped_column(
+        _enum(CandidateStatus), default=CandidateStatus.new
+    )
     reason: Mapped[str | None] = mapped_column(Text)
     score: Mapped[float | None] = mapped_column(Float)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -172,7 +182,7 @@ class ProviderSetting(Base, TimestampMixin):
     __tablename__ = "provider_setting"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    kind: Mapped[ProviderKind] = mapped_column(String(16))
+    kind: Mapped[ProviderKind] = mapped_column(_enum(ProviderKind))
     name: Mapped[str] = mapped_column(String(64))
     config: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -185,7 +195,7 @@ class JobRun(Base):
     kind: Mapped[str] = mapped_column(String(32), index=True)  # scan|discovery|subtitle|...
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    status: Mapped[RunStatus] = mapped_column(String(16), default=RunStatus.running)
+    status: Mapped[RunStatus] = mapped_column(_enum(RunStatus), default=RunStatus.running)
     stats: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     log_ref: Mapped[str | None] = mapped_column(String(256))
 
@@ -195,3 +205,20 @@ class Setting(Base, TimestampMixin):
 
     key: Mapped[str] = mapped_column(String(128), primary_key=True)
     value: Mapped[str | None] = mapped_column(Text)
+
+
+class MetadataCache(Base):
+    """Persistent cache of external provider responses (TTL enforced in code).
+
+    Keyed by ``(provider, cache_key)`` so a re-run reuses TMDb/OMDb payloads and
+    respects rate limits (OMDb's 1k/day especially — plan §3).
+    """
+
+    __tablename__ = "metadata_cache"
+    __table_args__ = (UniqueConstraint("provider", "cache_key", name="uq_cache_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    cache_key: Mapped[str] = mapped_column(String(512), index=True)
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

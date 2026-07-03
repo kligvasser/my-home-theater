@@ -49,6 +49,14 @@ class Database(BaseModel):
     echo: bool = False
 
 
+class Metadata(BaseModel):
+    """Metadata enrichment behaviour (plan §5.3)."""
+
+    language: str = Field("en-US", description="TMDb language for details")
+    cache_days: int = Field(14, ge=0, description="TTL for cached provider responses")
+    max_concurrency: int = Field(8, ge=1, description="parallel provider fetches")
+
+
 class Secrets(BaseSettings):
     """Secrets from environment / ``.env``. Never logged, never serialized."""
 
@@ -93,6 +101,7 @@ class AppConfig(BaseModel):
     features: FeatureFlags = Field(default_factory=FeatureFlags)
     schedule: Schedule = Field(default_factory=Schedule)
     database: Database = Field(default_factory=Database)
+    metadata: Metadata = Field(default_factory=Metadata)
     quality_profile: str = Field("HD-1080p", description="Radarr/Sonarr profile name")
     enabled_providers: list[str] = Field(default_factory=list)
     secrets: Secrets = Field(default_factory=Secrets, repr=False)

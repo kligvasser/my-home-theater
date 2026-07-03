@@ -44,15 +44,34 @@ def scan() -> None:
     log.info("scan.cli_done", **stats.as_dict())
 
 
+def enrich() -> None:
+    """Backfill TMDb/IMDb ids, ratings, votes, and genres onto the catalog."""
+
+    import asyncio
+
+    from .config import get_config
+    from .db import init_db
+    from .metadata import enrich_catalog
+
+    _configure()
+    config = get_config()
+    init_db()  # dev convenience; production uses Alembic
+    stats = asyncio.run(enrich_catalog(config))
+    log.info("enrich.cli_done", **stats.as_dict())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="home-theater")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("serve", help="run the dashboard/API server (default)")
     sub.add_parser("scan", help="scan the NAS and update the owned catalog")
+    sub.add_parser("enrich", help="backfill TMDb/IMDb metadata onto the catalog")
     args = parser.parse_args()
 
     if args.command == "scan":
         scan()
+    elif args.command == "enrich":
+        enrich()
     else:
         serve()
 

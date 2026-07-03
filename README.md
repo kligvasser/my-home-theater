@@ -35,7 +35,9 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 ## Run
 
 ```bash
-home-theater                 # or: python -m homeTheater.main
+home-theater                 # serve the dashboard/API (default)
+home-theater scan            # scan the NAS -> owned catalog (Phase 1)
+home-theater enrich          # backfill TMDb/IMDb metadata (Phase 2)
 # health:   http://localhost:8000/health
 # readiness http://localhost:8000/ready
 ```
@@ -69,8 +71,14 @@ pre-commit install
 
 ## Status
 
-Phase 0 (scaffolding) is in place: layered config, SQLAlchemy models + session
-(SQLite WAL), structured logging, FastAPI health/readiness, dashboard-auth
-dependency, conda env, launchd/systemd deploy templates, and Alembic. Subsequent
-phases (NAS scan, metadata, dashboard, discovery, subtitles, acquisition,
-reconcile, scheduling) follow the plan.
+Phases 0–2 are in place:
+- **Phase 0** — layered config, SQLAlchemy models + session (SQLite WAL),
+  structured logging, FastAPI health/readiness, dashboard-auth dependency, conda
+  env, launchd/systemd deploy templates, Alembic.
+- **Phase 1** — read-only NAS scanner (SMB + local/fake filesystem), guessit
+  parsing, subtitle sidecar detection, idempotent upserts, `home-theater scan`.
+- **Phase 2** — TMDb + OMDb clients with a TTL cache, concurrent enrichment that
+  backfills ids/ratings/votes/genres, `home-theater enrich`.
+
+Subsequent phases (dashboard, discovery, subtitles, acquisition, reconcile,
+scheduling) follow the plan.
