@@ -6,12 +6,14 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
 from ..config import get_config
 from ..db import init_db
 from ..logging_setup import configure_logging, get_logger
-from . import health
+from . import catalog, health, web
+from .templates import STATIC_DIR
 
 log = get_logger(__name__)
 
@@ -39,7 +41,10 @@ def create_app() -> FastAPI:
         summary="Personal movie & TV library automation.",
         lifespan=lifespan,
     )
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     app.include_router(health.router)
+    app.include_router(catalog.router)
+    app.include_router(web.router)
     return app
 
 

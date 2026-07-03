@@ -384,7 +384,9 @@ Each phase is shippable and has explicit acceptance criteria. Build in order.
   done** (clients + TTL cache + `home-theater enrich`); pending a real backfill
   once `TMDB_API_KEY`/`OMDB_API_KEY` are set.
 - **Phase 3 — Dashboard v1 (read-only).** Library view, stats, search, subtitle
-  coverage. *Done when* you can browse your library in a browser.
+  coverage. *Done when* you can browse your library in a browser. ✅ **Done** —
+  Jinja2 pages (`/`, `/library`, `/runs`) + JSON API (`/api/stats|titles|runs`),
+  stats/coverage/genre/decade breakdowns, verified booting.
 - **Phase 4 — Discovery & candidates.** Sources + filter/score + de-dup +
   review/auto modes. *Done when* candidates appear with reasons and pass your
   thresholds while excluding owned titles.

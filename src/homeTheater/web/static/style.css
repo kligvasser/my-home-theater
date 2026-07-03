@@ -1,0 +1,90 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel-2: #1e222b;
+  --text: #e7e9ee;
+  --muted: #9aa1ad;
+  --accent: #4c8bf5;
+  --ok: #35c07f;
+  --fail: #e5534b;
+  --running: #d8a24a;
+  --border: #262b36;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f0f2f5; --text: #1a1d24;
+    --muted: #5c6470; --border: #e2e5ea;
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: .9em; }
+
+.topbar {
+  display: flex; align-items: center; gap: 24px;
+  padding: 12px 24px; background: var(--panel); border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 5;
+}
+.brand { font-weight: 700; font-size: 1.05rem; }
+.topbar nav { display: flex; gap: 18px; }
+.topbar nav a { color: var(--muted); }
+.topbar nav a.active { color: var(--text); font-weight: 600; }
+
+main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+h1 { font-size: 1.5rem; margin: 0 0 20px; }
+h2 { font-size: 1.05rem; margin: 28px 0 10px; }
+.muted { color: var(--muted); }
+.small { font-size: .85em; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82em; }
+.r { text-align: right; }
+
+.cards { display: flex; flex-wrap: wrap; gap: 14px; }
+.card {
+  flex: 1 1 140px; background: var(--panel); border: 1px solid var(--border);
+  border-radius: 12px; padding: 16px 18px; display: flex; flex-direction: column; gap: 4px;
+}
+.card .num { font-size: 1.6rem; font-weight: 700; }
+.card .lbl { color: var(--muted); font-size: .85rem; }
+
+.coverage { margin-top: 26px; }
+.bar { height: 12px; background: var(--panel-2); border-radius: 6px; overflow: hidden; }
+.bar .fill { height: 100%; background: var(--accent); }
+
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+@media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-weight: 600; font-size: .82rem; text-transform: uppercase; letter-spacing: .03em; }
+tbody tr:hover { background: var(--panel); }
+
+.hist { display: flex; align-items: flex-end; gap: 10px; height: 160px; padding-top: 10px; }
+.hist .col { display: flex; flex-direction: column; align-items: center; flex: 1; height: 100%; justify-content: flex-end; }
+.hist .colbar { width: 100%; max-width: 42px; background: var(--accent); border-radius: 5px 5px 0 0; min-height: 3px; }
+.hist .collbl { color: var(--muted); font-size: .72rem; margin-top: 6px; }
+
+.filters { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+.filters input, .filters select, .filters button {
+  background: var(--panel); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 12px; font-size: .95rem;
+}
+.filters input[type=search] { min-width: 240px; }
+.filters button { background: var(--accent); color: #fff; border: none; cursor: pointer; }
+
+.library td.poster { width: 46px; padding: 4px; }
+.library td.poster img { width: 40px; height: 60px; object-fit: cover; border-radius: 4px; display: block; }
+
+.pill { padding: 2px 9px; border-radius: 999px; font-size: .78rem; font-weight: 600; }
+.pill.success { background: color-mix(in srgb, var(--ok) 22%, transparent); color: var(--ok); }
+.pill.failed { background: color-mix(in srgb, var(--fail) 22%, transparent); color: var(--fail); }
+.pill.running { background: color-mix(in srgb, var(--running) 22%, transparent); color: var(--running); }
+.runs td.small { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.pager { display: flex; gap: 16px; align-items: center; margin-top: 18px; }
+.foot { max-width: 1100px; margin: 40px auto 24px; padding: 0 24px; color: var(--muted); font-size: .85rem; }

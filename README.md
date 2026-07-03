@@ -79,6 +79,9 @@ Phases 0–2 are in place:
   parsing, subtitle sidecar detection, idempotent upserts, `home-theater scan`.
 - **Phase 2** — TMDb + OMDb clients with a TTL cache, concurrent enrichment that
   backfills ids/ratings/votes/genres, `home-theater enrich`.
+- **Phase 3** — read-only dashboard: Jinja2 pages (`/`, `/library`, `/runs`) with
+  library stats, resolution/genre/decade breakdowns, Hebrew subtitle coverage, and
+  search; plus a JSON API (`/api/stats`, `/api/titles`, `/api/runs`).
 
-Subsequent phases (dashboard, discovery, subtitles, acquisition, reconcile,
-scheduling) follow the plan.
+Subsequent phases (discovery, subtitles, acquisition, reconcile, scheduling)
+follow the plan.

@@ -48,6 +48,9 @@ home-theater = "homeTheater.main:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+homeTheater = ["web/templates/*.html", "web/static/*.css"]
+
 [tool.black]
 line-length = 100
 target-version = ["py312"]
