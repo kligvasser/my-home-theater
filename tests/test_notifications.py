@@ -56,6 +56,22 @@ async def test_telegram_send() -> None:
 
 
 @respx.mock
+async def test_telegram_error_does_not_leak_bot_token() -> None:
+    """httpx errors embed the request URL (bot token included); ours must not."""
+
+    from homeTheater.notifications import TelegramNotifier
+
+    respx.post("https://api.telegram.org/bot99:SeCrEtToKeN/sendMessage").mock(
+        return_value=httpx.Response(403)
+    )
+    async with httpx.AsyncClient() as http:
+        with pytest.raises(RuntimeError) as exc:
+            await TelegramNotifier("99:SeCrEtToKeN", "chat", http).send("hello")
+    assert "SeCrEtToKeN" not in str(exc.value)
+    assert "403" in str(exc.value)
+
+
+@respx.mock
 async def test_notify_swallows_errors(config_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")

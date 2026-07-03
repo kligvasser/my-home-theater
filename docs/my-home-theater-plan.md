@@ -426,6 +426,30 @@ Each phase is shippable and has explicit acceptance criteria. Build in order.
   backup` + daily scheduler job, prunes to `keep`); real Alembic initial migration
   baseline (autogenerate verified empty on re-run); 77 tests. Retries/backoff exist
   on metadata calls; a provider circuit-breaker remains a future nicety.
+- **Phase 10 — Bug-fix sweep + taste/ML features.** ✅ **Done** — full-codebase
+  review fixed ~45 verified bugs, the big ones: secret redaction everywhere
+  exception text is stored/rendered/notified (`errors.redact_exc`); TMDb
+  movie/TV id namespaces de-conflated (`(tmdb_id, kind)` unique, kind-scoped
+  lookups in discovery/reconcile); rejected candidates never re-suggested (they
+  are training labels); scanner walk-then-write with per-file transaction
+  isolation, hidden/system-file filtering, full-path guessit parsing, sidecar
+  language validation, deleted-file pruning; enrichment per-title persistence
+  with duplicate-title merging and `last_enriched_at` retry stamping; TMDb
+  rating fallback when OMDb/IMDb data is missing; date-stamped 1-day trending
+  cache; candidate state machine guarded end-to-end (approve/reject/queue/sync,
+  `failed` state for vanished downloads, no rejected resurrection); Sonarr
+  series-complete semantics, queue pagination, v3 `languageProfileId`;
+  `reconcile_library` marks `arr_has_file` (+ Radarr file paths) so arr-owned
+  titles leave discovery; multi-episode files recorded; webhook token split
+  from the dashboard token; async routes/jobs moved off the event loop;
+  scheduler acquire sweep (`acquire_interval_minutes`) makes `auto_approve`
+  end-to-end. **Per-kind thresholds**: `thresholds.movie/series` overrides
+  (series default to a lower vote bar). **ML groundwork**: feature columns on
+  `title` (language, countries, certification, keywords, top cast, directors,
+  collection, seasons/episodes/status), `candidate.features` snapshots the
+  canonical feature vector (`homeTheater/features.py`) at decision time —
+  approve/reject/import decisions become labeled training rows for the
+  preference classifier. Migration `a1f3c9d27e54`; 135 tests, ruff+mypy clean.
 
 ---
 

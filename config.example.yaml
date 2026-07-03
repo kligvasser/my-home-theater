@@ -8,9 +8,16 @@ nas:
   tv_root: TV Shows
 
 thresholds:
+  # Global bars; movies and series can override below (series accumulate far
+  # fewer IMDb votes than films, so their vote bar defaults lower).
   min_imdb_rating: 7.0      # "high rank"
   min_imdb_votes: 25000     # "enough views"
   min_tmdb_votes: 500
+  tmdb_fallback: true       # judge on TMDb rating/votes when IMDb data is missing
+  movie: {}                 # e.g. { min_imdb_rating: 6.8 }
+  series:
+    min_imdb_votes: 5000
+    min_tmdb_votes: 200
   allowed_resolutions:
     - 1080p
     - 2160p
@@ -25,6 +32,7 @@ schedule:
   discovery_interval_minutes: 720
   subtitle_interval_minutes: 720
   sync_interval_minutes: 10
+  acquire_interval_minutes: 30            # queue approved candidates to the arrs
   import_reconcile_interval_minutes: 60   # 0 disables a job
   backup_interval_minutes: 1440           # daily SQLite backup
 
@@ -48,6 +56,7 @@ discovery:
 
 subtitles:
   languages: [he]       # target languages; Bazarr does the actual fetching
+  max_searches_per_sweep: 50  # cap Bazarr search triggers per scheduled sweep
 
 acquisition:
   # Quality profile NAMES as configured inside Radarr/Sonarr (release selection).

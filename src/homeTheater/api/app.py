@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from .. import __version__
 from ..config import get_config
 from ..db import init_db
-from ..logging_setup import configure_logging, get_logger
+from ..logging_setup import ensure_logging_configured, get_logger
 from . import candidates, catalog, health, status, subtitles, web, webhooks
 from .templates import STATIC_DIR
 
@@ -21,7 +21,8 @@ log = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     cfg = get_config()
-    configure_logging()
+    # No-op when the CLI already configured logging; its LOG_LEVEL/LOG_JSON win.
+    ensure_logging_configured()
     # Dev convenience: ensure tables exist. Production relies on Alembic.
     init_db()
     log.info(

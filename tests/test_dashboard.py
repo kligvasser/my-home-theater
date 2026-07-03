@@ -113,6 +113,21 @@ def test_html_pages_render(config_file: Path) -> None:
         assert r.status_code == 200
 
 
+def test_unknown_status_filter_is_handled(config_file: Path) -> None:
+    """Bad ?status= values must not 500: HTML falls back, JSON API rejects."""
+
+    _reset()
+    _seed()
+    from homeTheater.api import create_app
+
+    with TestClient(create_app()) as client:
+        r = client.get("/candidates", params={"status": "bogus"})
+        assert r.status_code == 200  # falls back to the "new" queue
+
+        r = client.get("/api/candidates", params={"status": "bogus"})
+        assert r.status_code == 422  # validated against CandidateStatus
+
+
 def test_json_api(config_file: Path) -> None:
     _reset()
     _seed()

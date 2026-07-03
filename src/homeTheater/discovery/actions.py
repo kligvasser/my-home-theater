@@ -1,7 +1,8 @@
 """Candidate review actions (approve / reject / manual add).
 
-These mutate state, so the API gates them behind the dashboard token. Approving a
-candidate only marks it ``approved`` here — handing it to Radarr/Sonarr is Phase 6.
+These mutate state, so the API gates them behind the dashboard token. The status
+transitions are guarded: once a candidate is queued/downloading/imported, the
+dashboard buttons can't silently contradict what Radarr/Sonarr are doing.
 """
 
 from __future__ import annotations
@@ -13,9 +14,18 @@ from ..config import AppConfig
 from ..db.base import utcnow
 from ..db.models import Candidate, CandidateSource, CandidateStatus, TitleKind
 from ..db.session import session_scope
+from ..errors import InvalidTransitionError, NotConfiguredError
+from ..features import extract_features
 from ..metadata.omdb import OMDbClient
 from ..metadata.tmdb import TMDbClient
 from .service import _upsert_title
+
+# from-status -> statuses a dashboard action may set
+_ALLOWED: dict[CandidateStatus, tuple[CandidateStatus, ...]] = {
+    CandidateStatus.new: (CandidateStatus.approved, CandidateStatus.rejected),
+    CandidateStatus.approved: (CandidateStatus.rejected,),
+    CandidateStatus.failed: (CandidateStatus.approved, CandidateStatus.rejected),
+}
 
 
 def _set_status(candidate_id: int, status: CandidateStatus) -> bool:
@@ -23,13 +33,20 @@ def _set_status(candidate_id: int, status: CandidateStatus) -> bool:
         cand = s.get(Candidate, candidate_id)
         if cand is None:
             return False
+        if cand.status == status:  # idempotent re-click
+            return True
+        if status not in _ALLOWED.get(cand.status, ()):
+            raise InvalidTransitionError(
+                f"candidate {candidate_id} is {cand.status.value}; "
+                f"cannot change it to {status.value} from the dashboard"
+            )
         cand.status = status
         cand.decided_at = utcnow()
         return True
 
 
 def approve(candidate_id: int) -> bool:
-    """Mark a candidate approved (queuing to Radarr/Sonarr comes in Phase 6)."""
+    """Mark a candidate approved (the acquire sweep hands it to Radarr/Sonarr)."""
 
     return _set_status(candidate_id, CandidateStatus.approved)
 
@@ -41,12 +58,13 @@ def reject(candidate_id: int) -> bool:
 async def add_manual(config: AppConfig, tmdb_id: int, kind: TitleKind) -> int:
     """Manually add a candidate by TMDb id: fetch details, upsert title, queue it.
 
-    Returns the new candidate id. Raises if the title already has a live candidate.
+    Returns the new candidate id. Raises if the title already has a live candidate
+    or the TMDb id doesn't exist for that kind.
     """
 
     secrets = config.secrets
     if secrets.tmdb_api_key is None:
-        raise ValueError("TMDB_API_KEY is not set in .env.")
+        raise NotConfiguredError("TMDB_API_KEY is not set in .env.")
 
     async with httpx.AsyncClient(timeout=15.0) as http:
         tmdb = TMDbClient(
@@ -55,7 +73,12 @@ async def add_manual(config: AppConfig, tmdb_id: int, kind: TitleKind) -> int:
             language=config.metadata.language,
             cache_days=config.metadata.cache_days,
         )
-        details = await tmdb.details(tmdb_id, kind)
+        try:
+            details = await tmdb.details(tmdb_id, kind)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise ValueError(f"TMDb has no {kind.value} with id {tmdb_id}") from exc
+            raise
         ratings = None
         if secrets.omdb_api_key is not None and details.imdb_id:
             omdb = OMDbClient(
@@ -92,6 +115,7 @@ async def add_manual(config: AppConfig, tmdb_id: int, kind: TitleKind) -> int:
             source=CandidateSource.manual,
             status=CandidateStatus.new,
             reason="manually added",
+            features=extract_features(title),
         )
         session.add(cand)
         session.flush()

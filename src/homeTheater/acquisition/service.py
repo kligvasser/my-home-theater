@@ -8,6 +8,7 @@ and renaming; we only add + monitor + track state.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -25,12 +26,17 @@ from ..db.models import (
     TitleKind,
 )
 from ..db.session import session_scope
+from ..errors import InvalidTransitionError, NotConfiguredError, redact_exc
 from ..logging_setup import bind_run, clear_run, get_logger
 from ..metadata.tmdb import TMDbClient
 from .arr import RadarrClient, SonarrClient
 from .base import LibraryAutomation
 
 log = get_logger(__name__)
+
+# A download that is neither in the arr queue nor produced a file for this long
+# is considered failed (grab dropped, indexer dead, removed by hand in the arr).
+STALE_DOWNLOAD_AFTER = timedelta(hours=6)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +65,7 @@ class SyncStats:
     checked: int = 0
     downloading: int = 0
     completed: int = 0
+    failed: int = 0
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -73,6 +80,8 @@ class _Snap:
     tmdb_id: int | None
     tvdb_id: int | None
     title: str
+    status: CandidateStatus
+    has_download: bool
 
 
 def _radarr(config: AppConfig, http: httpx.AsyncClient) -> RadarrClient | None:
@@ -103,7 +112,19 @@ def _load_snap(candidate_id: int) -> _Snap | None:
         title = s.get(Title, cand.title_id)
         if title is None:
             return None
-        return _Snap(cand.id, title.id, title.kind, title.tmdb_id, title.tvdb_id, title.title)
+        has_download = (
+            s.scalar(select(Download.id).where(Download.candidate_id == cand.id)) is not None
+        )
+        return _Snap(
+            cand.id,
+            title.id,
+            title.kind,
+            title.tmdb_id,
+            title.tvdb_id,
+            title.title,
+            cand.status,
+            has_download,
+        )
 
 
 async def _resolve_external_id(
@@ -140,17 +161,35 @@ def _profile_and_root(config: AppConfig, kind: TitleKind) -> tuple[str, str | No
 
 
 async def queue_candidate(config: AppConfig, candidate_id: int) -> QueueOutcome:
-    """Add one approved candidate to Radarr/Sonarr (or log intent in dry-run)."""
+    """Add one candidate to Radarr/Sonarr (or log intent in dry-run).
+
+    Idempotent and state-guarded: queueing implies approval (new/approved/failed
+    are queueable); an already-queued/downloading/imported candidate is a no-op;
+    a rejected candidate is an error.
+    """
 
     snap = _load_snap(candidate_id)
     if snap is None:
         raise ValueError(f"candidate {candidate_id} not found")
 
+    if snap.status in (
+        CandidateStatus.queued,
+        CandidateStatus.downloading,
+        CandidateStatus.imported,
+    ) or (snap.has_download and snap.status is not CandidateStatus.failed):
+        return QueueOutcome(
+            candidate_id, False, config.features.dry_run, None, f"already {snap.status.value}"
+        )
+    if snap.status is CandidateStatus.rejected:
+        raise InvalidTransitionError(
+            f"candidate {candidate_id} was rejected; approve it again before queueing"
+        )
+
     async with httpx.AsyncClient(timeout=20.0) as http:
         client = _client_for(snap.kind, config, http)
         if client is None:
             arr = "Radarr" if snap.kind is TitleKind.movie else "Sonarr"
-            raise ValueError(f"{arr} is not configured in .env for {snap.kind.value}s.")
+            raise NotConfiguredError(f"{arr} is not configured in .env for {snap.kind.value}s.")
 
         external_id = await _resolve_external_id(config, http, snap)
         if external_id is None:
@@ -179,18 +218,28 @@ async def queue_candidate(config: AppConfig, candidate_id: int) -> QueueOutcome:
         )
 
     with session_scope() as s:
-        s.add(
-            Download(
-                candidate_id=candidate_id,
-                external_id=str(result.external_id),
-                release=snap.title,
-                state="downloading" if config.acquisition.search_on_add else "queued",
+        existing = s.scalar(
+            select(Download).where(
+                Download.candidate_id == candidate_id,
+                Download.external_id == str(result.external_id),
             )
         )
+        if existing is None:
+            s.add(
+                Download(
+                    candidate_id=candidate_id,
+                    external_id=str(result.external_id),
+                    release=snap.title,
+                    state="downloading" if config.acquisition.search_on_add else "queued",
+                )
+            )
         cand = s.get(Candidate, candidate_id)
         if cand is not None:
             cand.status = CandidateStatus.queued
-    return QueueOutcome(candidate_id, True, False, result.external_id, "queued")
+            if cand.decided_at is None:
+                cand.decided_at = utcnow()
+    message = "queued (already in arr)" if result.already_existed else "queued"
+    return QueueOutcome(candidate_id, True, False, result.external_id, message)
 
 
 async def queue_approved(config: AppConfig) -> AcquireStats:
@@ -223,11 +272,11 @@ async def queue_approved(config: AppConfig) -> AcquireStats:
                     stats.errors.append(f"{cid}: {outcome.message}")
             except Exception as exc:
                 stats.skipped += 1
-                stats.errors.append(f"{cid}: {exc}")
+                stats.errors.append(f"{cid}: {redact_exc(exc)}")
         log.info("acquire.done", **stats.as_dict())
     except Exception as exc:
         status = RunStatus.failed
-        stats.errors.append(str(exc))
+        stats.errors.append(redact_exc(exc))
     finally:
         with session_scope() as s:
             job_run = s.get(JobRun, run_id)
@@ -239,8 +288,19 @@ async def queue_approved(config: AppConfig) -> AcquireStats:
     return stats
 
 
+def _aware(dt: datetime) -> datetime:
+    """SQLite can hand back naive datetimes for tz-aware columns; assume UTC."""
+
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
 async def sync_downloads(config: AppConfig) -> SyncStats:
-    """Poll Radarr/Sonarr for in-flight downloads and advance their state."""
+    """Poll Radarr/Sonarr for in-flight downloads and advance their state.
+
+    Never resurrects a rejected candidate, and downloads that vanished from the
+    arr queue without producing a file eventually flip to ``failed`` instead of
+    sitting in ``downloading`` forever.
+    """
 
     with session_scope() as s:
         rows: list[tuple[int, str, TitleKind]] = []
@@ -265,13 +325,18 @@ async def sync_downloads(config: AppConfig) -> SyncStats:
             try:
                 st = await client.status(int(external_id))
             except Exception as exc:
-                stats.errors.append(f"{external_id}: {exc}")
+                stats.errors.append(f"{external_id}: {redact_exc(exc)}")
                 continue
             with session_scope() as s:
                 dl = s.get(Download, download_id)
                 if dl is None:
                     continue
                 cand = s.get(Candidate, dl.candidate_id)
+                if cand is not None and cand.status is CandidateStatus.rejected:
+                    # The user rejected it after the grab; reflect that, don't
+                    # silently flip the candidate back to imported.
+                    dl.state = "cancelled"
+                    continue
                 if st.has_file:
                     dl.state = "completed"
                     dl.completed_at = utcnow()
@@ -283,4 +348,10 @@ async def sync_downloads(config: AppConfig) -> SyncStats:
                     if cand is not None:
                         cand.status = CandidateStatus.downloading
                     stats.downloading += 1
+                elif utcnow() - _aware(dl.created_at) > STALE_DOWNLOAD_AFTER:
+                    dl.state = "failed"
+                    dl.error = "no file and no longer in the arr queue"
+                    if cand is not None:
+                        cand.status = CandidateStatus.failed
+                    stats.failed += 1
     return stats

@@ -17,13 +17,21 @@ class Base(DeclarativeBase):
 
 
 class TimestampMixin:
-    """Adds created/updated timestamps managed by the DB where possible."""
+    """Adds created/updated timestamps.
+
+    The client-side ``default=utcnow`` always fires for ORM inserts so both
+    columns are consistently timezone-aware (SQLite's ``CURRENT_TIMESTAMP``
+    server default stores naive strings, and mixing naive and aware values
+    breaks datetime comparisons). The server default remains as a safety net
+    for non-ORM inserts.
+    """
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
+        DateTime(timezone=True), default=utcnow, server_default=func.now(), nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
+        default=utcnow,
         server_default=func.now(),
         onupdate=utcnow,
         nullable=False,

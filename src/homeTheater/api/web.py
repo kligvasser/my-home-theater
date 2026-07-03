@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from math import ceil
 
 from fastapi import APIRouter, Query, Request
@@ -18,6 +19,7 @@ from ..dashboard import (
     recent_runs,
 )
 from ..dashboard.queries import PAGE_SIZE
+from ..db.models import CandidateStatus
 from .templates import templates
 
 router = APIRouter(include_in_schema=False)
@@ -64,13 +66,18 @@ def library(
 
 @router.get("/candidates", response_class=HTMLResponse)
 def candidates(request: Request, status: str = "new") -> HTMLResponse:
+    # Unknown ?status= values would otherwise blow up at enum binding; fall back.
+    try:
+        shown = CandidateStatus(status)
+    except ValueError:
+        shown = CandidateStatus.new
     return templates.TemplateResponse(
         request,
         "candidates.html",
         {
-            "candidates": list_candidates(status=status),
+            "candidates": list_candidates(status=shown),
             "counts": candidate_counts(),
-            "status": status,
+            "status": str(shown),
             "active": "candidates",
             "version": __version__,
         },
@@ -98,12 +105,14 @@ async def status_page(request: Request) -> HTMLResponse:
     from ..health import check_all
 
     cfg = get_config()
+    # recent_runs is sync SQLAlchemy; keep it off the event loop.
+    runs = await asyncio.to_thread(recent_runs, 50)
     return templates.TemplateResponse(
         request,
         "status.html",
         {
             "providers": await check_all(cfg),
-            "failures": [r for r in recent_runs(50) if r.status == "failed"],
+            "failures": [r for r in runs if r.status == "failed"],
             "dry_run": cfg.features.dry_run,
             "auto_approve": cfg.features.auto_approve,
             "scheduler": cfg.schedule.enabled,

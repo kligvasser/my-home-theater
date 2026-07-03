@@ -1,7 +1,10 @@
 """Discovery orchestration (plan §5.4): gather -> dedup -> enrich -> filter -> rank.
 
 Writes ranked ``candidate`` rows with human-readable reasons, excluding titles you
-already own or already have a live candidate for. Honors ``auto_approve``.
+already own (on disk or in Radarr/Sonarr), already have a live candidate for, or
+already rejected. Honors ``auto_approve``. Each created candidate snapshots its
+feature vector (``Candidate.features``) — the training data for the preference
+model, labeled later by your approve/reject/import decisions.
 """
 
 from __future__ import annotations
@@ -20,7 +23,6 @@ from ..db.models import (
     Candidate,
     CandidateSource,
     CandidateStatus,
-    Genre,
     JobRun,
     OwnedFile,
     RunStatus,
@@ -28,9 +30,12 @@ from ..db.models import (
     TitleKind,
 )
 from ..db.session import session_scope
+from ..errors import NotConfiguredError, redact_exc
+from ..features import extract_features
 from ..logging_setup import bind_run, clear_run, get_logger
 from ..metadata.dto import OmdbRatings, TmdbTitle
 from ..metadata.omdb import OMDbClient
+from ..metadata.service import apply_tmdb_details
 from ..metadata.tmdb import TMDbClient
 from .filters import evaluate, score
 from .sources import Discovered, build_sources
@@ -44,6 +49,12 @@ LIVE_STATUSES = (
     CandidateStatus.downloading,
 )
 
+# A rejected title stays rejected: trending will resurface it forever otherwise,
+# and the rejection is a training label we must not bury under duplicates.
+BLOCKING_STATUSES = (*LIVE_STATUSES, CandidateStatus.rejected)
+
+_Key = tuple[TitleKind, int]
+
 
 @dataclass
 class DiscoveryStats:
@@ -52,6 +63,7 @@ class DiscoveryStats:
     deduped: int = 0
     owned_skipped: int = 0
     live_skipped: int = 0
+    rejected_skipped: int = 0
     considered: int = 0
     created: int = 0
     filtered: int = 0
@@ -69,31 +81,36 @@ class _Enriched:
     error: str | None = None
 
 
-def _owned_and_live() -> tuple[set[int], set[int]]:
-    """TMDb ids that are already owned, and that already have a live candidate."""
+def _owned_live_rejected() -> tuple[set[_Key], set[_Key], set[_Key]]:
+    """(kind, tmdb_id) sets: owned, with a live candidate, with a rejection.
+
+    Keyed by kind because TMDb movie and TV ids are independent sequences —
+    a bare tmdb_id match would confuse tv/1396 with movie/1396.
+    """
 
     with session_scope() as s:
-        owned = {
-            tid
-            for (tid,) in s.execute(
-                select(Title.tmdb_id).where(
-                    Title.tmdb_id.is_not(None),
-                    exists().where(OwnedFile.title_id == Title.id),
-                )
+
+        def _ids(*where: Any) -> set[_Key]:
+            rows = s.execute(
+                select(Title.kind, Title.tmdb_id).where(Title.tmdb_id.is_not(None), *where)
             ).all()
-        }
-        live = {
-            tid
-            for (tid,) in s.execute(
-                select(Title.tmdb_id).where(
-                    Title.tmdb_id.is_not(None),
-                    exists().where(
-                        (Candidate.title_id == Title.id) & (Candidate.status.in_(LIVE_STATUSES))
-                    ),
-                )
-            ).all()
-        }
-        return owned, live
+            return {(kind, tid) for kind, tid in rows}
+
+        owned = _ids(
+            exists().where(OwnedFile.title_id == Title.id) | Title.arr_has_file.is_(True)
+        )
+        live = _ids(
+            exists().where(
+                (Candidate.title_id == Title.id) & (Candidate.status.in_(LIVE_STATUSES))
+            )
+        )
+        rejected = _ids(
+            exists().where(
+                (Candidate.title_id == Title.id)
+                & (Candidate.status == CandidateStatus.rejected)
+            )
+        )
+        return owned, live, rejected
 
 
 async def _enrich(
@@ -109,43 +126,41 @@ async def _enrich(
             )
             return _Enriched(disc, details, ratings)
         except Exception as exc:
-            log.warning("discovery.enrich_failed", title=disc.tmdb.title, error=str(exc))
-            return _Enriched(disc, None, None, error=str(exc))
-
-
-def _get_or_create_genre(session: Session, name: str) -> Genre:
-    genre: Genre | None = session.scalar(select(Genre).where(Genre.name == name))
-    if genre is None:
-        genre = Genre(name=name)
-        session.add(genre)
-        session.flush()
-    return genre
+            log.warning("discovery.enrich_failed", title=disc.tmdb.title, error=redact_exc(exc))
+            return _Enriched(disc, None, None, error=redact_exc(exc))
 
 
 def _upsert_title(session: Session, kind: TitleKind, t: TmdbTitle) -> Title:
-    title = session.scalar(select(Title).where(Title.tmdb_id == t.tmdb_id))
+    """Get-or-create by (tmdb_id, kind) — never flips an existing row's kind."""
+
+    title = session.scalar(
+        select(Title).where(Title.tmdb_id == t.tmdb_id, Title.kind == kind)
+    )
     if title is None:
         title = Title(tmdb_id=t.tmdb_id, kind=kind, title=t.title)
         session.add(title)
-    title.kind = kind
-    title.title = t.title or title.title
-    title.imdb_id = t.imdb_id or title.imdb_id
-    title.tvdb_id = t.tvdb_id or title.tvdb_id
-    title.year = t.year or title.year
-    title.runtime = t.runtime
-    title.tmdb_rating = t.tmdb_rating
-    title.tmdb_votes = t.tmdb_votes
-    title.popularity = t.popularity
-    title.poster_url = t.poster_url
-    title.overview = t.overview
-    if t.genres:
-        title.genres = [_get_or_create_genre(session, g) for g in t.genres]
+    apply_tmdb_details(session, title, t)
     session.flush()
     return title
 
 
+def _blocked_in_db(session: Session, title_id: int) -> str | None:
+    """Re-check owned/live/rejected inside the write transaction (TOCTOU guard)."""
+
+    status = session.scalar(
+        select(Candidate.status).where(
+            Candidate.title_id == title_id, Candidate.status.in_(BLOCKING_STATUSES)
+        )
+    )
+    if status is not None:
+        return f"candidate already {status.value}"
+    owned = session.scalar(select(OwnedFile.id).where(OwnedFile.title_id == title_id))
+    if owned is not None:
+        return "already owned"
+    return None
+
+
 def _persist(enriched: list[_Enriched], config: AppConfig, stats: DiscoveryStats) -> None:
-    thresholds = config.thresholds
     excluded = config.discovery.excluded_genres
     auto = config.features.auto_approve
 
@@ -166,12 +181,18 @@ def _persist(enriched: list[_Enriched], config: AppConfig, stats: DiscoveryStats
             if imdb_votes is not None:
                 title.imdb_votes = imdb_votes
 
+            blocked = _blocked_in_db(session, title.id)
+            if blocked is not None:
+                stats.live_skipped += 1
+                continue
+
             outcome = evaluate(
                 imdb_rating=imdb_rating,
                 imdb_votes=imdb_votes,
+                tmdb_rating=details.tmdb_rating,
                 tmdb_votes=details.tmdb_votes,
                 genres=details.genres,
-                thresholds=thresholds,
+                thresholds=config.thresholds.for_kind(item.disc.kind.value),
                 excluded_genres=excluded,
             )
             if not outcome.passed:
@@ -185,7 +206,14 @@ def _persist(enriched: list[_Enriched], config: AppConfig, stats: DiscoveryStats
                     source=CandidateSource.discovery,
                     status=CandidateStatus.approved if auto else CandidateStatus.new,
                     reason=reason,
-                    score=score(imdb_rating, imdb_votes, details.popularity),
+                    score=score(
+                        imdb_rating,
+                        imdb_votes,
+                        details.popularity,
+                        tmdb_rating=details.tmdb_rating,
+                        tmdb_votes=details.tmdb_votes,
+                    ),
+                    features=extract_features(title),
                     decided_at=utcnow() if auto else None,
                 )
             )
@@ -197,7 +225,7 @@ async def run_discovery(config: AppConfig) -> DiscoveryStats:
 
     secrets = config.secrets
     if secrets.tmdb_api_key is None:
-        raise ValueError("TMDB_API_KEY is not set in .env; discovery needs it.")
+        raise NotConfiguredError("TMDB_API_KEY is not set in .env; discovery needs it.")
 
     with session_scope() as session:
         run = JobRun(kind="discovery", started_at=utcnow(), status=RunStatus.running)
@@ -231,6 +259,11 @@ async def run_discovery(config: AppConfig) -> DiscoveryStats:
                     if secrets.omdb_api_key is not None
                     else None
                 )
+                if omdb is None:
+                    log.warning(
+                        "discovery.no_omdb",
+                        detail="OMDB_API_KEY unset; falling back to TMDb ratings",
+                    )
 
                 fetched_lists = await asyncio.gather(
                     *(s.fetch(tmdb, config.discovery.max_per_source) for s in sources)
@@ -239,18 +272,20 @@ async def run_discovery(config: AppConfig) -> DiscoveryStats:
                 stats.fetched = len(discovered)
 
                 # Dedup by (kind, tmdb_id), keeping the first source that surfaced it.
-                seen: dict[tuple[TitleKind, int], Discovered] = {}
+                seen: dict[_Key, Discovered] = {}
                 for d in discovered:
                     seen.setdefault((d.kind, d.tmdb.tmdb_id), d)
                 stats.deduped = len(seen)
 
-                owned, live = _owned_and_live()
+                owned, live, rejected = _owned_live_rejected()
                 to_consider: list[Discovered] = []
-                for d in seen.values():
-                    if d.tmdb.tmdb_id in owned:
+                for (kind, tid), d in seen.items():
+                    if (kind, tid) in owned:
                         stats.owned_skipped += 1
-                    elif d.tmdb.tmdb_id in live:
+                    elif (kind, tid) in live:
                         stats.live_skipped += 1
+                    elif (kind, tid) in rejected:
+                        stats.rejected_skipped += 1
                     else:
                         to_consider.append(d)
                 stats.considered = len(to_consider)
@@ -260,8 +295,8 @@ async def run_discovery(config: AppConfig) -> DiscoveryStats:
         log.info("discovery.done", **stats.as_dict())
     except Exception as exc:
         status = RunStatus.failed
-        stats.errors.append(str(exc))
-        log.error("discovery.failed", error=str(exc))
+        stats.errors.append(redact_exc(exc))
+        log.error("discovery.failed", error=redact_exc(exc))
     finally:
         with session_scope() as session:
             job_run = session.get(JobRun, run_id)

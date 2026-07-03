@@ -7,13 +7,20 @@ included). Keeps the newest ``keep`` snapshots and prunes the rest.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from ..config import AppConfig
 from ..db.base import utcnow
+from ..errors import NotConfiguredError
 from ..logging_setup import get_logger
 
 log = get_logger(__name__)
+
+# Snapshots are stamped "<stem>-YYYYMMDD-HHMMSS.db"; pruning matches exactly
+# that shape so an unrelated "<stem>-notes.db" in the folder is never deleted.
+_STAMP_FORMAT = "%Y%m%d-%H%M%S"
+_STAMP_GLOB = "[0-9]" * 8 + "-" + "[0-9]" * 6
 
 
 def _sqlite_path(url: str) -> Path:
@@ -29,16 +36,23 @@ def backup_database(config: AppConfig, dest_dir: str | Path | None = None, keep:
     """Snapshot the SQLite DB to a timestamped file and prune old backups."""
 
     src = _sqlite_path(config.database.url)
+    if not src.exists():
+        # sqlite3.connect would silently create an empty DB at src and "back
+        # up" nothing — fail loudly instead (likely a wrong database.url/cwd).
+        raise NotConfiguredError(f"SQLite database not found at {src}; nothing to back up")
     out_dir = Path(dest_dir) if dest_dir else src.parent / "backups"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    stamp = utcnow().strftime("%Y%m%d-%H%M%S")
+    stamp = utcnow().strftime(_STAMP_FORMAT)
     dest = out_dir / f"{src.stem}-{stamp}.db"
 
-    with sqlite3.connect(str(src)) as source, sqlite3.connect(str(dest)) as target:
+    with (
+        closing(sqlite3.connect(str(src))) as source,
+        closing(sqlite3.connect(str(dest))) as target,
+    ):
         source.backup(target)
 
-    backups = sorted(out_dir.glob(f"{src.stem}-*.db"))
+    backups = sorted(out_dir.glob(f"{src.stem}-{_STAMP_GLOB}.db"))
     for old in backups[: max(0, len(backups) - keep)]:
         old.unlink(missing_ok=True)
 

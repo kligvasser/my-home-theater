@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 
 import httpx
@@ -33,6 +34,11 @@ async def get_json(
             resp = await client.get(url, params=params)
             if resp.status_code in RETRY_STATUSES and attempt < max_retries:
                 delay = backoff_base * (2**attempt)
+                # Rate-limit responses say how long to wait; honor it (capped).
+                retry_after = resp.headers.get("Retry-After")
+                if retry_after is not None:
+                    with contextlib.suppress(ValueError):
+                        delay = min(float(retry_after), 30.0)
                 log.warning("http.retry", url=url, status=resp.status_code, delay=delay)
                 await asyncio.sleep(delay)
                 continue

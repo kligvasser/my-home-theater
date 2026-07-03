@@ -48,6 +48,13 @@ class _Arr:
             raise ValueError(f"No root folders configured in {self._base}")
         return str(folders[0]["path"])
 
+    async def _queue_records(self) -> list[dict[str, Any]]:
+        # Explicit pageSize: the default is 10, which hides items in any real
+        # queue and makes "downloading" look false.
+        queue = await self._get("/api/v3/queue", {"pageSize": 1000})
+        records = queue.get("records", []) if isinstance(queue, dict) else queue
+        return list(records)
+
 
 class RadarrClient(_Arr):
     kind = TitleKind.movie
@@ -76,9 +83,7 @@ class RadarrClient(_Arr):
 
     async def status(self, item_id: int) -> ItemStatus:
         movie = await self._get(f"/api/v3/movie/{item_id}")
-        queue = await self._get("/api/v3/queue")
-        records = queue.get("records", []) if isinstance(queue, dict) else queue
-        downloading = any(r.get("movieId") == item_id for r in records)
+        downloading = any(r.get("movieId") == item_id for r in await self._queue_records())
         return ItemStatus(
             monitored=bool(movie.get("monitored")),
             has_file=bool(movie.get("hasFile")),
@@ -88,7 +93,12 @@ class RadarrClient(_Arr):
     async def list_owned(self) -> list[OwnedRef]:
         return [
             OwnedRef(
-                int(m["id"]), m.get("title", ""), m.get("tmdbId"), None, bool(m.get("hasFile"))
+                int(m["id"]),
+                m.get("title", ""),
+                m.get("tmdbId"),
+                None,
+                bool(m.get("hasFile")),
+                path=(m.get("movieFile") or {}).get("path"),
             )
             for m in await self._get("/api/v3/movie")
         ]
@@ -116,18 +126,29 @@ class SonarrClient(_Arr):
                 "addOptions": {"searchForMissingEpisodes": search},
             }
         )
+        # Sonarr v3 requires a languageProfileId; v4 removed the endpoint (404).
+        language_profile = await self._language_profile_id()
+        if language_profile is not None:
+            payload["languageProfileId"] = language_profile
         created = await self._post("/api/v3/series", payload)
         return AddResult(int(created["id"]), created.get("title", ""))
+
+    async def _language_profile_id(self) -> int | None:
+        try:
+            profiles = await self._get("/api/v3/languageprofile")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:  # Sonarr v4
+                return None
+            raise
+        return int(profiles[0]["id"]) if profiles else None
 
     async def status(self, item_id: int) -> ItemStatus:
         series = await self._get(f"/api/v3/series/{item_id}")
         stats = series.get("statistics", {})
-        queue = await self._get("/api/v3/queue")
-        records = queue.get("records", []) if isinstance(queue, dict) else queue
-        downloading = any(r.get("seriesId") == item_id for r in records)
+        downloading = any(r.get("seriesId") == item_id for r in await self._queue_records())
         return ItemStatus(
             monitored=bool(series.get("monitored")),
-            has_file=bool(stats.get("episodeFileCount", 0)),
+            has_file=_series_complete(stats),
             downloading=downloading,
         )
 
@@ -145,3 +166,15 @@ class SonarrClient(_Arr):
                 )
             )
         return out
+
+
+def _series_complete(stats: dict[str, Any]) -> bool:
+    """'Done' for a series = all monitored episodes on disk, not just the first
+    file that landed (which is what a bare episodeFileCount check reports)."""
+
+    percent = stats.get("percentOfEpisodes")
+    if isinstance(percent, int | float):
+        return percent >= 100.0
+    files = int(stats.get("episodeFileCount") or 0)
+    episodes = int(stats.get("episodeCount") or 0)
+    return files > 0 and episodes > 0 and files >= episodes

@@ -56,7 +56,13 @@ class OMDbClient:
                 BASE_URL,
                 {"apikey": self._api_key, "i": imdb_id},
             )
-            cache_set(PROVIDER, key, cached)
+            # Cache successes and definitive not-founds only. Transient failures
+            # ("Request limit reached!" arrives as a 200 + Response=False) must
+            # not poison the cache for cache_days.
+            error = str(cached.get("Error") or "")
+            definitive = cached.get("Response") != "False" or "not found" in error.lower()
+            if definitive:
+                cache_set(PROVIDER, key, cached)
 
         if cached.get("Response") == "False":
             return OmdbRatings()

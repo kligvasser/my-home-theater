@@ -29,6 +29,7 @@ class ImportEvent:
     size_bytes: int | None = None
     season: int | None = None
     episode: int | None = None
+    episode_end: int | None = None  # multi-episode files (S01E01E02)
 
 
 def _resolution(quality: dict[str, Any] | None, media_info: dict[str, Any] | None) -> str | None:
@@ -66,7 +67,9 @@ def parse_radarr(payload: dict[str, Any]) -> ImportEvent | None:
         year=movie.get("year"),
         tmdb_id=movie.get("tmdbId"),
         imdb_id=movie.get("imdbId"),
-        path=movie_file.get("path") or movie.get("folderPath"),
+        # File path only — folderPath is a directory and would create a bogus
+        # OwnedFile row the scanner can never match.
+        path=movie_file.get("path"),
         resolution=_resolution(movie_file.get("quality"), movie_file.get("mediaInfo")),
         size_bytes=movie_file.get("size"),
     )
@@ -79,6 +82,10 @@ def parse_sonarr(payload: dict[str, Any]) -> ImportEvent | None:
     episodes = payload.get("episodes") or []
     episode_file = payload.get("episodeFile") or {}
     first = episodes[0] if episodes else {}
+    # A multi-episode file (S01E01E02) arrives as one event listing all episodes.
+    numbers = sorted(
+        n for e in episodes if isinstance(n := e.get("episodeNumber"), int)
+    )
     return ImportEvent(
         kind=TitleKind.series,
         title=series.get("title", ""),
@@ -90,5 +97,6 @@ def parse_sonarr(payload: dict[str, Any]) -> ImportEvent | None:
         resolution=_resolution(episode_file.get("quality"), episode_file.get("mediaInfo")),
         size_bytes=episode_file.get("size"),
         season=first.get("seasonNumber"),
-        episode=first.get("episodeNumber"),
+        episode=numbers[0] if numbers else first.get("episodeNumber"),
+        episode_end=numbers[-1] if len(numbers) > 1 else None,
     )

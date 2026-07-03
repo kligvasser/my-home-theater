@@ -7,7 +7,7 @@ Layering (see plan §5.1): defaults (these models) -> ``config.yaml`` (non-secre
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,13 +19,59 @@ class NASPaths(BaseModel):
     share: str | None = Field(None, description="SMB share name if paths are relative")
 
 
+class KindThresholds(BaseModel):
+    """Optional per-kind overrides; ``None`` falls back to the global value."""
+
+    min_imdb_rating: float | None = Field(None, ge=0, le=10)
+    min_imdb_votes: int | None = Field(None, ge=0)
+    min_tmdb_votes: int | None = Field(None, ge=0)
+
+
+class ResolvedThresholds(BaseModel):
+    """Thresholds flattened for one title kind — what the filter actually applies."""
+
+    model_config = {"frozen": True}
+
+    min_imdb_rating: float
+    min_imdb_votes: int
+    min_tmdb_votes: int
+    tmdb_fallback: bool
+
+
 class Thresholds(BaseModel):
-    """Discovery filters: 'high rank with enough views'."""
+    """Discovery filters: 'high rank with enough views'.
+
+    Movies and series have very different vote economics (a hit film gets 10-50x
+    the IMDb votes of an equally-loved series), so each kind can override the
+    global bars via ``movie:`` / ``series:``.
+    """
 
     min_imdb_rating: float = Field(7.0, ge=0, le=10)
     min_imdb_votes: int = Field(25_000, ge=0)
     min_tmdb_votes: int = Field(500, ge=0)
+    # When IMDb data is missing (no OMDb key, or a title OMDb doesn't know yet),
+    # fall back to TMDb rating/votes instead of rejecting everything.
+    tmdb_fallback: bool = True
     allowed_resolutions: list[str] = Field(default_factory=lambda: ["1080p", "2160p"])
+    movie: KindThresholds = Field(default_factory=KindThresholds)
+    series: KindThresholds = Field(
+        default_factory=lambda: KindThresholds(min_imdb_votes=5_000, min_tmdb_votes=200)
+    )
+
+    def for_kind(self, kind: str) -> ResolvedThresholds:
+        over = self.movie if kind == "movie" else self.series
+        return ResolvedThresholds(
+            min_imdb_rating=(
+                over.min_imdb_rating if over.min_imdb_rating is not None else self.min_imdb_rating
+            ),
+            min_imdb_votes=(
+                over.min_imdb_votes if over.min_imdb_votes is not None else self.min_imdb_votes
+            ),
+            min_tmdb_votes=(
+                over.min_tmdb_votes if over.min_tmdb_votes is not None else self.min_tmdb_votes
+            ),
+            tmdb_fallback=self.tmdb_fallback,
+        )
 
 
 class FeatureFlags(BaseModel):
@@ -43,6 +89,7 @@ class Schedule(BaseModel):
     discovery_interval_minutes: int = Field(720, ge=0)
     subtitle_interval_minutes: int = Field(720, ge=0)
     sync_interval_minutes: int = Field(10, ge=0)
+    acquire_interval_minutes: int = Field(30, ge=0)  # queue approved candidates
     import_reconcile_interval_minutes: int = Field(60, ge=0)
     backup_interval_minutes: int = Field(1440, ge=0)  # daily DB backup
 
@@ -76,6 +123,9 @@ class Subtitles(BaseModel):
     """Subtitle coverage/automation (plan §5.5). Bazarr does the fetching."""
 
     languages: list[str] = Field(default_factory=lambda: ["he"])
+    # Cap Bazarr search-missing triggers per sweep so a big backlog doesn't burn
+    # provider quotas in one scheduled run.
+    max_searches_per_sweep: int = Field(50, ge=1)
 
     @property
     def primary(self) -> str:
@@ -130,6 +180,10 @@ class Secrets(BaseSettings):
 
     # Dashboard auth (required before any mutating endpoint is exposed)
     dashboard_token: SecretStr | None = None
+    # Separate secret for Radarr/Sonarr webhook URLs (?token=...). Falls back to
+    # dashboard_token, but a distinct value keeps the dashboard token out of arr
+    # configs and access logs.
+    webhook_token: SecretStr | None = None
 
 
 class AppConfig(BaseModel):
@@ -146,9 +200,3 @@ class AppConfig(BaseModel):
     acquisition: Acquisition = Field(default_factory=Acquisition)
     enabled_providers: list[str] = Field(default_factory=list)
     secrets: Secrets = Field(default_factory=Secrets, repr=False)
-
-    @model_validator(mode="after")
-    def _validate(self) -> AppConfig:
-        if self.thresholds.min_imdb_rating > 10:
-            raise ValueError("min_imdb_rating must be <= 10")
-        return self

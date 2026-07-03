@@ -33,6 +33,7 @@ class OwnedRef:
     tmdb_id: int | None
     tvdb_id: int | None
     has_file: bool
+    path: str | None = None  # media file path when the arr reports one (Radarr)
 
 
 class LibraryAutomation(Protocol):

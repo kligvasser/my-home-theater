@@ -73,9 +73,12 @@ class RunStatus(enum.StrEnum):
 
 class Title(Base, TimestampMixin):
     __tablename__ = "title"
+    # TMDb movie ids and TV ids are independent sequences (tv/1396 != movie/1396),
+    # so uniqueness — and every lookup — must be scoped by kind.
+    __table_args__ = (UniqueConstraint("tmdb_id", "kind", name="uq_title_tmdb_kind"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    tmdb_id: Mapped[int | None] = mapped_column(Integer, index=True, unique=True)
+    tmdb_id: Mapped[int | None] = mapped_column(Integer, index=True)
     imdb_id: Mapped[str | None] = mapped_column(String(16), index=True, unique=True)
     tvdb_id: Mapped[int | None] = mapped_column(Integer, index=True)  # Sonarr keys on this
     kind: Mapped[TitleKind] = mapped_column(_enum(TitleKind))
@@ -89,6 +92,28 @@ class Title(Base, TimestampMixin):
     popularity: Mapped[float | None] = mapped_column(Float)
     poster_url: Mapped[str | None] = mapped_column(String(1024))
     overview: Mapped[str | None] = mapped_column(Text)
+
+    # --- taste/ML features (plan: characterize the library, train a preference
+    # model). Populated by metadata enrichment; snapshotted onto candidates at
+    # decision time (Candidate.features) so labels keep their era's feature values.
+    original_language: Mapped[str | None] = mapped_column(String(8))
+    origin_countries: Mapped[list[str] | None] = mapped_column(JSON)
+    release_date: Mapped[str | None] = mapped_column(String(10))  # ISO yyyy-mm-dd
+    certification: Mapped[str | None] = mapped_column(String(16))  # US content rating
+    keywords: Mapped[list[str] | None] = mapped_column(JSON)  # TMDb keywords
+    cast_top: Mapped[list[str] | None] = mapped_column(JSON)  # top-billed cast names
+    directors: Mapped[list[str] | None] = mapped_column(JSON)  # directors / creators
+    collection_tmdb_id: Mapped[int | None] = mapped_column(Integer)  # franchise
+    collection_name: Mapped[str | None] = mapped_column(String(256))
+    seasons_count: Mapped[int | None] = mapped_column(Integer)  # series only
+    episodes_count: Mapped[int | None] = mapped_column(Integer)  # series only
+    series_status: Mapped[str | None] = mapped_column(String(32))  # Ended/Returning…
+    # Radarr/Sonarr report a file for this title (set by reconcile_library) —
+    # counts as "owned" for discovery even before the NAS scanner sees the file.
+    arr_has_file: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Last enrichment attempt: keeps titles the providers can't resolve (or that
+    # legitimately have no IMDb rating) from being re-enqueued on every run.
+    last_enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     genres: Mapped[list[Genre]] = relationship(secondary="title_genre", back_populates="titles")
     owned_files: Mapped[list[OwnedFile]] = relationship(
@@ -123,6 +148,7 @@ class OwnedFile(Base, TimestampMixin):
     kind: Mapped[TitleKind] = mapped_column(_enum(TitleKind))
     season: Mapped[int | None] = mapped_column(Integer)
     episode: Mapped[int | None] = mapped_column(Integer)
+    episode_end: Mapped[int | None] = mapped_column(Integer)  # multi-episode files
     resolution: Mapped[str | None] = mapped_column(String(16))
     codec: Mapped[str | None] = mapped_column(String(32))
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
@@ -144,6 +170,9 @@ class Candidate(Base, TimestampMixin):
     )
     reason: Mapped[str | None] = mapped_column(Text)
     score: Mapped[float | None] = mapped_column(Float)
+    # Feature snapshot at creation time (see homeTheater.features): training data
+    # for the preference model — approve/reject/import decisions are the labels.
+    features: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     title: Mapped[Title] = relationship(back_populates="candidates")

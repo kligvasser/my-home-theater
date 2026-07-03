@@ -41,8 +41,8 @@ class TmdbTrendingSource:
         return f"trending {self.kind.value} ({self.window})"
 
     async def fetch(self, client: TMDbClient, limit: int) -> list[Discovered]:
-        items = await client.trending(self.kind, self.window)
-        return [Discovered(t, self.kind, self.name) for t in items[:limit]]
+        items = await client.trending(self.kind, self.window, limit=limit)
+        return [Discovered(t, self.kind, self.name) for t in items]
 
 
 @dataclass
@@ -54,8 +54,8 @@ class TmdbTopRatedSource:
         return f"top-rated {self.kind.value}"
 
     async def fetch(self, client: TMDbClient, limit: int) -> list[Discovered]:
-        items = await client.top_rated(self.kind)
-        return [Discovered(t, self.kind, self.name) for t in items[:limit]]
+        items = await client.top_rated(self.kind, limit=limit)
+        return [Discovered(t, self.kind, self.name) for t in items]
 
 
 def build_sources(config: Discovery) -> list[CandidateSource]:

@@ -8,15 +8,36 @@ discovery run is greppable end to end.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from typing import Any
 
 import structlog
 
+_configured = False
+
+
+def ensure_logging_configured() -> None:
+    """Configure logging from ``LOG_LEVEL``/``LOG_JSON`` env unless already done.
+
+    The app lifespan calls this so logging works when the app module is imported
+    directly (tests, ``uvicorn --reload`` workers) *without* clobbering an
+    explicit :func:`configure_logging` call made by the CLI entry point.
+    """
+
+    if _configured:
+        return
+    configure_logging(
+        level=os.environ.get("LOG_LEVEL", "INFO"),
+        json_logs=os.environ.get("LOG_JSON", "").lower() in {"1", "true", "yes"},
+    )
+
 
 def configure_logging(level: str = "INFO", json_logs: bool = False) -> None:
     """Configure stdlib + structlog. ``json_logs`` for container/prod, pretty for dev."""
 
+    global _configured
+    _configured = True
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,

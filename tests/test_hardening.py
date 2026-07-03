@@ -51,6 +51,45 @@ async def test_health_reports_unreachable(
     assert by_name["tmdb"].configured and by_name["tmdb"].ok is False
 
 
+@respx.mock
+async def test_health_detail_redacts_api_key(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """httpx errors embed the request URL (key included); detail must not."""
+
+    monkeypatch.setenv("TMDB_API_KEY", "sekret123")
+    _reset()
+    from homeTheater.config import get_config
+    from homeTheater.health import check_all
+
+    respx.get("https://api.themoviedb.org/3/configuration").mock(return_value=httpx.Response(401))
+    by_name = {s.name: s for s in await check_all(get_config())}
+    tmdb = by_name["tmdb"]
+    assert tmdb.ok is False
+    assert "sekret123" not in tmdb.detail
+    assert "api_key=REDACTED" in tmdb.detail
+
+
+@respx.mock
+async def test_health_results_are_cached(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unauthenticated status hits must not probe providers on every call."""
+
+    monkeypatch.setenv("TMDB_API_KEY", "k")
+    _reset()
+    from homeTheater.config import get_config
+    from homeTheater.health import check_all
+
+    route = respx.get("https://api.themoviedb.org/3/configuration").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    first = await check_all(get_config())
+    second = await check_all(get_config())
+    assert route.call_count == 1
+    assert first == second
+
+
 def test_backup_creates_valid_snapshot(config_file: Path, tmp_path: Path) -> None:
     _reset()
     from homeTheater.backup import backup_database

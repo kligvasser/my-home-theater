@@ -120,3 +120,134 @@ async def test_enrich_backfills_catalog(config_file: Path, monkeypatch: pytest.M
         assert title.imdb_votes == 1_900_000  # parsed from "1,900,000"
         assert title.runtime == 136
         assert {g.name for g in title.genres} == {"Action", "Science Fiction"}
+
+
+MATRIX_FEATURES = {
+    **MATRIX_DETAILS,
+    "original_language": "en",
+    "production_countries": [{"iso_3166_1": "US"}],
+    "belongs_to_collection": {"id": 2344, "name": "The Matrix Collection"},
+    "keywords": {"keywords": [{"id": 1, "name": "cyberpunk"}, {"id": 2, "name": "dystopia"}]},
+    "credits": {
+        "cast": [{"name": "Keanu Reeves"}, {"name": "Carrie-Anne Moss"}],
+        "crew": [
+            {"name": "Lana Wachowski", "job": "Director"},
+            {"name": "Bill Pope", "job": "Director of Photography"},
+        ],
+    },
+    "release_dates": {
+        "results": [
+            {"iso_3166_1": "US", "release_dates": [{"certification": "R", "type": 3}]}
+        ]
+    },
+}
+
+
+@respx.mock
+async def test_enrich_populates_ml_features(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_env(monkeypatch)
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Title
+    from homeTheater.metadata import enrich_catalog
+
+    init_db()
+    with session_scope() as s:
+        s.add(Title(title="The Matrix", year=1999, kind=TitleKind.movie))
+
+    respx.get(f"{TMDB}/search/movie").mock(return_value=httpx.Response(200, json=MATRIX_SEARCH))
+    respx.get(f"{TMDB}/movie/603").mock(return_value=httpx.Response(200, json=MATRIX_FEATURES))
+    respx.get(OMDB).mock(return_value=httpx.Response(200, json=MATRIX_OMDB))
+
+    await enrich_catalog(get_config())
+
+    with session_scope() as s:
+        t = s.query(Title).one()
+        assert t.original_language == "en"
+        assert t.origin_countries == ["US"]
+        assert t.certification == "R"
+        assert t.keywords == ["cyberpunk", "dystopia"]
+        assert t.cast_top == ["Keanu Reeves", "Carrie-Anne Moss"]
+        assert t.directors == ["Lana Wachowski"]  # DP is not a director
+        assert t.collection_tmdb_id == 2344
+        assert t.release_date == "1999-03-30"
+        assert t.last_enriched_at is not None
+
+        from homeTheater.features import extract_features
+
+        feats = extract_features(t)
+        assert feats["decade"] == 1990 and feats["in_collection"] is True
+
+
+@respx.mock
+async def test_enrich_merges_duplicate_titles(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two catalog rows resolving to the same TMDb id merge instead of sinking
+    the whole batch on the unique index."""
+
+    _setup_env(monkeypatch)
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import OwnedFile, Title
+    from homeTheater.metadata import enrich_catalog
+
+    init_db()
+    with session_scope() as s:
+        a = Title(title="The Matrix", year=1999, kind=TitleKind.movie)
+        a.owned_files = [OwnedFile(path="/a.mkv", kind=TitleKind.movie)]
+        b = Title(title="the matrix", year=1999, kind=TitleKind.movie)
+        b.owned_files = [OwnedFile(path="/b.mkv", kind=TitleKind.movie)]
+        s.add_all([a, b])
+
+    respx.get(f"{TMDB}/search/movie").mock(return_value=httpx.Response(200, json=MATRIX_SEARCH))
+    respx.get(f"{TMDB}/movie/603").mock(return_value=httpx.Response(200, json=MATRIX_DETAILS))
+    respx.get(OMDB).mock(return_value=httpx.Response(200, json=MATRIX_OMDB))
+
+    stats = await enrich_catalog(get_config())
+    assert stats.merged == 1
+    assert not stats.errors
+
+    with session_scope() as s:
+        t = s.query(Title).one()  # one canonical row left
+        assert t.tmdb_id == 603
+        assert {f.path for f in t.owned_files} == {"/a.mkv", "/b.mkv"}
+
+    # Re-running is a no-op (nothing pending anymore).
+    stats2 = await enrich_catalog(get_config())
+    assert stats2.titles_considered == 0
+
+
+@respx.mock
+async def test_omdb_rate_limit_response_not_cached(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_env(monkeypatch)
+    from homeTheater.db import init_db
+    from homeTheater.metadata.omdb import OMDbClient
+
+    init_db()
+    route = respx.get(OMDB).mock(
+        return_value=httpx.Response(
+            200, json={"Response": "False", "Error": "Request limit reached!"}
+        )
+    )
+    async with httpx.AsyncClient() as http:
+        client = OMDbClient("k", http, cache_days=14)
+        await client.by_imdb_id("tt0133093")
+        await client.by_imdb_id("tt0133093")
+    assert route.call_count == 2  # transient error was not cached
+
+    # ...but a definitive not-found IS cached.
+    route.mock(
+        return_value=httpx.Response(
+            200, json={"Response": "False", "Error": "Incorrect IMDb ID. Movie not found!"}
+        )
+    )
+    async with httpx.AsyncClient() as http:
+        client = OMDbClient("k", http, cache_days=14)
+        await client.by_imdb_id("tt0000001")
+        await client.by_imdb_id("tt0000001")
+    assert route.call_count == 3  # one live call, second served from cache

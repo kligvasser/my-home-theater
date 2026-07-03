@@ -3,7 +3,8 @@
 The scanner depends only on :class:`FileSystem`. :class:`LocalFileSystem` walks a
 real local directory (used in tests and for local media), and
 :class:`SMBFileSystem` walks the NAS over SMB2/3. Both yield the same
-:class:`FileEntry` records.
+:class:`FileEntry` records, and both skip NAS/OS junk (thumbnail trees, recycle
+bins, AppleDouble ``._*`` forks) that would otherwise pollute the catalog.
 """
 
 from __future__ import annotations
@@ -12,6 +13,22 @@ import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
+
+# Junk directories NAS appliances and OSes sprinkle around media trees
+# (Synology @eaDir thumbnails, recycle bins, ...). They never hold real media.
+IGNORED_DIRS = frozenset({"@eaDir", "@Recycle", "#recycle", "$RECYCLE.BIN"})
+
+
+def is_ignored_dir(name: str) -> bool:
+    """Dot-dirs (``.@__thumb``, ``.AppleDouble``, ``.Trash*``, ...) and NAS junk."""
+
+    return name.startswith(".") or name in IGNORED_DIRS
+
+
+def is_hidden_file(name: str) -> bool:
+    """Dotfiles, including macOS AppleDouble ``._*`` resource forks."""
+
+    return name.startswith(".")
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +45,14 @@ class FileEntry:
 class FileSystem(Protocol):
     """Read-only view over a media tree."""
 
+    def resolve(self, root: str) -> str:
+        """Return the full path (local or UNC) that ``root`` walks from.
+
+        This is the prefix of every :attr:`FileEntry.path` yielded for ``root``,
+        used to derive root-relative paths and to scope stale-row pruning.
+        """
+        ...
+
     def walk(self, root: str) -> Iterator[FileEntry]:
         """Recursively yield files (not directories) under ``root``."""
         ...
@@ -43,13 +68,16 @@ class LocalFileSystem:
     def __init__(self, base_dir: str | os.PathLike[str] = "") -> None:
         self.base_dir = str(base_dir)
 
-    def _resolve(self, root: str) -> str:
+    def resolve(self, root: str) -> str:
         return os.path.join(self.base_dir, root) if self.base_dir else root
 
     def walk(self, root: str) -> Iterator[FileEntry]:
-        start = self._resolve(root)
-        for dirpath, _dirnames, filenames in os.walk(start):
+        start = self.resolve(root)
+        for dirpath, dirnames, filenames in os.walk(start):
+            dirnames[:] = [d for d in dirnames if not is_ignored_dir(d)]
             for name in filenames:
+                if is_hidden_file(name):
+                    continue
                 full = os.path.join(dirpath, name)
                 try:
                     size = os.path.getsize(full)
@@ -84,13 +112,21 @@ class SMBFileSystem:
         cleaned = [p.strip("\\/").replace("/", "\\") for p in parts if p]
         return "\\\\" + "\\".join([self.host, self.share, *cleaned])
 
+    def resolve(self, root: str) -> str:
+        return self._unc(root)
+
     def walk(self, root: str) -> Iterator[FileEntry]:
         import smbclient
 
         self._ensure_session()
-        start = self._unc(root)
-        for dirpath, _dirnames, filenames in smbclient.walk(start):
+        start = self.resolve(root)
+        for dirpath, dirnames, filenames in smbclient.walk(start):
+            # smbclient.walk mirrors os.walk: pruning dirnames in place skips
+            # those subtrees (saves SMB round-trips on @eaDir thumbnail forests).
+            dirnames[:] = [d for d in dirnames if not is_ignored_dir(d)]
             for name in filenames:
+                if is_hidden_file(name):
+                    continue
                 full = dirpath.rstrip("\\") + "\\" + name
                 try:
                     size = smbclient.stat(full).st_size

@@ -10,6 +10,7 @@ from __future__ import annotations
 import httpx
 
 from ..config import AppConfig
+from ..errors import redact_exc
 from ..logging_setup import get_logger
 from .base import LogNotifier, Notifier, TelegramNotifier
 
@@ -30,4 +31,4 @@ async def notify(config: AppConfig, text: str) -> None:
         async with httpx.AsyncClient(timeout=10.0) as http:
             await build_notifier(config, http).send(text)
     except Exception as exc:  # never break the caller
-        log.warning("notify.failed", error=str(exc))
+        log.warning("notify.failed", error=redact_exc(exc))

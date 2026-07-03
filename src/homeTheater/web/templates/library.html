@@ -42,9 +42,9 @@
 
 {% if pages > 1 %}
 <nav class="pager">
-  {% if page > 1 %}<a href="?q={{ q or '' }}&kind={{ kind or '' }}&page={{ page - 1 }}">← Prev</a>{% endif %}
+  {% if page > 1 %}<a href="?q={{ (q or '') | urlencode }}&kind={{ (kind or '') | urlencode }}&page={{ page - 1 }}">← Prev</a>{% endif %}
   <span>Page {{ page }} / {{ pages }}</span>
-  {% if page < pages %}<a href="?q={{ q or '' }}&kind={{ kind or '' }}&page={{ page + 1 }}">Next →</a>{% endif %}
+  {% if page < pages %}<a href="?q={{ (q or '') | urlencode }}&kind={{ (kind or '') | urlencode }}&page={{ page + 1 }}">Next →</a>{% endif %}
 </nav>
 {% endif %}
 {% else %}

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import httpx
@@ -29,7 +28,7 @@ def _reset() -> None:
     db_session._SessionFactory = None
 
 
-def _write_config(tmp_path: Path, dry_run: bool) -> None:
+def _write_config(tmp_path: Path, dry_run: bool, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = tmp_path / "acq.yaml"
     cfg.write_text(
         "nas: {share: T, movies_root: Movies, tv_root: TV Shows}\n"
@@ -37,7 +36,8 @@ def _write_config(tmp_path: Path, dry_run: bool) -> None:
         f"features: {{dry_run: {str(dry_run).lower()}, auto_approve: false}}\n"
         "acquisition: {movie_quality_profile: HD-1080p, search_on_add: true}\n"
     )
-    os.environ["HOME_THEATER_CONFIG"] = str(cfg)
+    # monkeypatch (not os.environ) so the override never leaks to other tests
+    monkeypatch.setenv("HOME_THEATER_CONFIG", str(cfg))
 
 
 def _seed_approved(tmdb_id: int = 603) -> int:
@@ -65,8 +65,10 @@ def radarr_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @respx.mock
-async def test_radarr_client_add(tmp_path: Path, radarr_env: None) -> None:
-    _write_config(tmp_path, dry_run=False)
+async def test_radarr_client_add(
+    tmp_path: Path, radarr_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch)
     _reset()
     from homeTheater.acquisition import RadarrClient
 
@@ -89,8 +91,10 @@ async def test_radarr_client_add(tmp_path: Path, radarr_env: None) -> None:
 
 
 @respx.mock
-async def test_queue_dry_run_changes_nothing(tmp_path: Path, radarr_env: None) -> None:
-    _write_config(tmp_path, dry_run=True)
+async def test_queue_dry_run_changes_nothing(
+    tmp_path: Path, radarr_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(tmp_path, dry_run=True, monkeypatch=monkeypatch)
     _reset()
     cid = _seed_approved()
     from homeTheater.acquisition import queue_candidate
@@ -107,8 +111,10 @@ async def test_queue_dry_run_changes_nothing(tmp_path: Path, radarr_env: None) -
 
 
 @respx.mock
-async def test_queue_real_adds_and_records(tmp_path: Path, radarr_env: None) -> None:
-    _write_config(tmp_path, dry_run=False)
+async def test_queue_real_adds_and_records(
+    tmp_path: Path, radarr_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch)
     _reset()
     cid = _seed_approved()
 
@@ -134,8 +140,10 @@ async def test_queue_real_adds_and_records(tmp_path: Path, radarr_env: None) -> 
 
 
 @respx.mock
-async def test_sync_marks_completed(tmp_path: Path, radarr_env: None) -> None:
-    _write_config(tmp_path, dry_run=False)
+async def test_sync_marks_completed(
+    tmp_path: Path, radarr_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch)
     _reset()
     cid = _seed_approved()
 
@@ -167,7 +175,7 @@ def test_queue_endpoint_auth(
     tmp_path: Path, radarr_env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("DASHBOARD_TOKEN", "tok")
-    _write_config(tmp_path, dry_run=True)  # dry-run makes no external calls
+    _write_config(tmp_path, dry_run=True, monkeypatch=monkeypatch)  # dry-run: no external calls
     _reset()
     cid = _seed_approved()
 
@@ -178,3 +186,138 @@ def test_queue_endpoint_auth(
         r = client.post(f"/api/candidates/{cid}/queue", headers={"X-Auth-Token": "tok"})
         assert r.status_code == 200
         assert r.json()["dry_run"] is True and r.json()["queued"] is False
+
+
+@respx.mock
+async def test_queue_is_idempotent(
+    tmp_path: Path, radarr_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Double-clicking Queue must not create duplicate Download rows."""
+
+    _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch)
+    _reset()
+    cid = _seed_approved()
+
+    respx.get(f"{RADARR}/api/v3/movie/lookup").mock(return_value=httpx.Response(200, json=LOOKUP))
+    respx.get(f"{RADARR}/api/v3/qualityprofile").mock(
+        return_value=httpx.Response(200, json=PROFILES)
+    )
+    respx.get(f"{RADARR}/api/v3/rootfolder").mock(return_value=httpx.Response(200, json=ROOTS))
+    respx.post(f"{RADARR}/api/v3/movie").mock(return_value=httpx.Response(201, json=CREATED))
+
+    from homeTheater.acquisition import queue_candidate
+    from homeTheater.config import get_config
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate, CandidateStatus, Download
+
+    first = await queue_candidate(get_config(), cid)
+    second = await queue_candidate(get_config(), cid)
+
+    assert first.queued
+    assert not second.queued and "already" in second.message
+    with session_scope() as s:
+        assert s.query(Download).count() == 1
+        assert s.get(Candidate, cid).status == CandidateStatus.queued
+
+
+async def test_queue_rejected_raises(
+    tmp_path: Path, radarr_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch)
+    _reset()
+    cid = _seed_approved()
+
+    from homeTheater.acquisition import queue_candidate
+    from homeTheater.config import get_config
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate, CandidateStatus
+    from homeTheater.errors import InvalidTransitionError
+
+    with session_scope() as s:
+        s.get(Candidate, cid).status = CandidateStatus.rejected
+
+    with pytest.raises(InvalidTransitionError):
+        await queue_candidate(get_config(), cid)
+
+
+@respx.mock
+async def test_sync_does_not_resurrect_rejected(
+    tmp_path: Path, radarr_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rejecting after a grab: sync must not flip the candidate to imported."""
+
+    _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch)
+    _reset()
+    cid = _seed_approved()
+
+    from homeTheater.config import get_config
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate, CandidateStatus, Download
+
+    with session_scope() as s:
+        s.add(
+            Download(candidate_id=cid, external_id="42", state="downloading", release="The Matrix")
+        )
+        s.get(Candidate, cid).status = CandidateStatus.rejected
+
+    respx.get(f"{RADARR}/api/v3/movie/42").mock(
+        return_value=httpx.Response(200, json={"monitored": True, "hasFile": True})
+    )
+    respx.get(f"{RADARR}/api/v3/queue").mock(return_value=httpx.Response(200, json={"records": []}))
+
+    from homeTheater.acquisition import sync_downloads
+
+    stats = await sync_downloads(get_config())
+    assert stats.completed == 0
+    with session_scope() as s:
+        assert s.get(Candidate, cid).status == CandidateStatus.rejected
+        assert s.query(Download).one().state == "cancelled"
+
+
+@respx.mock
+async def test_sync_marks_stale_download_failed(
+    tmp_path: Path, radarr_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A download gone from the arr queue with no file eventually fails."""
+
+    from datetime import UTC, datetime, timedelta
+
+    _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch)
+    _reset()
+    cid = _seed_approved()
+
+    from homeTheater.config import get_config
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate, CandidateStatus, Download
+
+    with session_scope() as s:
+        dl = Download(
+            candidate_id=cid, external_id="42", state="downloading", release="The Matrix"
+        )
+        s.add(dl)
+        s.flush()
+        dl.created_at = datetime.now(UTC) - timedelta(hours=7)
+        s.get(Candidate, cid).status = CandidateStatus.downloading
+
+    respx.get(f"{RADARR}/api/v3/movie/42").mock(
+        return_value=httpx.Response(200, json={"monitored": True, "hasFile": False})
+    )
+    respx.get(f"{RADARR}/api/v3/queue").mock(return_value=httpx.Response(200, json={"records": []}))
+
+    from homeTheater.acquisition import sync_downloads
+
+    stats = await sync_downloads(get_config())
+    assert stats.failed == 1
+    with session_scope() as s:
+        assert s.get(Candidate, cid).status == CandidateStatus.failed
+        assert s.query(Download).one().state == "failed"
+
+
+def test_sonarr_series_complete_semantics() -> None:
+    from homeTheater.acquisition.arr import _series_complete
+
+    assert not _series_complete({"episodeFileCount": 1, "episodeCount": 10})
+    assert _series_complete({"episodeFileCount": 10, "episodeCount": 10})
+    assert _series_complete({"percentOfEpisodes": 100.0, "episodeFileCount": 1})
+    assert not _series_complete({"percentOfEpisodes": 10.0, "episodeFileCount": 1})
+    assert not _series_complete({})

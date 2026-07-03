@@ -21,6 +21,20 @@ class TmdbTitle:
     popularity: float | None = None
     poster_url: str | None = None
     overview: str | None = None
+    # Taste/ML features (see homeTheater.features). All optional: list payloads
+    # (trending/top_rated) don't carry them; details() does.
+    original_language: str | None = None
+    origin_countries: list[str] = field(default_factory=list)
+    release_date: str | None = None
+    certification: str | None = None
+    keywords: list[str] = field(default_factory=list)
+    cast_top: list[str] = field(default_factory=list)
+    directors: list[str] = field(default_factory=list)
+    collection_tmdb_id: int | None = None
+    collection_name: str | None = None
+    seasons_count: int | None = None
+    episodes_count: int | None = None
+    series_status: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

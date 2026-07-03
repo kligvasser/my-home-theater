@@ -7,8 +7,11 @@ completed import back into our catalog. Two entry points:
 * :func:`reconcile_library` — poll Radarr/Sonarr and reconcile the whole library
   (catches imports we didn't originate; plan §5.9). Records a ``reconcile`` run.
 
-Both are idempotent: title identity is a TMDb/TVDB/IMDb id, owned-file identity is
-the path, and a candidate already ``imported`` stays imported.
+Both are idempotent: title identity is a (kind-scoped) TMDb/TVDB/IMDb id,
+owned-file identity is the path, and a candidate already ``imported`` stays
+imported. ``reconcile_library`` also maintains ``Title.arr_has_file`` so a title
+Radarr/Sonarr has on disk counts as owned for discovery even before the NAS
+scanner sees the file.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import httpx
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import AppConfig
@@ -30,8 +33,10 @@ from ..db.models import (
     OwnedFile,
     RunStatus,
     Title,
+    TitleKind,
 )
 from ..db.session import session_scope
+from ..errors import redact_exc
 from ..logging_setup import bind_run, clear_run, get_logger
 from .events import ImportEvent
 
@@ -56,7 +61,10 @@ class ReconcileResult:
 class ReconcileStats:
     checked: int = 0
     titles_created: int = 0
+    files_created: int = 0
     imported: int = 0
+    arr_flag_set: int = 0
+    arr_flag_cleared: int = 0
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -64,18 +72,61 @@ class ReconcileStats:
 
 
 def _find_title(
-    session: Session, *, tmdb_id: int | None, tvdb_id: int | None, imdb_id: str | None
+    session: Session,
+    *,
+    kind: TitleKind,
+    tmdb_id: int | None,
+    tvdb_id: int | None,
+    imdb_id: str | None,
 ) -> Title | None:
-    clauses = []
+    """Deterministic, kind-scoped lookup: tmdb, then tvdb, then imdb.
+
+    Kind-scoped because TMDb movie/TV ids are independent sequences; an OR-match
+    across ids could grab (and previously corrupted) a same-id title of the
+    other kind.
+    """
+
     if tmdb_id is not None:
-        clauses.append(Title.tmdb_id == tmdb_id)
+        title = session.scalar(
+            select(Title).where(Title.tmdb_id == tmdb_id, Title.kind == kind)
+        )
+        if title is not None:
+            return title
     if tvdb_id is not None:
-        clauses.append(Title.tvdb_id == tvdb_id)
+        title = session.scalar(
+            select(Title).where(Title.tvdb_id == tvdb_id, Title.kind == kind)
+        )
+        if title is not None:
+            return title
     if imdb_id:
-        clauses.append(Title.imdb_id == imdb_id)
-    if not clauses:
-        return None
-    return session.scalar(select(Title).where(or_(*clauses)))
+        return session.scalar(select(Title).where(Title.imdb_id == imdb_id, Title.kind == kind))
+    return None
+
+
+def _backfill_ids(session: Session, title: Title, event: ImportEvent) -> None:
+    """Fill missing ids, skipping (with a log) any that would collide with
+    another row's unique index — a webhook must never 500 on an IntegrityError."""
+
+    if title.tmdb_id is None and event.tmdb_id is not None:
+        conflict = session.scalar(
+            select(Title.id).where(
+                Title.tmdb_id == event.tmdb_id, Title.kind == title.kind, Title.id != title.id
+            )
+        )
+        if conflict is None:
+            title.tmdb_id = event.tmdb_id
+        else:
+            log.warning("reconcile.tmdb_id_conflict", title=title.title, other=conflict)
+    if title.tvdb_id is None and event.tvdb_id is not None:
+        title.tvdb_id = event.tvdb_id
+    if title.imdb_id is None and event.imdb_id:
+        conflict = session.scalar(
+            select(Title.id).where(Title.imdb_id == event.imdb_id, Title.id != title.id)
+        )
+        if conflict is None:
+            title.imdb_id = event.imdb_id
+        else:
+            log.warning("reconcile.imdb_id_conflict", title=title.title, other=conflict)
 
 
 def _mark_candidate_imported(session: Session, title_id: int) -> bool:
@@ -100,18 +151,19 @@ def reconcile_import(event: ImportEvent) -> ReconcileResult:
 
     with session_scope() as session:
         title = _find_title(
-            session, tmdb_id=event.tmdb_id, tvdb_id=event.tvdb_id, imdb_id=event.imdb_id
+            session,
+            kind=event.kind,
+            tmdb_id=event.tmdb_id,
+            tvdb_id=event.tvdb_id,
+            imdb_id=event.imdb_id,
         )
         if title is None:
             title = Title(kind=event.kind, title=event.title)
             session.add(title)
-        # Backfill ids/fields we now know.
-        title.kind = event.kind
         title.title = event.title or title.title
         title.year = title.year or event.year
-        title.tmdb_id = title.tmdb_id or event.tmdb_id
-        title.tvdb_id = title.tvdb_id or event.tvdb_id
-        title.imdb_id = title.imdb_id or event.imdb_id
+        _backfill_ids(session, title, event)
+        title.arr_has_file = True
         session.flush()
 
         file_created = False
@@ -125,6 +177,7 @@ def reconcile_import(event: ImportEvent) -> ReconcileResult:
             owned.kind = event.kind
             owned.season = event.season
             owned.episode = event.episode
+            owned.episode_end = event.episode_end
             owned.resolution = event.resolution or owned.resolution
             owned.size_bytes = event.size_bytes or owned.size_bytes
 
@@ -158,6 +211,7 @@ async def reconcile_library(config: AppConfig) -> ReconcileStats:
             clients = [c for c in (_radarr(config, http), _sonarr(config, http)) if c is not None]
             for client in clients:
                 kind = client.kind
+                seen_title_ids: set[int] = set()
                 for ref in await client.list_owned():
                     stats.checked += 1
                     if not ref.has_file:
@@ -165,6 +219,7 @@ async def reconcile_library(config: AppConfig) -> ReconcileStats:
                     with session_scope() as session:
                         title = _find_title(
                             session,
+                            kind=kind,
                             tmdb_id=ref.tmdb_id,
                             tvdb_id=ref.tvdb_id,
                             imdb_id=None,
@@ -179,13 +234,37 @@ async def reconcile_library(config: AppConfig) -> ReconcileStats:
                             session.add(title)
                             session.flush()
                             stats.titles_created += 1
+                        if not title.arr_has_file:
+                            title.arr_has_file = True
+                            stats.arr_flag_set += 1
+                        seen_title_ids.add(title.id)
+                        if ref.path:
+                            owned = session.scalar(
+                                select(OwnedFile).where(OwnedFile.path == ref.path)
+                            )
+                            if owned is None:
+                                session.add(
+                                    OwnedFile(path=ref.path, title_id=title.id, kind=kind)
+                                )
+                                stats.files_created += 1
                         if _mark_candidate_imported(session, title.id):
                             stats.imported += 1
+
+                # Items deleted from the arr no longer count as arr-owned.
+                with session_scope() as session:
+                    stale_q = select(Title).where(
+                        Title.kind == kind, Title.arr_has_file.is_(True)
+                    )
+                    if seen_title_ids:
+                        stale_q = stale_q.where(Title.id.not_in(seen_title_ids))
+                    for t in session.scalars(stale_q).all():
+                        t.arr_has_file = False
+                        stats.arr_flag_cleared += 1
         log.info("reconcile.done", **stats.as_dict())
     except Exception as exc:
         status = RunStatus.failed
-        stats.errors.append(str(exc))
-        log.error("reconcile.failed", error=str(exc))
+        stats.errors.append(redact_exc(exc))
+        log.error("reconcile.failed", error=redact_exc(exc))
     finally:
         with session_scope() as s:
             job_run = s.get(JobRun, run_id)

@@ -30,4 +30,11 @@ class TelegramNotifier:
 
     async def send(self, text: str) -> None:
         resp = await self._client.post(self._url, json={"chat_id": self._chat_id, "text": text})
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # Never let the raw error escape: its message embeds the request URL,
+            # which contains the bot token.
+            raise RuntimeError(
+                f"Telegram sendMessage failed: HTTP {exc.response.status_code}"
+            ) from exc

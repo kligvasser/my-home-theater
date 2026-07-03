@@ -12,6 +12,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 
 from ..config import AppConfig, ConfigError
+from ..errors import NotConfiguredError, redact_exc
 from ..logging_setup import bind_run, clear_run, get_logger
 from ..notifications import notify
 
@@ -22,24 +23,31 @@ _run_lock = asyncio.Lock()
 
 
 async def _guarded(name: str, config: AppConfig, body: Callable[[], Awaitable[str | None]]) -> None:
-    """Run one job under the global lock, logging + notifying on failure."""
+    """Run one job under the global lock, logging + notifying on failure.
 
+    The notification is sent *after* the lock is released so a slow Telegram
+    round-trip never delays the next job.
+    """
+
+    message: str | None = None
     async with _run_lock:
         bind_run(job=name, scheduled=True)
         try:
             log.info("job.start", job=name)
             summary = await body()
             log.info("job.done", job=name, summary=summary)
-            if summary:
-                await notify(config, summary)
-        except (ConfigError, ValueError) as exc:
+            message = summary
+        except (ConfigError, NotConfiguredError) as exc:
             # Expected when a provider isn't configured yet — skip quietly.
             log.info("job.skipped", job=name, reason=str(exc))
         except Exception as exc:
-            log.error("job.failed", job=name, error=str(exc))
-            await notify(config, f"⚠️ {name} job failed: {exc}")
+            error = redact_exc(exc)
+            log.error("job.failed", job=name, error=error)
+            message = f"⚠️ {name} job failed: {error}"
         finally:
             clear_run()
+    if message:
+        await notify(config, message)
 
 
 async def run_scan_job(config: AppConfig) -> None:
@@ -72,6 +80,16 @@ async def run_subtitle_job(config: AppConfig) -> None:
         return f"💬 Requested {searched} subtitle search(es)" if searched else None
 
     await _guarded("subtitle", config, body)
+
+
+async def run_acquire_job(config: AppConfig) -> None:
+    from ..acquisition import queue_approved
+
+    async def body() -> str | None:
+        stats = await queue_approved(config)
+        return f"🎯 Queued {stats.queued} approved candidate(s)" if stats.queued else None
+
+    await _guarded("acquire", config, body)
 
 
 async def run_sync_job(config: AppConfig) -> None:

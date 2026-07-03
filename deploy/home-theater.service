@@ -23,5 +23,17 @@ ExecStart=/home/kligvasser/miniconda3/envs/my-home-theater/bin/home-theater
 Restart=on-failure
 RestartSec=5
 
+# Hardening: the service is network-exposed and holds API keys, so keep the
+# rest of the system read-only. Only the app's data dir (SQLite DB, backups)
+# stays writable; adjust ReadWritePaths if you relocate it.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/kligvasser/Projects/my-home-theater/data
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
 [Install]
 WantedBy=multi-user.target

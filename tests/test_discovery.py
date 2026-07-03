@@ -165,3 +165,164 @@ async def test_add_manual(config_file: Path, monkeypatch: pytest.MonkeyPatch) ->
     with session_scope() as s:
         c = s.get(Candidate, cid)
         assert c is not None and c.source == CandidateSource.manual
+
+
+@respx.mock
+async def test_rejected_candidate_not_resuggested(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rejecting a candidate must keep discovery from recreating it forever."""
+
+    _env(monkeypatch)
+    from sqlalchemy import select
+
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate, CandidateStatus
+    from homeTheater.discovery import run_discovery
+
+    init_db()
+    _mock_common()
+    await run_discovery(get_config())
+    with session_scope() as s:
+        cand = s.scalars(select(Candidate)).one()
+        cand.status = CandidateStatus.rejected
+
+    stats = await run_discovery(get_config())
+    assert stats.rejected_skipped == 1
+    assert stats.created == 0
+    with session_scope() as s:
+        assert len(s.scalars(select(Candidate)).all()) == 1  # no duplicate row
+
+
+@respx.mock
+async def test_movie_and_series_sharing_tmdb_id_coexist(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TMDb movie/tv id namespaces overlap; an owned movie must not shadow a
+    series with the same id (nor have its kind flipped by the series upsert)."""
+
+    _env(monkeypatch)
+    from sqlalchemy import select
+
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import OwnedFile, Title
+    from homeTheater.discovery import run_discovery
+
+    init_db()
+    with session_scope() as s:
+        owned = Title(tmdb_id=1396, title="Some Movie", year=2001, kind=TitleKind.movie)
+        owned.owned_files = [OwnedFile(path="/sm.mkv", kind=TitleKind.movie)]
+        s.add(owned)
+
+    respx.get(f"{TMDB}/trending/movie/week").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    respx.get(f"{TMDB}/trending/tv/week").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"id": 1396, "name": "Breaking Bad", "first_air_date": "2008-01-20"}
+                ]
+            },
+        )
+    )
+    respx.get(f"{TMDB}/tv/1396").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 1396,
+                "name": "Breaking Bad",
+                "first_air_date": "2008-01-20",
+                "episode_run_time": [47],
+                "vote_average": 8.9,
+                "vote_count": 12000,
+                "popularity": 200.0,
+                "genres": [{"id": 18, "name": "Drama"}],
+                "external_ids": {"imdb_id": "tt0903747", "tvdb_id": 81189},
+                "number_of_seasons": 5,
+                "number_of_episodes": 62,
+                "status": "Ended",
+            },
+        )
+    )
+    respx.get(OMDB).mock(
+        return_value=httpx.Response(
+            200, json={"Response": "True", "imdbRating": "9.5", "imdbVotes": "2,000,000"}
+        )
+    )
+
+    stats = await run_discovery(get_config())
+    assert stats.owned_skipped == 0  # the movie must NOT shadow the series
+    assert stats.created == 1
+
+    with session_scope() as s:
+        titles = s.scalars(select(Title).where(Title.tmdb_id == 1396)).all()
+        kinds = {t.kind for t in titles}
+        assert kinds == {TitleKind.movie, TitleKind.series}  # both rows, kinds intact
+        series = next(t for t in titles if t.kind == TitleKind.series)
+        assert series.seasons_count == 5 and series.series_status == "Ended"
+
+
+@respx.mock
+async def test_candidate_features_snapshot(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _env(monkeypatch)
+    from sqlalchemy import select
+
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate
+    from homeTheater.discovery import run_discovery
+
+    init_db()
+    _mock_common()
+    await run_discovery(get_config())
+    with session_scope() as s:
+        cand = s.scalars(select(Candidate)).one()
+        feats = cand.features
+        assert feats is not None
+        assert feats["kind"] == "movie"
+        assert feats["genres"] == ["Action"]
+        assert feats["imdb_rating"] == 9.0
+        assert feats["decade"] == 2000
+
+
+@respx.mock
+async def test_discovery_without_omdb_uses_tmdb_fallback(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No OMDb key must not mean zero candidates."""
+
+    monkeypatch.setenv("TMDB_API_KEY", "k")
+    monkeypatch.delenv("OMDB_API_KEY", raising=False)
+    _reset()
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db
+    from homeTheater.discovery import run_discovery
+
+    init_db()
+    respx.get(f"{TMDB}/trending/tv/week").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    respx.get(f"{TMDB}/trending/movie/week").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {"id": 155, "title": "The Dark Knight", "release_date": "2008-07-16"}
+                ]
+            },
+        )
+    )
+    respx.get(f"{TMDB}/movie/155").mock(
+        return_value=httpx.Response(
+            200, json=_details(155, "The Dark Knight", "tt0468569", 30000, ["Action"])
+        )
+    )
+
+    stats = await run_discovery(get_config())
+    assert stats.created == 1  # passed via TMDb fallback (8.5 rating, 30k votes)

@@ -8,14 +8,20 @@ reports ``configured=False``; a configured-but-unreachable one reports
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 
 import httpx
 from pydantic import SecretStr
 
 from ..config import AppConfig
+from ..errors import redact_exc
 
 _TIMEOUT = httpx.Timeout(6.0)
+
+# Results are cached briefly so the (unauthenticated) status page can't be used
+# to hammer providers or burn API quota on every page load.
+CACHE_TTL_SECONDS = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +44,9 @@ async def _probe(
             resp.raise_for_status()
         return ProviderStatus(name, True, True, "ok")
     except Exception as exc:
-        return ProviderStatus(name, True, False, str(exc))
+        # Never store/display the raw error: httpx messages embed the full
+        # request URL, query-string credentials included.
+        return ProviderStatus(name, True, False, redact_exc(exc))
 
 
 async def check_tmdb(config: AppConfig) -> ProviderStatus:
@@ -102,14 +110,34 @@ async def check_smb(config: AppConfig) -> ProviderStatus:
     return ProviderStatus("smb", configured, None, "configured" if configured else "not set")
 
 
+_cache: tuple[float, list[ProviderStatus]] | None = None
+_cache_lock = asyncio.Lock()
+
+
+def clear_cache() -> None:
+    """Drop cached results (tests / forced refresh)."""
+
+    global _cache
+    _cache = None
+
+
 async def check_all(config: AppConfig) -> list[ProviderStatus]:
-    return list(
-        await asyncio.gather(
-            check_tmdb(config),
-            check_omdb(config),
-            check_radarr(config),
-            check_sonarr(config),
-            check_bazarr(config),
-            check_smb(config),
+    """Probe all providers, serving results from a short-lived cache."""
+
+    global _cache
+    async with _cache_lock:
+        now = time.monotonic()
+        if _cache is not None and now - _cache[0] < CACHE_TTL_SECONDS:
+            return _cache[1]
+        statuses = list(
+            await asyncio.gather(
+                check_tmdb(config),
+                check_omdb(config),
+                check_radarr(config),
+                check_sonarr(config),
+                check_bazarr(config),
+                check_smb(config),
+            )
         )
-    )
+        _cache = (now, statuses)
+        return statuses

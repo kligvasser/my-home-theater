@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
 from typing import Any
 
@@ -24,7 +25,8 @@ async def api_providers() -> dict[str, Any]:
 async def api_status() -> dict[str, Any]:
     cfg = get_config()
     statuses = await check_all(cfg)
-    runs = recent_runs(50)
+    # recent_runs is sync SQLAlchemy; keep it off the event loop.
+    runs = await asyncio.to_thread(recent_runs, 50)
     failed = [asdict(r) for r in runs if r.status == "failed"]
     return {
         "dry_run": cfg.features.dry_run,
