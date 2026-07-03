@@ -57,11 +57,58 @@ Run under conda and let the OS keep it alive:
 - **Linux (mini-PC/NAS):** edit [`deploy/home-theater.service`](deploy/home-theater.service),
   copy to `/etc/systemd/system/`, then `systemctl enable --now home-theater`.
 
+## Go-live checklist
+
+Everything below is configuration, not code. Do it roughly in order.
+
+1. **Install & configure**
+   - `conda env create -f environment.yaml && conda activate my-home-theater && pip install -e .`
+   - `cp config.example.yaml config.yaml` — set `nas.*` paths and `thresholds`.
+   - `cp .env.example .env` — see the secrets checklist below.
+   - `alembic upgrade head` (creates the schema from the migration baseline).
+
+2. **Secrets in `.env`** (never committed)
+   - `DASHBOARD_TOKEN` — generate: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
+   - `TMDB_API_KEY`, `OMDB_API_KEY` — metadata + ratings.
+   - `SMB_HOST` (IP beats flaky `.local`), `SMB_USER`, `SMB_PASS` — NAS scan.
+   - `RADARR_URL`/`RADARR_API_KEY`, `SONARR_URL`/`SONARR_API_KEY`, `BAZARR_URL`/`BAZARR_API_KEY`.
+   - Optional: `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` for alerts; `TRAKT_*` for a watchlist.
+
+3. **Prove the read path (safe, no writes/grabs)**
+   - `home-theater scan` → `home-theater enrich`.
+   - `home-theater` and open `http://localhost:8000/` — browse Library, and check
+     **Status** (`/status`) shows your providers **up**.
+
+4. **Discovery**
+   - Tune `discovery` + `thresholds` in `config.yaml`; run `home-theater discover`.
+   - Review the **Candidates** page. Approve via the token-gated API:
+     `curl -X POST /api/candidates/<id>/approve -H "X-Auth-Token: $DASHBOARD_TOKEN"`.
+
+5. **Acquisition — stays in dry-run until you trust it**
+   - With `features.dry_run: true` (default), `home-theater acquire` only logs
+     "would add …" — nothing is grabbed. Confirm the intent looks right.
+   - Set matching Radarr/Sonarr **quality profile names** in `acquisition.*`.
+   - Flip `features.dry_run: false` **only** after validating a real add with a
+     legal / public-domain release. Then `acquire` → `sync`.
+
+6. **Import reconciliation (webhooks)**
+   - In Radarr/Sonarr, add a **Webhook** connection (On Import) to
+     `http://<host>:8000/api/webhooks/radarr?token=$DASHBOARD_TOKEN` (and `/sonarr`).
+   - Or poll: `home-theater reconcile`.
+
+7. **Subtitles** — configure providers **inside Bazarr**; then
+   `home-theater subtitles` (or the token-gated `POST /api/subtitles/search`).
+
+8. **Unattended + durable**
+   - Set `schedule.enabled: true` (tune intervals; `0` disables a job). The daily
+     `backup` job runs automatically; `home-theater backup` runs one on demand.
+   - Install the launchd/systemd unit (see *Always-on* above) so it survives reboots.
+
 ## Database migrations (Alembic)
 
 ```bash
-alembic revision --autogenerate -m "message"   # SQLite uses batch mode
-alembic upgrade head
+alembic upgrade head                            # apply schema (production)
+alembic revision --autogenerate -m "message"    # after model changes (SQLite batch mode)
 ```
 
 Dev/test also has `init_db()` which creates tables directly.
