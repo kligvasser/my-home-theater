@@ -377,7 +377,8 @@ Each phase is shippable and has explicit acceptance criteria. Build in order.
   boots an empty app with a health endpoint. ✅ **Done.**
 - **Phase 1 — Catalog & NAS scan (read-only).** SMB connect, walk, parse, upsert
   owned files. *Done when* the DB reflects your real library and re-scans are
-  idempotent.
+  idempotent. ✅ **Code done** (module + tests); pending a real scan once `.env`
+  SMB creds are filled in (`home-theater scan`).
 - **Phase 2 — Metadata enrichment.** TMDb + OMDb clients + cache; backfill
   ratings/votes/ids. *Done when* owned titles show IMDb rating + votes.
 - **Phase 3 — Dashboard v1 (read-only).** Library view, stats, search, subtitle

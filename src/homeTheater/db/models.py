@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     JSON,
@@ -173,7 +174,7 @@ class ProviderSetting(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(primary_key=True)
     kind: Mapped[ProviderKind] = mapped_column(String(16))
     name: Mapped[str] = mapped_column(String(64))
-    config: Mapped[dict | None] = mapped_column(JSON)
+    config: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
@@ -185,7 +186,7 @@ class JobRun(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[RunStatus] = mapped_column(String(16), default=RunStatus.running)
-    stats: Mapped[dict | None] = mapped_column(JSON)
+    stats: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     log_ref: Mapped[str | None] = mapped_column(String(256))
 
 

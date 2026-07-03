@@ -38,6 +38,7 @@ dev = [
     "ruff",
     "black",
     "mypy",
+    "types-PyYAML",
     "pre-commit",
 ]
 
@@ -70,7 +71,7 @@ warn_unused_ignores = true
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["guessit.*", "smbprotocol.*", "apscheduler.*"]
+module = ["guessit.*", "smbprotocol.*", "smbclient.*", "apscheduler.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

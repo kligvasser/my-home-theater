@@ -1,25 +1,60 @@
-"""Entry point: run the dashboard/API server."""
+"""Entry point: ``home-theater [serve|scan]`` (defaults to ``serve``)."""
 
 from __future__ import annotations
 
+import argparse
 import os
 
-import uvicorn
+from .logging_setup import configure_logging, get_logger
 
-from .logging_setup import configure_logging
+log = get_logger(__name__)
 
 
-def main() -> None:
+def _configure() -> None:
     configure_logging(
         level=os.environ.get("LOG_LEVEL", "INFO"),
         json_logs=os.environ.get("LOG_JSON", "").lower() in {"1", "true", "yes"},
     )
+
+
+def serve() -> None:
+    import uvicorn
+
+    _configure()
     uvicorn.run(
         "homeTheater.api.app:app",
         host=os.environ.get("HOST", "0.0.0.0"),  # noqa: S104 - bind LAN by default
         port=int(os.environ.get("PORT", "8000")),
         reload=os.environ.get("RELOAD", "").lower() in {"1", "true", "yes"},
     )
+
+
+def scan() -> None:
+    """Run a one-off NAS library scan against the configured roots."""
+
+    from .config import get_config
+    from .db import init_db
+    from .scanner import build_filesystem, config_roots, scan_library
+
+    _configure()
+    config = get_config()
+    init_db()  # dev convenience; production uses Alembic
+    fs = build_filesystem(config)
+    stats = scan_library(fs, config_roots(config))
+    log.info("scan.cli_done", **stats.as_dict())
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="home-theater")
+    sub = parser.add_subparsers(dest="command")
+    sub.add_parser("serve", help="run the dashboard/API server (default)")
+    sub.add_parser("scan", help="scan the NAS and update the owned catalog")
+    args = parser.parse_args()
+
+    if args.command == "scan":
+        scan()
+    else:
+        serve()
 
 
 if __name__ == "__main__":
