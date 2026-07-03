@@ -58,6 +58,13 @@ subtitles:
   languages: [he]       # target languages; Bazarr does the actual fetching
   max_searches_per_sweep: 50  # cap Bazarr search triggers per scheduled sweep
 
+taste:
+  enabled: true         # content-similarity vs your owned library (no labels needed)
+  min_library: 8        # min enriched owned titles per kind before scoring
+  neighbors: 5          # kNN size for the similarity score
+  weight: 0.5           # discovery score blend: + weight*10*similarity
+  max_clusters: 8       # upper bound for the /insights clustering
+
 acquisition:
   # Quality profile NAMES as configured inside Radarr/Sonarr (release selection).
   movie_quality_profile: HD-1080p

@@ -28,6 +28,7 @@ dependencies = [
     "apscheduler",
     "pyyaml",
     "structlog",
+    "scikit-learn",
 ]
 
 [project.optional-dependencies]
@@ -74,7 +75,7 @@ warn_unused_ignores = true
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["guessit.*", "smbprotocol.*", "smbclient.*", "apscheduler.*"]
+module = ["guessit.*", "smbprotocol.*", "smbclient.*", "apscheduler.*", "sklearn.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

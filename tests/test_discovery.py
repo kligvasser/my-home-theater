@@ -326,3 +326,50 @@ async def test_discovery_without_omdb_uses_tmdb_fallback(
 
     stats = await run_discovery(get_config())
     assert stats.created == 1  # passed via TMDb fallback (8.5 rating, 30k votes)
+
+
+@respx.mock
+async def test_taste_similarity_blended_into_candidates(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With an owned library, new candidates carry a taste score + neighbors."""
+
+    _env(monkeypatch)
+    from sqlalchemy import select
+
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate, Genre, OwnedFile, Title
+
+    init_db()
+    with session_scope() as s:
+        action = Genre(name="Action")
+        s.add(action)
+        for i, name in enumerate(
+            ["Mad Max", "John Wick", "Die Hard", "Heat", "Ronin", "Speed", "Taken", "Salt"]
+        ):
+            t = Title(
+                tmdb_id=2000 + i,
+                title=name,
+                year=1990 + i,
+                kind=TitleKind.movie,
+                original_language="en",
+            )
+            t.genres = [action]
+            t.owned_files = [OwnedFile(path=f"/lib/{i}.mkv", kind=TitleKind.movie)]
+            s.add(t)
+
+    _mock_common()
+    from homeTheater.discovery import run_discovery
+
+    stats = await run_discovery(get_config())
+    assert stats.created == 1
+
+    with session_scope() as s:
+        cand = s.scalars(
+            select(Candidate).join(Title).where(Title.tmdb_id == 155)
+        ).one()
+        taste = cand.features["taste"]
+        assert taste["score"] > 0  # Dark Knight is Action like the library
+        assert len(taste["like"]) > 0
+        assert "like:" in cand.reason

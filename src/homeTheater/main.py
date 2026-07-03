@@ -140,6 +140,28 @@ def reconcile() -> None:
     log.info("reconcile.cli_done", **stats.as_dict())
 
 
+def insights() -> None:
+    """Cluster the owned library by content and print the taste profile."""
+
+    from .config import get_config
+    from .db import init_db
+    from .db.models import TitleKind
+    from .taste import build_index
+
+    _configure()
+    cfg = get_config().taste
+    init_db()  # dev convenience; production uses Alembic
+    for kind in TitleKind:
+        index = build_index(kind, min_library=cfg.min_library)
+        if index is None:
+            print(f"{kind.value}s: not enough enriched owned titles (need {cfg.min_library}+)")
+            continue
+        print(f"\n{kind.value}s — {index.size} titles:")
+        for c in index.clusters(cfg.max_clusters):
+            print(f"  [{c.size:>3}] {c.label}")
+            print(f"        e.g. {', '.join(c.titles[:5])}")
+
+
 def backup() -> None:
     """Write a timestamped SQLite backup and prune old ones."""
 
@@ -162,6 +184,7 @@ def main() -> None:
     sub.add_parser("acquire", help="queue approved candidates to Radarr/Sonarr")
     sub.add_parser("sync", help="advance in-flight download states from Radarr/Sonarr")
     sub.add_parser("reconcile", help="reconcile Radarr/Sonarr owned items into the catalog")
+    sub.add_parser("insights", help="cluster the owned library and print the taste profile")
     sub.add_parser("backup", help="write a timestamped SQLite backup")
     args = parser.parse_args()
 
@@ -179,6 +202,8 @@ def main() -> None:
         sync()
     elif args.command == "reconcile":
         reconcile()
+    elif args.command == "insights":
+        insights()
     elif args.command == "backup":
         backup()
     else:

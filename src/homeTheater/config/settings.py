@@ -132,6 +132,20 @@ class Subtitles(BaseModel):
         return self.languages[0] if self.languages else "he"
 
 
+class Taste(BaseModel):
+    """Content-based library similarity (plan §9 'personal insights').
+
+    Unsupervised — works from the owned catalog alone, no approve/reject labels
+    needed. Discovery blends the similarity into candidate scores and reasons.
+    """
+
+    enabled: bool = True
+    min_library: int = Field(8, ge=2, description="min enriched owned titles per kind")
+    neighbors: int = Field(5, ge=1, description="kNN size for the similarity score")
+    weight: float = Field(0.5, ge=0, description="score blend: + weight*10*similarity")
+    max_clusters: int = Field(8, ge=2, description="upper bound for auto-k clustering")
+
+
 class Acquisition(BaseModel):
     """How approved candidates are handed to Radarr/Sonarr (plan §5.6).
 
@@ -197,6 +211,7 @@ class AppConfig(BaseModel):
     metadata: Metadata = Field(default_factory=Metadata)
     discovery: Discovery = Field(default_factory=Discovery)
     subtitles: Subtitles = Field(default_factory=Subtitles)
+    taste: Taste = Field(default_factory=Taste)
     acquisition: Acquisition = Field(default_factory=Acquisition)
     enabled_providers: list[str] = Field(default_factory=list)
     secrets: Secrets = Field(default_factory=Secrets, repr=False)

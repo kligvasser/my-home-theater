@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Insights · my-home-theater{% endblock %}
+{% block content %}
+<h1>Taste insights</h1>
+<p class="muted">Your library, clustered by content (genres, keywords, cast, directors,
+language, decade). New candidates are scored by similarity to these clusters.</p>
+
+{% for section in sections %}
+<section>
+  <h2>{{ section.label }}</h2>
+  {% if section.available %}
+  <p class="muted small">{{ section.titles }} enriched titles · {{ section.clusters | length }} clusters</p>
+  <div class="clusters">
+    {% for c in section.clusters %}
+    <div class="cluster" title="{{ c.size }} of {{ section.titles }} titles">
+      <h3>{{ c.label }}</h3>
+      <div class="csize">{{ c.size }} titles ({{ (c.size / section.titles * 100) | round }}%)</div>
+      <div class="track"><div class="fill" style="width: {{ (c.size / section.titles * 100) | round(1) }}%"></div></div>
+      <div class="chips">
+        {% for t in c.titles %}<span class="chip">{{ t }}</span>{% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="muted">Not enough enriched {{ section.label | lower }} yet (need
+  {{ section.min_library }}+). Run <code>home-theater scan</code> then
+  <code>home-theater enrich</code>.</p>
+  {% endif %}
+</section>
+{% endfor %}
+
+<p class="note muted small">Similarity for any TMDb title:
+<code>GET /api/similarity?tmdb_id=…&amp;kind=movie|series</code></p>
+{% endblock %}

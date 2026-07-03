@@ -49,6 +49,9 @@ class LibraryStats:
     resolutions: list[tuple[str, int]] = field(default_factory=list)
     genres: list[tuple[str, int]] = field(default_factory=list)
     decades: list[tuple[int, int]] = field(default_factory=list)
+    ratings: list[tuple[float, int]] = field(default_factory=list)  # 0.5-wide buckets
+    languages: list[tuple[str, int]] = field(default_factory=list)
+    avg_imdb: float | None = None
     coverage: Coverage = field(default_factory=lambda: Coverage(DEFAULT_SUB_LANG, 0, 0))
 
 
@@ -133,6 +136,34 @@ def get_stats(sub_lang: str = DEFAULT_SUB_LANG) -> LibraryStats:
                 .where(Title.year.is_not(None))
                 .group_by("decade")
                 .order_by("decade")
+            ).all()
+        ]
+
+        # IMDb rating profile in 0.5-wide buckets (round(x*2)/2 is portable).
+        bucket = (func.round(Title.imdb_rating * 2) / 2).label("bucket")
+        stats.ratings = [
+            (float(b), cnt)
+            for b, cnt in s.execute(
+                select(bucket, func.count())
+                .where(Title.imdb_rating.is_not(None))
+                .group_by("bucket")
+                .order_by("bucket")
+            ).all()
+        ]
+        stats.avg_imdb = s.scalar(
+            select(func.round(func.avg(Title.imdb_rating), 2)).where(
+                Title.imdb_rating.is_not(None)
+            )
+        )
+
+        stats.languages = [
+            (lang, cnt)
+            for lang, cnt in s.execute(
+                select(Title.original_language, func.count())
+                .where(Title.original_language.is_not(None))
+                .group_by(Title.original_language)
+                .order_by(func.count().desc())
+                .limit(10)
             ).all()
         ]
 

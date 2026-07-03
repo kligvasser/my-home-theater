@@ -450,6 +450,19 @@ Each phase is shippable and has explicit acceptance criteria. Build in order.
   canonical feature vector (`homeTheater/features.py`) at decision time —
   approve/reject/import decisions become labeled training rows for the
   preference classifier. Migration `a1f3c9d27e54`; 135 tests, ruff+mypy clean.
+- **Phase 11 — Taste model + dashboard visualizations.** ✅ **Done** —
+  unsupervised content-based taste model (`homeTheater/taste.py`, scikit-learn):
+  per-kind TF-IDF over namespaced tokens (genres, keywords, cast, directors,
+  language, decade, certification, collection), cosine kNN **similarity** for
+  any new title (score + "like: …" neighbors), and silhouette-picked KMeans
+  **clustering** that characterizes the library. Discovery blends similarity
+  into candidate scores/reasons and snapshots it in `candidate.features.taste`;
+  `taste:` config (enabled/min_library/neighbors/weight/max_clusters).
+  Surfaces: `/insights` page (cluster cards per kind), `GET /api/insights`,
+  `GET /api/similarity?tmdb_id=&kind=`, `home-theater insights` CLI.
+  Dashboard v2: genre/resolution/language bar charts, decade + IMDb-rating
+  histograms with direct labels, avg-rating stat, coverage meter — single-hue
+  viz token contrast-checked for light and dark. 142 tests, ruff+mypy clean.
 
 ---
 

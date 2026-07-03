@@ -122,6 +122,34 @@ async def status_page(request: Request) -> HTMLResponse:
     )
 
 
+@router.get("/insights", response_class=HTMLResponse)
+def insights(request: Request) -> HTMLResponse:
+    """Taste clusters per kind. Sync-def: sklearn runs in the threadpool."""
+
+    from ..taste import build_index
+
+    cfg = get_config().taste
+    sections = []
+    for kind_label, kind in (("Movies", "movie"), ("Series", "series")):
+        from ..db.models import TitleKind
+
+        index = build_index(TitleKind(kind), min_library=cfg.min_library)
+        sections.append(
+            {
+                "label": kind_label,
+                "available": index is not None,
+                "titles": index.size if index else 0,
+                "min_library": cfg.min_library,
+                "clusters": index.clusters(cfg.max_clusters) if index else [],
+            }
+        )
+    return templates.TemplateResponse(
+        request,
+        "insights.html",
+        {"sections": sections, "active": "insights", "version": __version__},
+    )
+
+
 @router.get("/runs", response_class=HTMLResponse)
 def runs(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(

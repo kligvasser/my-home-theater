@@ -1,5 +1,19 @@
 {% extends "base.html" %}
 {% block title %}Dashboard · my-home-theater{% endblock %}
+
+{% macro hbars(pairs, unit="titles") %}
+<div class="hbars">
+  {% set maxv = pairs | map(attribute=1) | max %}
+  {% for name, cnt in pairs %}
+  <div class="hbar" title="{{ name }}: {{ cnt }} {{ unit }}">
+    <span class="hlbl">{{ name }}</span>
+    <div class="track"><div class="fill" style="width: {{ (cnt / maxv * 100) | round(1) }}%"></div></div>
+    <span class="hval">{{ cnt }}</span>
+  </div>
+  {% endfor %}
+</div>
+{% endmacro %}
+
 {% block content %}
 <h1>Library at a glance</h1>
 
@@ -9,57 +23,72 @@
   <div class="card"><span class="num">{{ stats.series }}</span><span class="lbl">Series</span></div>
   <div class="card"><span class="num">{{ stats.files }}</span><span class="lbl">Files</span></div>
   <div class="card"><span class="num">{{ stats.total_size_bytes | human_size }}</span><span class="lbl">Total size</span></div>
+  {% if stats.avg_imdb %}
+  <div class="card"><span class="num">{{ stats.avg_imdb }}</span><span class="lbl">Avg IMDb rating</span></div>
+  {% endif %}
 </section>
 
 <section class="coverage">
   <h2>Hebrew subtitle coverage</h2>
-  <div class="bar"><div class="fill" style="width: {{ stats.coverage.pct }}%"></div></div>
-  <p>{{ stats.coverage.covered }} / {{ stats.coverage.total }} owned titles
-     ({{ stats.coverage.pct }}%) have <code>{{ stats.coverage.lang }}</code> subtitles.</p>
+  <div class="meter">
+    <div class="bar"><div class="fill" style="width: {{ stats.coverage.pct }}%"></div></div>
+    <span class="mval">{{ stats.coverage.pct }}%</span>
+  </div>
+  <p class="muted small">{{ stats.coverage.covered }} / {{ stats.coverage.total }} owned titles
+     have <code>{{ stats.coverage.lang }}</code> subtitles.</p>
 </section>
 
 <div class="grid2">
   <section>
-    <h2>Resolutions</h2>
-    {% if stats.resolutions %}
-    <table>
-      <tbody>
-      {% for res, cnt in stats.resolutions %}
-        <tr><td>{{ res }}</td><td class="r">{{ cnt }}</td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
-    {% else %}<p class="muted">No resolution data yet.</p>{% endif %}
+    <h2>Top genres</h2>
+    {% if stats.genres %}{{ hbars(stats.genres[:12]) }}
+    {% else %}<p class="muted">No genres yet — run <code>home-theater enrich</code>.</p>{% endif %}
   </section>
 
   <section>
-    <h2>Top genres</h2>
-    {% if stats.genres %}
-    <table>
-      <tbody>
-      {% for name, cnt in stats.genres[:12] %}
-        <tr><td>{{ name }}</td><td class="r">{{ cnt }}</td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
-    {% else %}<p class="muted">No genres yet — run <code>home-theater enrich</code>.</p>{% endif %}
+    <h2>Resolutions</h2>
+    {% if stats.resolutions %}{{ hbars(stats.resolutions, unit="files") }}
+    {% else %}<p class="muted">No resolution data yet.</p>{% endif %}
+
+    <h2>Original language</h2>
+    {% if stats.languages %}{{ hbars(stats.languages) }}
+    {% else %}<p class="muted">No language data yet — run <code>home-theater enrich</code>.</p>{% endif %}
   </section>
 </div>
 
-<section>
-  <h2>By decade</h2>
-  {% if stats.decades %}
-  <div class="hist">
-    {% set maxd = stats.decades | map(attribute=1) | max %}
-    {% for dec, cnt in stats.decades %}
-      <div class="col">
-        <div class="colbar" style="height: {{ (cnt / maxd * 100) | round }}%" title="{{ cnt }}"></div>
-        <span class="collbl">{{ dec }}s</span>
-      </div>
-    {% endfor %}
-  </div>
-  {% else %}<p class="muted">No year data yet.</p>{% endif %}
-</section>
+<div class="grid2">
+  <section>
+    <h2>By decade</h2>
+    {% if stats.decades %}
+    <div class="hist">
+      {% set maxd = stats.decades | map(attribute=1) | max %}
+      {% for dec, cnt in stats.decades %}
+        <div class="col" title="{{ dec }}s: {{ cnt }} titles">
+          <span class="colval">{{ cnt }}</span>
+          <div class="colbar" style="height: {{ (cnt / maxd * 100) | round }}%"></div>
+          <span class="collbl">{{ dec }}s</span>
+        </div>
+      {% endfor %}
+    </div>
+    {% else %}<p class="muted">No year data yet.</p>{% endif %}
+  </section>
+
+  <section>
+    <h2>IMDb rating profile</h2>
+    {% if stats.ratings %}
+    <div class="hist">
+      {% set maxr = stats.ratings | map(attribute=1) | max %}
+      {% for bucket, cnt in stats.ratings %}
+        <div class="col" title="IMDb {{ bucket }}: {{ cnt }} titles">
+          <span class="colval">{{ cnt }}</span>
+          <div class="colbar" style="height: {{ (cnt / maxr * 100) | round }}%"></div>
+          <span class="collbl">{{ bucket }}</span>
+        </div>
+      {% endfor %}
+    </div>
+    {% else %}<p class="muted">No ratings yet — run <code>home-theater enrich</code>.</p>{% endif %}
+  </section>
+</div>
 
 <section>
   <h2>Recent runs</h2>

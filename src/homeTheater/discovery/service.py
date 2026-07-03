@@ -163,6 +163,21 @@ def _blocked_in_db(session: Session, title_id: int) -> str | None:
 def _persist(enriched: list[_Enriched], config: AppConfig, stats: DiscoveryStats) -> None:
     excluded = config.discovery.excluded_genres
     auto = config.features.auto_approve
+    taste_cfg = config.taste
+
+    # Lazy per-kind taste index over the owned library (content similarity —
+    # sklearn import deferred so discovery without taste stays light).
+    indexes: dict[TitleKind, Any] = {}
+
+    def _taste_index(kind: TitleKind) -> Any:
+        if kind not in indexes:
+            if taste_cfg.enabled:
+                from ..taste import build_index
+
+                indexes[kind] = build_index(kind, min_library=taste_cfg.min_library)
+            else:
+                indexes[kind] = None
+        return indexes[kind]
 
     with session_scope() as session:
         for item in enriched:
@@ -199,21 +214,32 @@ def _persist(enriched: list[_Enriched], config: AppConfig, stats: DiscoveryStats
                 stats.filtered += 1
                 continue
 
+            feats = extract_features(title)
+            quality = score(
+                imdb_rating,
+                imdb_votes,
+                details.popularity,
+                tmdb_rating=details.tmdb_rating,
+                tmdb_votes=details.tmdb_votes,
+            )
             reason = f"{outcome.reason}; via {item.disc.source}"
+
+            index = _taste_index(item.disc.kind)
+            if index is not None:
+                sim = index.similarity(feats, k=taste_cfg.neighbors)
+                feats["taste"] = {"score": sim.score, "like": sim.like}
+                quality = round(quality + taste_cfg.weight * 10 * sim.score, 3)
+                if sim.like:
+                    reason += f"; taste {sim.score:.2f} (like: {', '.join(sim.like[:3])})"
+
             session.add(
                 Candidate(
                     title_id=title.id,
                     source=CandidateSource.discovery,
                     status=CandidateStatus.approved if auto else CandidateStatus.new,
                     reason=reason,
-                    score=score(
-                        imdb_rating,
-                        imdb_votes,
-                        details.popularity,
-                        tmdb_rating=details.tmdb_rating,
-                        tmdb_votes=details.tmdb_votes,
-                    ),
-                    features=extract_features(title),
+                    score=quality,
+                    features=feats,
                     decided_at=utcnow() if auto else None,
                 )
             )
