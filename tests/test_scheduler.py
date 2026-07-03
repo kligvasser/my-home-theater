@@ -25,6 +25,7 @@ def test_build_scheduler_respects_intervals() -> None:
         subtitle_interval_minutes=0,  # disabled
         sync_interval_minutes=5,
         import_reconcile_interval_minutes=0,  # disabled
+        backup_interval_minutes=0,  # disabled
     )
     sched = build_scheduler(cfg)
     assert {j.id for j in sched.get_jobs()} == {"discovery", "sync"}

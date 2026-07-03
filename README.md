@@ -43,6 +43,7 @@ home-theater subtitles       # ask Bazarr to search for missing subs (Phase 5)
 home-theater acquire         # queue approved candidates to Radarr/Sonarr (Phase 6)
 home-theater sync            # advance in-flight download states (Phase 6)
 home-theater reconcile       # reconcile Radarr/Sonarr owned items -> catalog (Phase 7)
+home-theater backup          # write a timestamped SQLite backup (Phase 9)
 # health:   http://localhost:8000/health
 # readiness http://localhost:8000/ready
 ```
@@ -105,5 +106,9 @@ Phases 0–2 are in place:
   (scan/discovery/subtitle/sync/reconcile) behind a global concurrency guard, started
   from `serve` when `schedule.enabled`; Telegram/log notifier for new candidates,
   imports, and job failures.
+- **Phase 9** — hardening: provider health checks + `/status` page +
+  `/api/{providers,status}`, SQLite online backup (`home-theater backup` + daily job),
+  and a real Alembic initial migration baseline.
 
-Remaining: Phase 9 — hardening (coverage, retries/backoff, DB backup, deploy).
+All nine phases are in place. Use `alembic upgrade head` in production; `init_db()`
+covers dev/test.

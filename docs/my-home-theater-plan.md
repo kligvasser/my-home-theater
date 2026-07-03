@@ -421,6 +421,11 @@ Each phase is shippable and has explicit acceptance criteria. Build in order.
   `schedule.enabled`; verified registering jobs on boot.
 - **Phase 9 — Hardening.** Tests to meaningful coverage, retries/backoff,
   error surfacing, docs, backup of the SQLite DB, final launchd/systemd deploy.
+  ✅ **Done** — provider health checks + `/status` page + `/api/{providers,status}`
+  surfacing reachability & recent failures; SQLite online backup (`home-theater
+  backup` + daily scheduler job, prunes to `keep`); real Alembic initial migration
+  baseline (autogenerate verified empty on re-run); 77 tests. Retries/backoff exist
+  on metadata calls; a provider circuit-breaker remains a future nicety.
 
 ---
 

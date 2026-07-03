@@ -140,6 +140,17 @@ def reconcile() -> None:
     log.info("reconcile.cli_done", **stats.as_dict())
 
 
+def backup() -> None:
+    """Write a timestamped SQLite backup and prune old ones."""
+
+    from .backup import backup_database
+    from .config import get_config
+
+    _configure()
+    dest = backup_database(get_config())
+    log.info("backup.cli_done", dest=str(dest))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="home-theater")
     sub = parser.add_subparsers(dest="command")
@@ -151,6 +162,7 @@ def main() -> None:
     sub.add_parser("acquire", help="queue approved candidates to Radarr/Sonarr")
     sub.add_parser("sync", help="advance in-flight download states from Radarr/Sonarr")
     sub.add_parser("reconcile", help="reconcile Radarr/Sonarr owned items into the catalog")
+    sub.add_parser("backup", help="write a timestamped SQLite backup")
     args = parser.parse_args()
 
     if args.command == "scan":
@@ -167,6 +179,8 @@ def main() -> None:
         sync()
     elif args.command == "reconcile":
         reconcile()
+    elif args.command == "backup":
+        backup()
     else:
         serve()
 

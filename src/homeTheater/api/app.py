@@ -12,7 +12,7 @@ from .. import __version__
 from ..config import get_config
 from ..db import init_db
 from ..logging_setup import configure_logging, get_logger
-from . import candidates, catalog, health, subtitles, web, webhooks
+from . import candidates, catalog, health, status, subtitles, web, webhooks
 from .templates import STATIC_DIR
 
 log = get_logger(__name__)
@@ -60,6 +60,7 @@ def create_app() -> FastAPI:
     app.include_router(candidates.router)
     app.include_router(subtitles.router)
     app.include_router(webhooks.router)
+    app.include_router(status.router)
     app.include_router(web.router)
     return app
 

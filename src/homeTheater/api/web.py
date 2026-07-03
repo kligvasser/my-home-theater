@@ -93,6 +93,26 @@ def subtitles(request: Request) -> HTMLResponse:
     )
 
 
+@router.get("/status", response_class=HTMLResponse)
+async def status_page(request: Request) -> HTMLResponse:
+    from ..health import check_all
+
+    cfg = get_config()
+    return templates.TemplateResponse(
+        request,
+        "status.html",
+        {
+            "providers": await check_all(cfg),
+            "failures": [r for r in recent_runs(50) if r.status == "failed"],
+            "dry_run": cfg.features.dry_run,
+            "auto_approve": cfg.features.auto_approve,
+            "scheduler": cfg.schedule.enabled,
+            "active": "status",
+            "version": __version__,
+        },
+    )
+
+
 @router.get("/runs", response_class=HTMLResponse)
 def runs(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(

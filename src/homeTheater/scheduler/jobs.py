@@ -92,3 +92,13 @@ async def run_reconcile_job(config: AppConfig) -> None:
         return f"🔄 Reconciled {stats.imported} import(s)" if stats.imported else None
 
     await _guarded("reconcile", config, body)
+
+
+async def run_backup_job(config: AppConfig) -> None:
+    from ..backup import backup_database
+
+    async def body() -> str | None:
+        await asyncio.to_thread(backup_database, config)
+        return None  # routine; no need to notify on every backup
+
+    await _guarded("backup", config, body)

@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Status · my-home-theater{% endblock %}
+{% block content %}
+<h1>Status</h1>
+
+<section class="cards">
+  <div class="card"><span class="num">{{ "on" if dry_run else "off" }}</span><span class="lbl">dry-run</span></div>
+  <div class="card"><span class="num">{{ "on" if auto_approve else "off" }}</span><span class="lbl">auto-approve</span></div>
+  <div class="card"><span class="num">{{ "on" if scheduler else "off" }}</span><span class="lbl">scheduler</span></div>
+</section>
+
+<h2>Providers</h2>
+<table>
+  <thead><tr><th>Provider</th><th>Configured</th><th>Reachable</th><th>Detail</th></tr></thead>
+  <tbody>
+  {% for p in providers %}
+    <tr>
+      <td>{{ p.name }}</td>
+      <td>{{ "yes" if p.configured else "—" }}</td>
+      <td>
+        {% if p.ok is none %}<span class="muted">n/a</span>
+        {% elif p.ok %}<span class="pill success">up</span>
+        {% else %}<span class="pill failed">down</span>{% endif %}
+      </td>
+      <td class="small mono">{{ p.detail }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Recent failures ({{ failures | length }})</h2>
+{% if failures %}
+{% set runs = failures %}
+{% include "_runs_table.html" %}
+{% else %}
+<p class="muted">No failed jobs recorded. 🎉</p>
+{% endif %}
+{% endblock %}

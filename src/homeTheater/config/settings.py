@@ -44,6 +44,7 @@ class Schedule(BaseModel):
     subtitle_interval_minutes: int = Field(720, ge=0)
     sync_interval_minutes: int = Field(10, ge=0)
     import_reconcile_interval_minutes: int = Field(60, ge=0)
+    backup_interval_minutes: int = Field(1440, ge=0)  # daily DB backup
 
 
 class Database(BaseModel):

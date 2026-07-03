@@ -26,6 +26,7 @@ schedule:
   subtitle_interval_minutes: 720
   sync_interval_minutes: 10
   import_reconcile_interval_minutes: 60   # 0 disables a job
+  backup_interval_minutes: 1440           # daily SQLite backup
 
 database:
   url: sqlite:///data/home_theater.db

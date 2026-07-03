@@ -12,6 +12,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from ..config import AppConfig
 from ..logging_setup import get_logger
 from .jobs import (
+    run_backup_job,
     run_discovery_job,
     run_reconcile_job,
     run_scan_job,
@@ -32,6 +33,7 @@ def build_scheduler(config: AppConfig) -> AsyncIOScheduler:
         ("subtitle", s.subtitle_interval_minutes, run_subtitle_job),
         ("sync", s.sync_interval_minutes, run_sync_job),
         ("reconcile", s.import_reconcile_interval_minutes, run_reconcile_job),
+        ("backup", s.backup_interval_minutes, run_backup_job),
     ]
     for job_id, minutes, func in jobs:
         if minutes <= 0:
