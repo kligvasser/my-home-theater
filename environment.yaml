@@ -1,0 +1,41 @@
+name: my-home-theater
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - pip
+  # libmagic backs python-magic for media file sniffing (optional but handy)
+  - libmagic
+  - pip:
+      # --- Web / API ---
+      - fastapi
+      - "uvicorn[standard]"
+      - jinja2                # server-rendered dashboard (HTMX is frontend-only)
+      - python-multipart      # form posts from the dashboard
+
+      # --- Data / persistence ---
+      - "sqlalchemy>=2.0"
+      - alembic
+      - "pydantic>=2"
+      - pydantic-settings     # layered config + .env secrets
+
+      # --- External I/O ---
+      - httpx                 # all REST clients (TMDb/OMDb/Radarr/Sonarr/Bazarr)
+      - smbprotocol           # SMB2/3 to the WD MyCloud NAS
+      - guessit               # filename -> title/season/episode/quality
+
+      # --- Scheduling / orchestration ---
+      - apscheduler
+
+      # --- Config / logging ---
+      - pyyaml
+      - structlog
+
+      # --- Dev / test / quality ---
+      - pytest
+      - pytest-asyncio
+      - respx                 # mock httpx in tests
+      - ruff
+      - mypy
+      - pre-commit

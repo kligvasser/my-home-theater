@@ -1,0 +1,27 @@
+# systemd unit for an always-on Linux box (mini-PC / NAS with systemd).
+#
+# Install:
+#   1. Edit User, WorkingDirectory, and the conda env path below.
+#   2. sudo cp deploy/home-theater.service /etc/systemd/system/
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable --now home-theater
+#   Logs: journalctl -u home-theater -f
+
+[Unit]
+Description=my-home-theater dashboard & scheduler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kligvasser
+WorkingDirectory=/home/kligvasser/Projects/my-home-theater
+Environment=HOME_THEATER_CONFIG=/home/kligvasser/Projects/my-home-theater/config.yaml
+Environment=LOG_JSON=true
+# Point at the conda env's console script.
+ExecStart=/home/kligvasser/miniconda3/envs/my-home-theater/bin/home-theater
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

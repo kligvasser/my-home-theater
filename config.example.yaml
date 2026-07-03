@@ -1,0 +1,41 @@
+# my-home-theater — non-secret configuration.
+# Copy to `config.yaml` and edit. Secrets go in `.env` (see .env.example).
+
+nas:
+  # SMB share name (used if the roots below are relative to the share).
+  share: Elements_25A1-1
+  movies_root: Movies
+  tv_root: TV Shows
+
+thresholds:
+  min_imdb_rating: 7.0      # "high rank"
+  min_imdb_votes: 25000     # "enough views"
+  min_tmdb_votes: 500
+  allowed_resolutions:
+    - 1080p
+    - 2160p
+
+features:
+  dry_run: true             # keep true until acquisition/import are validated
+  auto_approve: false       # false = review candidates in the dashboard first
+
+schedule:
+  scan_interval_minutes: 360
+  discovery_interval_minutes: 720
+  subtitle_interval_minutes: 720
+  import_reconcile_interval_minutes: 15
+
+database:
+  url: sqlite:///data/home_theater.db
+  echo: false
+
+# Radarr/Sonarr quality profile the app selects when adding a title.
+quality_profile: HD-1080p
+
+# Free-form list of provider names you've enabled (metadata/library/subtitle).
+enabled_providers:
+  - tmdb
+  - omdb
+  - radarr
+  - sonarr
+  - bazarr

@@ -1,0 +1,63 @@
+# --- Secrets & local config (see plan §8) ---
+.env
+.env.*
+!.env.example
+config.yaml
+config.local.yaml
+config.*.yaml
+!config.example.yaml
+
+# --- App data ---
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+data/
+*.log
+logs/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+develop-eggs/
+wheels/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging / tooling
+.python-version
+uv.lock.local
+
+# --- Testing / linting / type checking ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.hypothesis/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# --- Claude Code local settings ---
+.claude/settings.local.json

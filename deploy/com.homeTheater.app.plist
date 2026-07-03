@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS launchd service for always-on running under conda.
+
+  Install:
+    1. Edit the paths below (conda env + project dir).
+    2. cp deploy/com.homeTheater.app.plist ~/Library/LaunchAgents/
+    3. launchctl load ~/Library/LaunchAgents/com.homeTheater.app.plist
+    4. launchctl start com.homeTheater.app
+  Logs go to <project>/data/launchd.{out,err}.log. Unload with `launchctl unload`.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.homeTheater.app</string>
+
+    <!-- Run the console script from the conda env. Adjust to your paths. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/kligvasser/miniconda3/envs/my-home-theater/bin/home-theater</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/kligvasser/Projects/my-home-theater</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME_THEATER_CONFIG</key>
+        <string>/Users/kligvasser/Projects/my-home-theater/config.yaml</string>
+        <key>LOG_JSON</key>
+        <string>true</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/kligvasser/Projects/my-home-theater/data/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/kligvasser/Projects/my-home-theater/data/launchd.err.log</string>
+</dict>
+</plist>
