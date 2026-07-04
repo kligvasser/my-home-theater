@@ -72,6 +72,7 @@ class TitleRow:
     has_sub: bool
     overview: str | None = None
     added_at: str | None = None  # ISO date the catalog first saw it
+    subtitle_langs: list[str] = field(default_factory=list)  # present sidecar langs
 
 
 # Library sort options + directions are defined next to the sort logic below
@@ -203,7 +204,8 @@ def _coverages(session: Session, langs: list[str]) -> list[Coverage]:
 
 def _title_row(t: Title, sub_lang: str) -> TitleRow:
     resolutions = sorted({f.resolution for f in t.owned_files if f.resolution})
-    has_sub = any(f.subtitle_langs and sub_lang in f.subtitle_langs for f in t.owned_files)
+    langs = sorted({lang for f in t.owned_files for lang in (f.subtitle_langs or [])})
+    has_sub = sub_lang in langs
     return TitleRow(
         id=t.id,
         title=t.title,
@@ -218,6 +220,7 @@ def _title_row(t: Title, sub_lang: str) -> TitleRow:
         has_sub=has_sub,
         overview=t.overview,
         added_at=t.created_at.date().isoformat() if t.created_at else None,
+        subtitle_langs=langs,
     )
 
 
@@ -242,7 +245,7 @@ _SORT_KEYS: dict[str, tuple[Any, bool]] = {
     "added": (lambda r: r.id, True),  # id is a monotonic proxy for insert order
     "files": (lambda r: r.owned_count, True),
     "res": (lambda r: _res_rank(r.resolutions), True),
-    "subs": (lambda r: (1 if r.has_sub else 0), True),
+    "subs": (lambda r: len(r.subtitle_langs), True),  # more sub languages first
 }
 TITLE_SORTS = tuple(_SORT_KEYS)
 TITLE_DIRS = ("asc", "desc")

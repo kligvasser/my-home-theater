@@ -224,3 +224,29 @@ def test_importing_ignores_live_download_progress() -> None:
     )
     assert st.stage == "Importing to NAS 30%"  # copy fraction, not the 100% download
     assert st.progress == 0.3
+
+
+def test_imported_candidate_excluded_from_activity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(tmp_path, monkeypatch)
+    _reset()
+    from homeTheater.api import create_app
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate, CandidateSource, Download, Title
+
+    init_db()
+    with session_scope() as s:
+        t = Title(tmdb_id=2, title="Done Movie", year=2024, kind=TitleKind.movie)
+        s.add(t)
+        s.flush()
+        c = Candidate(
+            title_id=t.id, source=CandidateSource.discovery, status=CandidateStatus.imported
+        )
+        s.add(c)
+        s.flush()
+        s.add(Download(candidate_id=c.id, external_id="h", state="imported", progress=1.0))
+
+    with TestClient(create_app()) as client:
+        data = client.get("/api/activity").json()
+        assert data["items"] == []  # imported items drop off Activity (video on NAS)

@@ -74,6 +74,7 @@ def library(
             "dir": effective_dir,
             "page": page,
             "pages": pages,
+            "sub_langs": get_config().subtitles.languages,
             "active": "library",
             "version": __version__,
         },

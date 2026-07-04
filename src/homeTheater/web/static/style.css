@@ -290,3 +290,7 @@ button.mini.danger { color: var(--fail); }
 button.mini.danger:hover:not(:disabled) {
   border-color: var(--fail); background: color-mix(in srgb, var(--fail) 12%, var(--panel-2));
 }
+/* Library per-language subtitle coverage cell */
+.subs .sub { display: inline-block; margin-right: 8px; white-space: nowrap; }
+.subs .sub.ok { color: var(--ok); }
+.subs .sub.no { color: var(--muted); }

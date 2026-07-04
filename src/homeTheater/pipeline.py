@@ -27,8 +27,10 @@ from .logging_setup import get_logger
 
 log = get_logger(__name__)
 
-# Candidates worth showing on the Activity view: everything mid-flight, plus
-# imported items whose subtitles aren't complete yet (still actionable).
+# Candidates worth showing on the Activity view: only mid-flight items (grab →
+# download → import). Once a movie's video is on the NAS it's ``imported`` and
+# drops off here — subtitle backfill is best-effort and reported on the Library /
+# Subtitles pages (a title may legitimately never get a Hebrew sub).
 _ACTIVE = (CandidateStatus.queued, CandidateStatus.downloading, CandidateStatus.failed)
 
 
@@ -81,13 +83,12 @@ class _Row:
 
 
 def _collect(config: AppConfig) -> list[_Row]:
-    target = set(config.subtitles.languages)
     rows: list[_Row] = []
     with session_scope() as s:
         pairs = s.execute(
             select(Candidate, Title)
             .join(Title, Title.id == Candidate.title_id)
-            .where(Candidate.status.in_((*_ACTIVE, CandidateStatus.imported)))
+            .where(Candidate.status.in_(_ACTIVE))  # imported items drop off here
             .order_by(Candidate.decided_at.desc(), Candidate.id.desc())
             .limit(100)
         ).all()
@@ -101,9 +102,6 @@ def _collect(config: AppConfig) -> list[_Row]:
                     for lang in (f.subtitle_langs or [])
                 }
             )
-            # Skip fully-done items (imported + all target subs present).
-            if cand.status is CandidateStatus.imported and target.issubset(present):
-                continue
             dl = s.scalar(
                 select(Download)
                 .where(Download.candidate_id == cand.id)

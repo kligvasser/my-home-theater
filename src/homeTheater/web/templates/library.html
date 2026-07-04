@@ -72,7 +72,9 @@
       <td class="small">{{ t.added_at or "—" }}</td>
       <td class="r">{{ t.owned_count }}</td>
       <td class="small">{{ t.resolutions | join(", ") }}</td>
-      <td>{{ "✓" if t.has_sub else "—" }}</td>
+      <td class="subs small">
+        {% for l in sub_langs %}<span class="sub {{ 'ok' if l in t.subtitle_langs else 'no' }}">{{ l }}{{ ' ✓' if l in t.subtitle_langs else ' —' }}</span>{% endfor %}
+      </td>
       <td>
         <button class="danger" type="button" data-action="delete-title"
                 data-id="{{ t.id }}" data-name="{{ t.title }}" title="Remove from catalog">🗑</button>
