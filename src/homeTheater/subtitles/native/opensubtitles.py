@@ -78,8 +78,13 @@ class OpenSubtitlesSource:
         params: dict[str, Any] = {"languages": query.lang}
         if query.moviehash:
             params["moviehash"] = query.moviehash
-        if query.kind is TitleKind.series and query.imdb_id:
-            params["parent_imdb_id"] = _imdb_num(query.imdb_id)
+        if query.kind is TitleKind.series:
+            # Always pin the episode; use the series imdb id when known, else the
+            # title text — never drop season/episode (that grabs a random episode).
+            if query.imdb_id:
+                params["parent_imdb_id"] = _imdb_num(query.imdb_id)
+            else:
+                params["query"] = query.title
             if query.season is not None:
                 params["season_number"] = query.season
             if query.episode is not None:

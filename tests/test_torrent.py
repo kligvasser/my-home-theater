@@ -586,3 +586,59 @@ async def test_cancel_removes_torrent_and_rejects(
         assert s.query(Download).one().state == "cancelled"
     removes = [c for c in route.calls if b'"torrent-remove"' in c.request.content]
     assert removes and b'"delete-local-data":true' in removes[0].request.content
+
+
+@respx.mock
+async def test_stalled_torrent_fails_after_grace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A grab stuck at 0% past the grace window (dead magnet / no seeders) must
+    flip to failed — Transmission reports such torrents as 'downloading' forever."""
+    from datetime import UTC, datetime, timedelta
+
+    _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch)
+    _reset()
+    cid = _seed_approved()
+
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate, CandidateStatus, Download
+
+    with session_scope() as s:
+        d = Download(candidate_id=cid, external_id=HASH, state="downloading", release="x")
+        s.add(d)
+        s.flush()
+        d.created_at = datetime.now(UTC) - timedelta(hours=10)  # past the 6h grace
+        s.get(Candidate, cid).status = CandidateStatus.downloading
+
+    # Transmission: status 4 (downloading), 0% — the classic stalled state.
+    torrents = {
+        "result": "success",
+        "arguments": {
+            "torrents": [
+                {
+                    "hashString": HASH,
+                    "percentDone": 0.0,
+                    "status": 4,
+                    "downloadDir": "/d",
+                    "error": 0,
+                    "errorString": "",
+                }
+            ]
+        },
+    }
+    respx.post(TRANSMISSION).mock(
+        side_effect=[
+            httpx.Response(409, headers={"X-Transmission-Session-Id": "s"}),
+            httpx.Response(200, json=torrents),
+        ]
+    )
+
+    from homeTheater.acquisition import sync_downloads
+    from homeTheater.config import get_config
+
+    stats = await sync_downloads(get_config())
+
+    assert stats.failed == 1
+    with session_scope() as s:
+        assert s.get(Candidate, cid).status == CandidateStatus.failed
+        assert s.query(Download).one().state == "failed"

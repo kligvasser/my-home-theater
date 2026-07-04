@@ -17,8 +17,8 @@ log = get_logger(__name__)
 router = APIRouter(prefix="/api", tags=["pipeline"])
 
 
-def _window_info() -> dict[str, Any]:
-    w = effective_config().acquisition.window
+def _window_info(cfg: Any) -> dict[str, Any]:
+    w = cfg.acquisition.window
     hour = datetime.now().hour  # local wall-clock; "night" is local
     return {
         "enabled": w.enabled,
@@ -32,8 +32,12 @@ def _window_info() -> dict[str, Any]:
 async def api_activity() -> dict[str, Any]:
     """Live state of every in-flight candidate + the acquire window status."""
 
-    states = await activity(effective_config())
-    return {"window": _window_info(), "items": [s.as_dict() for s in states]}
+    import asyncio
+
+    # effective_config() reads runtime overrides from the DB — off the loop.
+    cfg = await asyncio.to_thread(effective_config)
+    states = await activity(cfg)
+    return {"window": _window_info(cfg), "items": [s.as_dict() for s in states]}
 
 
 @router.post("/pipeline/acquire-now", dependencies=[Depends(require_token)])

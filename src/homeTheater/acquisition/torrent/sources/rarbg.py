@@ -10,6 +10,7 @@ bonus source, not a dependable one — keep "piratebay" enabled alongside it.
 from __future__ import annotations
 
 import re
+from html import unescape
 from urllib.parse import quote
 
 import httpx
@@ -57,7 +58,7 @@ class RarbgSource:
         out: list[TorrentRelease] = []
         seen: set[str] = set()
         for match in _MAGNET_RE.finditer(html):
-            magnet = match.group(1)
+            magnet = unescape(match.group(1))  # decode &amp; in tracker params
             title = _title_from_magnet(magnet)
             key = title.lower()
             if key in seen:

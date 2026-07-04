@@ -159,11 +159,19 @@ async def _fetch_one(config: AppConfig, sources: list[SubtitleSource], item: _Wo
     for source in sources:
         if not source.supports(item.lang):
             continue
-        results = await source.search(query)
-        if not results:
+        try:
+            results = await source.search(query)
+            if not results:
+                continue
+            best = max(results, key=lambda r: r.score)
+            data = await source.download(best)
+        except Exception as exc:
+            # A dead provider / exhausted quota / bad payload must not abort the
+            # fallback chain (e.g. OpenSubtitles.com 401 while ktuvit could serve it).
+            log.warning(
+                "subtitle.source_error", source=source.name, lang=item.lang, detail=redact_exc(exc)
+            )
             continue
-        best = max(results, key=lambda r: r.score)
-        data = await source.download(best)
         if not data:
             continue
         dest = subtitle_dest(local_media, item.lang, config.organizer.subs_folder)
@@ -271,10 +279,15 @@ async def sweep_native(config: AppConfig) -> NativeSweepStats:
                 )
             work = _collect_work(config)
             stats.considered = len(work)
+            attempted = 0
             for item in work:
-                if stats.downloaded >= budget:
+                # Cap on searches *attempted*, not just successful downloads —
+                # otherwise a library of titles with no available subs re-searches
+                # every provider on every run and burns quota unbounded.
+                if attempted >= budget:
                     stats.capped += 1
                     continue
+                attempted += 1
                 try:
                     dest = await _fetch_one(config, sources, item)
                     if dest is not None:

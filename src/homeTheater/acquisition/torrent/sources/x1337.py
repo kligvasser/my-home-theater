@@ -15,6 +15,7 @@ layout change yields fewer/zero results, never a crash.
 from __future__ import annotations
 
 import re
+from html import unescape
 from urllib.parse import quote
 
 import httpx
@@ -113,7 +114,8 @@ class X1337Source:
             log.warning("torrent.1337x.detail_failed", href=href, detail=str(exc))
             return None
         match = _MAGNET_RE.search(html)
-        return match.group(1) if match else None
+        # Decode HTML entities (&amp; -> &) so tracker/dn params aren't garbled.
+        return unescape(match.group(1)) if match else None
 
 
 def _name_from_href(href: str) -> str:

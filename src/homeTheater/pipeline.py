@@ -13,6 +13,7 @@ glance. Read-only and defensive: a Transmission outage degrades to DB-only state
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -242,7 +243,9 @@ def _stage(
 async def activity(config: AppConfig) -> list[ExecutionState]:
     """Live execution state for every in-flight candidate."""
 
-    rows = _collect(config)
+    # _collect is synchronous SQLAlchemy — keep it off the event loop (the Activity
+    # page polls this, so a slow/locked DB shouldn't stall the whole server).
+    rows = await asyncio.to_thread(_collect, config)
     live = await _live_progress(config, rows)
     target = list(config.subtitles.languages)
     return [_build(r, live.get(r.infohash or ""), target) for r in rows]

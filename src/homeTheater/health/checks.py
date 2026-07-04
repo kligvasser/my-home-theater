@@ -137,18 +137,22 @@ async def check_nas_mount(config: AppConfig) -> ProviderStatus:
     base = config.torrent.library_base_dir or config.subtitles.library_base_dir
     if not base:
         return ProviderStatus("nas-mount", False, None, "writing via SMB (no local mount set)")
+
+    # Parse the mount table via a cancellable subprocess rather than stat()ing the
+    # path: a stat on a WEDGED SMB mount hangs forever and would leak a threadpool
+    # worker (eventually starving every asyncio.to_thread call server-wide).
     try:
-        # A dead SMB mount can make stat() hang; bound it.
-        mounted = await asyncio.wait_for(asyncio.to_thread(os.path.ismount, base), timeout=3.0)
+        proc = await asyncio.create_subprocess_exec(
+            "mount", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=3.0)
     except Exception:
-        return ProviderStatus("nas-mount", True, False, f"{base} unreachable (stale mount?)")
-    if mounted:
+        return ProviderStatus("nas-mount", True, None, f"{base} (mount state unknown)")
+    if f" on {base} ".encode() in out:  # "…share on /Volumes/X (smbfs, …)"
         return ProviderStatus("nas-mount", True, True, f"mounted at {base}")
-    try:
-        exists = await asyncio.wait_for(asyncio.to_thread(os.path.isdir, base), timeout=3.0)
-    except Exception:
-        exists = False
-    if exists:
+    # Not a mount point -> safe to stat (only wedged mounts hang); a plain local dir
+    # is a perfectly valid library target.
+    if os.path.isdir(base):
         return ProviderStatus("nas-mount", True, True, f"{base} (local dir)")
     return ProviderStatus("nas-mount", True, False, f"{base} NOT mounted")
 
@@ -219,7 +223,7 @@ async def check_subtitle_accounts(config: AppConfig) -> list[ProviderStatus]:
     return out
 
 
-_cache: tuple[float, list[ProviderStatus]] | None = None
+_cache: tuple[float, str, list[ProviderStatus]] | None = None
 _cache_lock = asyncio.Lock()
 
 
@@ -234,10 +238,13 @@ async def check_all(config: AppConfig) -> list[ProviderStatus]:
     """Probe the services relevant to the configured stack (short-lived cache)."""
 
     global _cache
+    # Key the cache on the active backends so a runtime backend flip doesn't serve
+    # the previous stack's provider list for a TTL.
+    key = f"{config.acquisition.backend}:{config.subtitles.backend}"
     async with _cache_lock:
         now = time.monotonic()
-        if _cache is not None and now - _cache[0] < CACHE_TTL_SECONDS:
-            return _cache[1]
+        if _cache is not None and _cache[1] == key and now - _cache[0] < CACHE_TTL_SECONDS:
+            return _cache[2]
 
         checks = [check_tmdb(config), check_omdb(config), check_smb(config)]
         if config.acquisition.backend == "torrent":
@@ -251,5 +258,5 @@ async def check_all(config: AppConfig) -> list[ProviderStatus]:
 
         statuses = list(await asyncio.gather(*checks))
         statuses += await check_subtitle_accounts(config)
-        _cache = (now, statuses)
+        _cache = (now, key, statuses)
         return statuses

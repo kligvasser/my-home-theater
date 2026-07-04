@@ -356,19 +356,22 @@ async def sync_downloads_torrent(config: AppConfig) -> SyncStats:
                 if dl is None:
                     continue
                 cand = s.get(Candidate, dl.candidate_id)
+                past_grace = utcnow() - _aware(dl.created_at) > stale_after
                 if cand is not None and cand.status is CandidateStatus.rejected:
                     dl.state = "cancelled"
-                elif st is not None and st.downloading:
+                elif st is not None and st.downloading and not (st.progress <= 0.0 and past_grace):
                     dl.state = "downloading"
                     dl.progress = st.progress
                     dl.save_path = st.save_path
                     if cand is not None:
                         cand.status = CandidateStatus.downloading
                     stats.downloading += 1
-                elif utcnow() - _aware(dl.created_at) > stale_after:
-                    # Gone from the client, or stuck at 0 seeders past the grace window.
+                elif past_grace:
+                    # Gone from the client, or "downloading" at 0% past the grace
+                    # window (dead magnet / no seeders) — Transmission reports such a
+                    # torrent as active forever, so time-box it here.
                     dl.state = "failed"
-                    dl.error = "torrent not found in client or stalled with no progress"
+                    dl.error = "torrent not found in client, or stalled at 0% past the grace window"
                     if cand is not None:
                         cand.status = CandidateStatus.failed
                     stats.failed += 1

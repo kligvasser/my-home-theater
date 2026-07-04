@@ -101,8 +101,12 @@ class KtuvitSource:
             timeout=self._timeout,
         )
         resp.raise_for_status()
-        # Session lives in the client cookie jar (Set-Cookie: Login=...).
-        self._logged_in = "Login" in resp.cookies or bool(_unwrap(resp.json()))
+        # A successful login sets the ``Login`` session cookie. Don't fall back to
+        # "any non-empty body" — a failed login returns a non-empty error payload,
+        # which would look like success and then silently return no results.
+        self._logged_in = "Login" in resp.cookies
+        if not self._logged_in:
+            log.warning("ktuvit.login_failed", detail="no session cookie (check credentials)")
         return self._logged_in
 
     async def search(self, query: SubtitleQuery) -> list[SubtitleResult]:
@@ -268,6 +272,9 @@ def _extract_srt(data: bytes) -> bytes:
     if data[:2] == b"PK":
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             names = [n for n in zf.namelist() if n.lower().endswith((".srt", ".sub", ".ass"))]
-            if names:
-                return zf.read(names[0])
+            if not names:
+                # A zip with no recognizable subtitle — don't write the raw archive
+                # bytes as a ".srt" (that would look "fetched" and never retry).
+                raise ValueError("ktuvit zip contained no subtitle file")
+            return zf.read(names[0])
     return data
