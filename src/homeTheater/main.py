@@ -65,14 +65,14 @@ def discover() -> None:
 
     import asyncio
 
-    from .config import get_config
+    from .config import effective_config
     from .db import init_db
     from .discovery import run_discovery
 
     _configure()
-    config = get_config()
     init_db()  # dev convenience; production uses Alembic
-    stats = asyncio.run(run_discovery(config))
+    # effective_config: dashboard runtime overrides (thresholds etc.) apply here too.
+    stats = asyncio.run(run_discovery(effective_config()))
     log.info("discover.cli_done", **stats.as_dict())
 
 

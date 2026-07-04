@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}Settings · my-home-theater{% endblock %}
+
+{% macro num(path, file_val, ov_val, step="1", minv="0") %}
+<input type="number" data-path="{{ path }}" step="{{ step }}" min="{{ minv }}"
+       value="{{ ov_val if ov_val is not none else '' }}"
+       placeholder="{{ file_val }}" class="{{ 'overridden' if ov_val is not none }}" />
+{% endmacro %}
+
+{% macro boolsel(path, file_val, ov_val) %}
+<select data-path="{{ path }}" data-type="bool" class="{{ 'overridden' if ov_val is not none }}">
+  <option value="" {{ 'selected' if ov_val is none }}>inherit ({{ 'on' if file_val else 'off' }})</option>
+  <option value="true" {{ 'selected' if ov_val is true }}>on</option>
+  <option value="false" {{ 'selected' if ov_val is false }}>off</option>
+</select>
+{% endmacro %}
+
+{% block content %}
+<h1>Settings</h1>
+<p class="muted">Runtime overrides, layered over <code>config.yaml</code> and applied on the
+next discovery run. Blank = inherit the file value (shown as placeholder).
+Saving requires the dashboard token (🔒 top-right).</p>
+
+<form id="settings-form" onsubmit="return false">
+  <div class="grid2">
+    <section class="card settings-card">
+      <h2>Thresholds — global</h2>
+      <label>Min IMDb rating {{ num("thresholds.min_imdb_rating", file.thresholds.min_imdb_rating, ov.get("thresholds", {}).get("min_imdb_rating"), step="0.1") }}</label>
+      <label>Min IMDb votes {{ num("thresholds.min_imdb_votes", file.thresholds.min_imdb_votes, ov.get("thresholds", {}).get("min_imdb_votes")) }}</label>
+      <label>Min TMDb votes {{ num("thresholds.min_tmdb_votes", file.thresholds.min_tmdb_votes, ov.get("thresholds", {}).get("min_tmdb_votes")) }}</label>
+      <label>TMDb fallback (no IMDb data) {{ boolsel("thresholds.tmdb_fallback", file.thresholds.tmdb_fallback, ov.get("thresholds", {}).get("tmdb_fallback")) }}</label>
+    </section>
+
+    <section class="card settings-card">
+      <h2>Per-kind overrides</h2>
+      {% set fm = file.thresholds.movie or {} %}{% set om = ov.get("thresholds", {}).get("movie", {}) %}
+      {% set fs = file.thresholds.series or {} %}{% set os_ = ov.get("thresholds", {}).get("series", {}) %}
+      <h3>Movies</h3>
+      <label>Min IMDb rating {{ num("thresholds.movie.min_imdb_rating", fm.get("min_imdb_rating") or file.thresholds.min_imdb_rating, om.get("min_imdb_rating"), step="0.1") }}</label>
+      <label>Min IMDb votes {{ num("thresholds.movie.min_imdb_votes", fm.get("min_imdb_votes") or file.thresholds.min_imdb_votes, om.get("min_imdb_votes")) }}</label>
+      <h3>Series</h3>
+      <label>Min IMDb rating {{ num("thresholds.series.min_imdb_rating", fs.get("min_imdb_rating") or file.thresholds.min_imdb_rating, os_.get("min_imdb_rating"), step="0.1") }}</label>
+      <label>Min IMDb votes {{ num("thresholds.series.min_imdb_votes", fs.get("min_imdb_votes") or file.thresholds.min_imdb_votes, os_.get("min_imdb_votes")) }}</label>
+    </section>
+
+    <section class="card settings-card">
+      <h2>Discovery</h2>
+      <label>Trending source {{ boolsel("discovery.trending", file.discovery.trending, ov.get("discovery", {}).get("trending")) }}</label>
+      <label>Top-rated source {{ boolsel("discovery.top_rated", file.discovery.top_rated, ov.get("discovery", {}).get("top_rated")) }}</label>
+      <label>Max per source {{ num("discovery.max_per_source", file.discovery.max_per_source, ov.get("discovery", {}).get("max_per_source"), minv="1") }}</label>
+      <label class="warn">Auto-approve new candidates {{ boolsel("features.auto_approve", file.features.auto_approve, ov.get("features", {}).get("auto_approve")) }}</label>
+      <p class="muted small">dry_run is <b>{{ "ON" if read_only.dry_run else "OFF" }}</b> —
+      changeable only in <code>config.yaml</code> (safety switch).</p>
+    </section>
+
+    <section class="card settings-card">
+      <h2>Taste model</h2>
+      <label>Enabled {{ boolsel("taste.enabled", file.taste.enabled, ov.get("taste", {}).get("enabled")) }}</label>
+      <label>Score weight {{ num("taste.weight", file.taste.weight, ov.get("taste", {}).get("weight"), step="0.1") }}</label>
+      <label>kNN neighbors {{ num("taste.neighbors", file.taste.neighbors, ov.get("taste", {}).get("neighbors"), minv="1") }}</label>
+      <label>Min library size {{ num("taste.min_library", file.taste.min_library, ov.get("taste", {}).get("min_library"), minv="2") }}</label>
+    </section>
+  </div>
+
+  <div class="filters" style="margin-top:18px">
+    <button type="button" data-action="save-settings">💾 Save overrides</button>
+    <button type="button" class="danger" data-action="reset-settings">Reset all to config.yaml</button>
+    {% if ov %}<span class="muted small">active overrides: {{ ov | tojson }}</span>{% endif %}
+  </div>
+</form>
+{% endblock %}

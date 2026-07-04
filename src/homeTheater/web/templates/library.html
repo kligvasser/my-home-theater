@@ -10,15 +10,23 @@
     <option value="movie" {{ 'selected' if kind == 'movie' }}>Movies</option>
     <option value="series" {{ 'selected' if kind == 'series' }}>Series</option>
   </select>
-  <button type="submit">Filter</button>
+  <select name="sort">
+    <option value="added" {{ 'selected' if sort == 'added' }}>Recently added</option>
+    <option value="rating" {{ 'selected' if sort == 'rating' }}>IMDb rating</option>
+    <option value="title" {{ 'selected' if sort == 'title' }}>Title A→Z</option>
+    <option value="year" {{ 'selected' if sort == 'year' }}>Year</option>
+  </select>
+  <button type="submit">Apply</button>
   <span class="muted">{{ total }} match{{ 'es' if total != 1 }}</span>
 </form>
+
+{% set qs = "q=" ~ ((q or '') | urlencode) ~ "&kind=" ~ ((kind or '') | urlencode) ~ "&sort=" ~ (sort | urlencode) %}
 
 {% if rows %}
 <table class="library">
   <thead>
     <tr><th></th><th>Title</th><th>Year</th><th>Kind</th><th>IMDb</th><th>Votes</th>
-        <th>Genres</th><th>Files</th><th>Res</th><th>Subs</th></tr>
+        <th>Genres</th><th>Added</th><th>Files</th><th>Res</th><th>Subs</th><th></th></tr>
   </thead>
   <tbody>
   {% for t in rows %}
@@ -26,15 +34,27 @@
       <td class="poster">
         {% if t.poster_url %}<img src="{{ t.poster_url }}" alt="" loading="lazy" />{% endif %}
       </td>
-      <td>{{ t.title }}</td>
+      <td>
+        {{ t.title }}
+        {% if t.overview %}
+        <details class="overview"><summary>description</summary>
+          <p>{{ t.overview }}</p>
+        </details>
+        {% endif %}
+      </td>
       <td>{{ t.year or "—" }}</td>
       <td>{{ t.kind }}</td>
       <td class="r">{{ "%.1f"|format(t.imdb_rating) if t.imdb_rating is not none else "—" }}</td>
       <td class="r">{{ "{:,}".format(t.imdb_votes) if t.imdb_votes is not none else "—" }}</td>
       <td class="small">{{ t.genres | join(", ") }}</td>
+      <td class="small">{{ t.added_at or "—" }}</td>
       <td class="r">{{ t.owned_count }}</td>
       <td class="small">{{ t.resolutions | join(", ") }}</td>
       <td>{{ "✓" if t.has_sub else "—" }}</td>
+      <td>
+        <button class="danger" type="button" data-action="delete-title"
+                data-id="{{ t.id }}" data-name="{{ t.title }}" title="Remove from catalog">🗑</button>
+      </td>
     </tr>
   {% endfor %}
   </tbody>
@@ -42,11 +62,13 @@
 
 {% if pages > 1 %}
 <nav class="pager">
-  {% if page > 1 %}<a href="?q={{ (q or '') | urlencode }}&kind={{ (kind or '') | urlencode }}&page={{ page - 1 }}">← Prev</a>{% endif %}
+  {% if page > 1 %}<a href="?{{ qs }}&page={{ page - 1 }}">← Prev</a>{% endif %}
   <span>Page {{ page }} / {{ pages }}</span>
-  {% if page < pages %}<a href="?q={{ (q or '') | urlencode }}&kind={{ (kind or '') | urlencode }}&page={{ page + 1 }}">Next →</a>{% endif %}
+  {% if page < pages %}<a href="?{{ qs }}&page={{ page + 1 }}">Next →</a>{% endif %}
 </nav>
 {% endif %}
+<p class="muted small note">🗑 removes a title from the <b>catalog only</b> (never the NAS);
+a rescan re-adds it if the files still exist. Its candidate history is erased too.</p>
 {% else %}
 <p class="muted">No titles. Run <code>home-theater scan</code> to build the catalog.</p>
 {% endif %}

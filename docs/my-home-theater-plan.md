@@ -450,6 +450,27 @@ Each phase is shippable and has explicit acceptance criteria. Build in order.
   canonical feature vector (`homeTheater/features.py`) at decision time —
   approve/reject/import decisions become labeled training rows for the
   preference classifier. Migration `a1f3c9d27e54`; 135 tests, ruff+mypy clean.
+- **Phase 11 — Taste model + dashboard viz.** ✅ **Done** — `homeTheater/taste.py`:
+  TF-IDF over content tokens (genres/keywords/cast/directors/language/decade),
+  per-kind KMeans clusters (silhouette-picked k), cosine kNN similarity blended
+  into discovery scores + reasons; `/insights` page + `/api/{insights,similarity}`
+  + `home-theater insights`; dashboard bar/histogram charts (genres, decades,
+  ratings, languages, resolutions). Verified on the real library (218 titles
+  scanned over guest SMB, enriched via TMDb+OMDb).
+- **Phase 12 — Interactive dashboard.** ✅ **Done** — single-token "unlock" in
+  the top bar (localStorage, X-Auth-Token; the pass protecting every mutation).
+  Candidates: approve/reject/queue buttons, TMDb search-and-add box
+  (`GET /api/candidates/search` + existing manual add), "Discover more" button
+  (`POST /api/candidates/discover`, background run with optional per-source
+  boost), taste-match line + expandable descriptions. Library: sort by
+  added/rating/title/year (default: recently added), Added column, expandable
+  descriptions, token-gated catalog-only delete (`DELETE /api/titles/{id}`,
+  cascades candidates/downloads/subtitles/files; NAS never touched). Settings
+  page: runtime overrides (thresholds global+per-kind, discovery sources,
+  taste knobs, auto_approve) stored in the `setting` table, deep-merged over
+  config.yaml by `config.runtime.effective_config()` and applied on the next
+  discovery run — `dry_run` deliberately file-only. Dashboard: "Recently added"
+  poster wall. 151 tests, ruff+mypy clean; all pages + auth verified live.
 - **Phase 11 — Taste model + dashboard visualizations.** ✅ **Done** —
   unsupervised content-based taste model (`homeTheater/taste.py`, scikit-learn):
   per-kind TF-IDF over namespaced tokens (genres, keywords, cast, directors,

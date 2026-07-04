@@ -103,7 +103,8 @@ def test_html_pages_render(config_file: Path) -> None:
         r = client.get("/")
         assert r.status_code == 200
         assert "Library at a glance" in r.text
-        assert "The Matrix" not in r.text  # dashboard shows stats, not the title list
+        assert "Recently added" in r.text  # poster wall shows the owned title
+        assert "The Matrix" in r.text
 
         r = client.get("/library?q=matrix")
         assert r.status_code == 200

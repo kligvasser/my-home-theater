@@ -90,6 +90,21 @@
   </section>
 </div>
 
+{% if recent %}
+<section>
+  <h2>Recently added</h2>
+  <div class="wall">
+    {% for t in recent %}
+    <a class="tile" href="/library?q={{ t.title | urlencode }}" title="{{ t.title }}{% if t.year %} ({{ t.year }}){% endif %} · added {{ t.added_at }}">
+      {% if t.poster_url %}<img src="{{ t.poster_url }}" alt="" loading="lazy" />
+      {% else %}<span class="noposter">{{ t.title[:24] }}</span>{% endif %}
+      <span class="tname">{{ t.title }}</span>
+    </a>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
 <section>
   <h2>Recent runs</h2>
   {% include "_runs_table.html" %}

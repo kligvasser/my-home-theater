@@ -62,10 +62,13 @@ async def run_scan_job(config: AppConfig) -> None:
 
 
 async def run_discovery_job(config: AppConfig) -> None:
+    from ..config import effective_config
     from ..discovery import run_discovery
 
     async def body() -> str | None:
-        stats = await run_discovery(config)
+        # Re-read per run: dashboard runtime overrides (thresholds, sources,
+        # taste weight, auto_approve) apply without a restart.
+        stats = await run_discovery(effective_config())
         return f"🍿 {stats.created} new candidate(s)" if stats.created else None
 
     await _guarded("discovery", config, body)

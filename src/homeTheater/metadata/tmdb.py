@@ -132,6 +132,37 @@ class TMDbClient:
                     return int(r["id"])
         return int(results[0]["id"])
 
+    async def search_results(
+        self, title: str, kind: TitleKind, limit: int = 8
+    ) -> list[TmdbTitle]:
+        """Top search matches as stubs (id/title/year/poster) — for the UI's
+        search-and-add box, unlike :meth:`search` which picks one id."""
+
+        if kind is TitleKind.movie:
+            path, date_field = "/search/movie", "release_date"
+        else:
+            path, date_field = "/search/tv", "first_air_date"
+        key = f"searchlist:{kind.value}:{self._language}:{title.lower()}"
+        data = await self._get(path, {"query": title, "language": self._language}, key)
+        out: list[TmdbTitle] = []
+        for r in data.get("results") or []:
+            if "id" not in r:
+                continue
+            out.append(
+                TmdbTitle(
+                    tmdb_id=int(r["id"]),
+                    title=r.get("title") or r.get("name") or "",
+                    year=_year_of(r.get(date_field)),
+                    tmdb_rating=r.get("vote_average"),
+                    tmdb_votes=r.get("vote_count"),
+                    poster_url=_poster(r.get("poster_path")),
+                    overview=r.get("overview") or None,
+                )
+            )
+            if len(out) >= limit:
+                break
+        return out
+
     async def _discover_list(
         self, path: str, kind: TitleKind, cache_key: str, limit: int
     ) -> list[TmdbTitle]:

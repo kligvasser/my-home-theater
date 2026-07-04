@@ -1,6 +1,7 @@
 """Layered application configuration."""
 
 from .loader import ConfigError, get_config, load_config
+from .runtime import OverrideError, effective_config, load_overrides, save_overrides
 from .settings import (
     Acquisition,
     AppConfig,
@@ -12,6 +13,7 @@ from .settings import (
     Schedule,
     Secrets,
     Subtitles,
+    Taste,
     Thresholds,
 )
 
@@ -24,10 +26,15 @@ __all__ = [
     "FeatureFlags",
     "Metadata",
     "NASPaths",
+    "OverrideError",
     "Schedule",
     "Secrets",
     "Subtitles",
+    "Taste",
     "Thresholds",
+    "effective_config",
     "get_config",
     "load_config",
+    "load_overrides",
+    "save_overrides",
 ]

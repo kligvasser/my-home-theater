@@ -4,12 +4,28 @@
 <h1>Candidate queue</h1>
 
 <nav class="statusfilter">
-  {% for st in ["new", "approved", "rejected", "queued", "imported"] %}
+  {% for st in ["new", "approved", "rejected", "queued", "downloading", "imported", "failed"] %}
     <a href="/candidates?status={{ st }}" class="{{ 'active' if status == st }}">
       {{ st }} <span class="count">{{ counts.get(st, 0) }}</span>
     </a>
   {% endfor %}
 </nav>
+
+<section class="findmore">
+  <form id="cand-search" class="filters">
+    <input type="search" id="cand-q" placeholder="Search TMDb to add…" minlength="2" />
+    <select id="cand-kind">
+      <option value="movie">Movie</option>
+      <option value="series">Series</option>
+    </select>
+    <button type="submit">Search</button>
+    <span class="spacer"></span>
+    <label class="muted small" for="discover-max">per source</label>
+    <input type="number" id="discover-max" min="1" max="100" placeholder="20" style="width:70px" />
+    <button type="button" data-action="discover">🔍 Discover more</button>
+  </form>
+  <div id="cand-results" class="sresults"></div>
+</section>
 
 {% if candidates %}
 <div class="candidate-grid">
@@ -26,14 +42,34 @@
         {% if c.imdb_votes is not none %}<span class="muted">{{ "{:,}".format(c.imdb_votes) }} votes</span>{% endif %}
         {% if c.score is not none %}<span class="muted">score {{ c.score }}</span>{% endif %}
       </div>
+      {% if c.taste_like %}
+      <p class="taste small">🎯 {{ "%.0f"|format(c.taste_score * 100) }}% taste match ·
+        like {{ c.taste_like | join(", ") }}</p>
+      {% endif %}
       <p class="reason">{{ c.reason or "" }}</p>
+      {% if c.overview %}
+      <details class="overview"><summary>description</summary><p>{{ c.overview }}</p></details>
+      {% endif %}
+      <div class="cactions">
+        {% if c.status == "new" %}
+        <button type="button" data-action="candidate" data-verb="approve" data-id="{{ c.id }}">✓ Approve</button>
+        <button type="button" class="danger" data-action="candidate" data-verb="reject" data-id="{{ c.id }}">✗ Reject</button>
+        <button type="button" data-action="candidate" data-verb="queue" data-id="{{ c.id }}">⬇ Queue now</button>
+        {% elif c.status == "approved" %}
+        <button type="button" data-action="candidate" data-verb="queue" data-id="{{ c.id }}">⬇ Queue now</button>
+        <button type="button" class="danger" data-action="candidate" data-verb="reject" data-id="{{ c.id }}">✗ Reject</button>
+        {% elif c.status == "failed" %}
+        <button type="button" data-action="candidate" data-verb="approve" data-id="{{ c.id }}">↻ Retry (approve)</button>
+        <button type="button" class="danger" data-action="candidate" data-verb="reject" data-id="{{ c.id }}">✗ Reject</button>
+        {% else %}
+        <span class="pill">{{ c.status }}</span>
+        {% endif %}
+      </div>
     </div>
   </article>
   {% endfor %}
 </div>
-<p class="muted note">Review actions (approve/reject) are exposed on the token-gated JSON API
-<code>POST /api/candidates/&lt;id&gt;/approve</code>; interactive buttons land with acquisition (Phase 6).</p>
 {% else %}
-<p class="muted">No <b>{{ status }}</b> candidates. Run <code>home-theater discover</code>.</p>
+<p class="muted">No <b>{{ status }}</b> candidates. Use <b>Discover more</b> above or the TMDb search box.</p>
 {% endif %}
 {% endblock %}

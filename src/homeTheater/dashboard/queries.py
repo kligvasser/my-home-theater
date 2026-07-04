@@ -68,6 +68,13 @@ class TitleRow:
     owned_count: int
     resolutions: list[str]
     has_sub: bool
+    overview: str | None = None
+    added_at: str | None = None  # ISO date the catalog first saw it
+
+
+# Library sort options: query-param value -> ORDER BY. "added" first: the
+# dashboard's default is "what landed recently".
+TITLE_SORTS = ("added", "rating", "title", "year")
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +100,9 @@ class CandidateRow:
     imdb_rating: float | None
     imdb_votes: int | None
     poster_url: str | None
+    overview: str | None = None
+    taste_score: float | None = None
+    taste_like: list[str] = field(default_factory=list)
 
 
 def get_stats(sub_lang: str = DEFAULT_SUB_LANG) -> LibraryStats:
@@ -188,12 +198,44 @@ def _coverage(session: Session, lang: str) -> Coverage:
     return Coverage(lang=lang, covered=len(covered), total=len(owned))
 
 
+def _title_row(t: Title, sub_lang: str) -> TitleRow:
+    resolutions = sorted({f.resolution for f in t.owned_files if f.resolution})
+    has_sub = any(f.subtitle_langs and sub_lang in f.subtitle_langs for f in t.owned_files)
+    return TitleRow(
+        id=t.id,
+        title=t.title,
+        year=t.year,
+        kind=str(t.kind),
+        imdb_rating=t.imdb_rating,
+        imdb_votes=t.imdb_votes,
+        poster_url=t.poster_url,
+        genres=[g.name for g in t.genres],
+        owned_count=len(t.owned_files),
+        resolutions=resolutions,
+        has_sub=has_sub,
+        overview=t.overview,
+        added_at=t.created_at.date().isoformat() if t.created_at else None,
+    )
+
+
+def _title_order(sort: str | None) -> tuple[Any, ...]:
+    if sort == "title":
+        return (Title.title,)
+    if sort == "year":
+        return (Title.year.is_(None), Title.year.desc(), Title.title)
+    if sort == "rating":
+        return (Title.imdb_rating.is_(None), Title.imdb_rating.desc(), Title.title)
+    # default: most recently added first
+    return (Title.created_at.desc(), Title.id.desc())
+
+
 def list_titles(
     q: str | None = None,
     kind: str | None = None,
     page: int = 1,
     page_size: int = PAGE_SIZE,
     sub_lang: str = DEFAULT_SUB_LANG,
+    sort: str | None = "added",
 ) -> tuple[list[TitleRow], int]:
     page = max(page, 1)
     with session_scope() as s:
@@ -208,31 +250,23 @@ def list_titles(
             count_stmt = count_stmt.where(Title.kind == kind)
 
         total = s.scalar(count_stmt) or 0
-        stmt = (
-            stmt.order_by(Title.imdb_rating.is_(None), Title.imdb_rating.desc(), Title.title)
-            .limit(page_size)
-            .offset((page - 1) * page_size)
-        )
-        rows = []
-        for t in s.scalars(stmt).all():
-            resolutions = sorted({f.resolution for f in t.owned_files if f.resolution})
-            has_sub = any(f.subtitle_langs and sub_lang in f.subtitle_langs for f in t.owned_files)
-            rows.append(
-                TitleRow(
-                    id=t.id,
-                    title=t.title,
-                    year=t.year,
-                    kind=str(t.kind),
-                    imdb_rating=t.imdb_rating,
-                    imdb_votes=t.imdb_votes,
-                    poster_url=t.poster_url,
-                    genres=[g.name for g in t.genres],
-                    owned_count=len(t.owned_files),
-                    resolutions=resolutions,
-                    has_sub=has_sub,
-                )
-            )
+        stmt = stmt.order_by(*_title_order(sort)).limit(page_size).offset((page - 1) * page_size)
+        rows = [_title_row(t, sub_lang) for t in s.scalars(stmt).all()]
         return rows, total
+
+
+def recent_titles(limit: int = 12, sub_lang: str = DEFAULT_SUB_LANG) -> list[TitleRow]:
+    """Most recently added *owned* titles — the dashboard's poster wall."""
+
+    with session_scope() as s:
+        stmt = (
+            select(Title)
+            .options(selectinload(Title.genres), selectinload(Title.owned_files))
+            .where(Title.owned_files.any())
+            .order_by(Title.created_at.desc(), Title.id.desc())
+            .limit(limit)
+        )
+        return [_title_row(t, sub_lang) for t in s.scalars(stmt).all()]
 
 
 def list_missing_subtitles(lang: str = DEFAULT_SUB_LANG, limit: int = 500) -> list[TitleRow]:
@@ -284,6 +318,7 @@ def list_candidates(status: str | None = "new", limit: int = 100) -> list[Candid
             stmt = stmt.where(Candidate.status == status)
         rows = []
         for cand, title in s.execute(stmt).all():
+            taste = (cand.features or {}).get("taste") or {}
             rows.append(
                 CandidateRow(
                     id=cand.id,
@@ -297,6 +332,9 @@ def list_candidates(status: str | None = "new", limit: int = 100) -> list[Candid
                     imdb_rating=title.imdb_rating,
                     imdb_votes=title.imdb_votes,
                     poster_url=title.poster_url,
+                    overview=title.overview,
+                    taste_score=taste.get("score"),
+                    taste_like=list(taste.get("like") or [])[:4],
                 )
             )
         return rows

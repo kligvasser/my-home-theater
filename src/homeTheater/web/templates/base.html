@@ -15,13 +15,17 @@
       <a href="/candidates" class="{{ 'active' if active == 'candidates' }}">Candidates</a>
       <a href="/subtitles" class="{{ 'active' if active == 'subtitles' }}">Subtitles</a>
       <a href="/insights" class="{{ 'active' if active == 'insights' }}">Insights</a>
+      <a href="/settings" class="{{ 'active' if active == 'settings' }}">Settings</a>
       <a href="/runs" class="{{ 'active' if active == 'runs' }}">Runs</a>
       <a href="/status" class="{{ 'active' if active == 'status' }}">Status</a>
     </nav>
+    <button id="lock" class="lockbtn" data-action="lock" type="button">🔒</button>
   </header>
+  <div id="flash" class="flash" hidden></div>
   <main>
     {% block content %}{% endblock %}
   </main>
-  <footer class="foot">read-only dashboard · v{{ version }}</footer>
+  <footer class="foot">dashboard · v{{ version }}</footer>
+  <script src="/static/app.js" defer></script>
 </body>
 </html>

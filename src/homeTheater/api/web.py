@@ -9,14 +9,16 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse
 
 from .. import __version__
-from ..config import get_config
+from ..config import get_config, load_overrides
 from ..dashboard import (
+    TITLE_SORTS,
     candidate_counts,
     get_stats,
     list_candidates,
     list_missing_subtitles,
     list_titles,
     recent_runs,
+    recent_titles,
 )
 from ..dashboard.queries import PAGE_SIZE
 from ..db.models import CandidateStatus
@@ -32,6 +34,7 @@ def dashboard(request: Request) -> HTMLResponse:
         "dashboard.html",
         {
             "stats": get_stats(),
+            "recent": recent_titles(12),
             "runs": recent_runs(10),
             "active": "dashboard",
             "version": __version__,
@@ -44,9 +47,12 @@ def library(
     request: Request,
     q: str | None = None,
     kind: str | None = None,
+    sort: str = "added",
     page: int = Query(1, ge=1),
 ) -> HTMLResponse:
-    rows, total = list_titles(q=q, kind=kind, page=page)
+    if sort not in TITLE_SORTS:
+        sort = "added"
+    rows, total = list_titles(q=q, kind=kind, page=page, sort=sort)
     pages = max(1, ceil(total / PAGE_SIZE))
     return templates.TemplateResponse(
         request,
@@ -56,6 +62,7 @@ def library(
             "total": total,
             "q": q,
             "kind": kind,
+            "sort": sort,
             "page": page,
             "pages": pages,
             "active": "library",
@@ -117,6 +124,28 @@ async def status_page(request: Request) -> HTMLResponse:
             "auto_approve": cfg.features.auto_approve,
             "scheduler": cfg.schedule.enabled,
             "active": "status",
+            "version": __version__,
+        },
+    )
+
+
+@router.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request) -> HTMLResponse:
+    cfg = get_config()
+    file_values = {
+        "thresholds": cfg.thresholds.model_dump(mode="json"),
+        "discovery": cfg.discovery.model_dump(mode="json"),
+        "taste": cfg.taste.model_dump(mode="json"),
+        "features": {"auto_approve": cfg.features.auto_approve},
+    }
+    return templates.TemplateResponse(
+        request,
+        "settings.html",
+        {
+            "file": file_values,
+            "ov": load_overrides(),
+            "read_only": {"dry_run": cfg.features.dry_run},
+            "active": "settings",
             "version": __version__,
         },
     )

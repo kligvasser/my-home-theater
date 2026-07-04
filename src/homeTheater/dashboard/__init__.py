@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .queries import (
+    TITLE_SORTS,
     CandidateRow,
     Coverage,
     LibraryStats,
@@ -14,9 +15,11 @@ from .queries import (
     list_missing_subtitles,
     list_titles,
     recent_runs,
+    recent_titles,
 )
 
 __all__ = [
+    "TITLE_SORTS",
     "CandidateRow",
     "Coverage",
     "LibraryStats",
@@ -29,6 +32,7 @@ __all__ = [
     "list_missing_subtitles",
     "list_titles",
     "recent_runs",
+    "recent_titles",
 ]
 
 
