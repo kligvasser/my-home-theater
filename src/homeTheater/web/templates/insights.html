@@ -5,6 +5,29 @@
 <p class="muted">Your library, clustered by content (genres, keywords, cast, directors,
 language, decade). New candidates are scored by similarity to these clusters.</p>
 
+<section class="card settings-card" style="margin-bottom:20px">
+  <h2>Preference model</h2>
+  {% if model %}
+  <p class="small">Trained {{ model.trained_at[:16] }} on
+    <b>{{ model.n_positive }}</b> approved / <b>{{ model.n_negative }}</b> rejected
+    (+{{ model.n_bootstrap }} weak positives from the library){% if model.auc %} ·
+    AUC {{ model.auc }}{% endif %}.
+    New candidates get a "model NN%" in their reason.</p>
+  {% if model.top_positive %}
+  <p class="small">👍 pushes toward approve:
+    {% for tok, w in model.top_positive %}<span class="chip">{{ tok }}</span> {% endfor %}</p>
+  {% endif %}
+  {% if model.top_negative %}
+  <p class="small">👎 pushes toward reject:
+    {% for tok, w in model.top_negative %}<span class="chip">{{ tok }}</span> {% endfor %}</p>
+  {% endif %}
+  {% else %}
+  <p class="muted small">No model yet — approve/reject candidates to create labels
+  (needs ≥20 decisions with ≥5 per class), then train.</p>
+  {% endif %}
+  <div><button type="button" data-action="train-model">🧠 Train now</button></div>
+</section>
+
 {% for section in sections %}
 <section>
   <h2>{{ section.label }}</h2>

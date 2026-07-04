@@ -21,7 +21,6 @@ from ..config import AppConfig
 from ..db.base import utcnow
 from ..db.models import (
     Candidate,
-    CandidateSource,
     CandidateStatus,
     JobRun,
     OwnedFile,
@@ -205,18 +204,23 @@ def _persist(enriched: list[_Enriched], config: AppConfig, stats: DiscoveryStats
                 stats.live_skipped += 1
                 continue
 
-            outcome = evaluate(
-                imdb_rating=imdb_rating,
-                imdb_votes=imdb_votes,
-                tmdb_rating=details.tmdb_rating,
-                tmdb_votes=details.tmdb_votes,
-                genres=details.genres,
-                thresholds=config.thresholds.for_kind(item.disc.kind.value),
-                excluded_genres=excluded,
-            )
-            if not outcome.passed:
-                stats.filtered += 1
-                continue
+            if item.disc.skip_filter:
+                # Watchlist: the human already chose it — no threshold gate.
+                base_reason = "on your watchlist"
+            else:
+                outcome = evaluate(
+                    imdb_rating=imdb_rating,
+                    imdb_votes=imdb_votes,
+                    tmdb_rating=details.tmdb_rating,
+                    tmdb_votes=details.tmdb_votes,
+                    genres=details.genres,
+                    thresholds=config.thresholds.for_kind(item.disc.kind.value),
+                    excluded_genres=excluded,
+                )
+                if not outcome.passed:
+                    stats.filtered += 1
+                    continue
+                base_reason = outcome.reason
 
             feats = extract_features(title)
             quality = score(
@@ -226,7 +230,7 @@ def _persist(enriched: list[_Enriched], config: AppConfig, stats: DiscoveryStats
                 tmdb_rating=details.tmdb_rating,
                 tmdb_votes=details.tmdb_votes,
             )
-            reason = f"{outcome.reason}; via {item.disc.source}"
+            reason = f"{base_reason}; via {item.disc.source}"
 
             index = _taste_index(item.disc.kind)
             if index is not None:
@@ -236,10 +240,19 @@ def _persist(enriched: list[_Enriched], config: AppConfig, stats: DiscoveryStats
                 if sim.like:
                     reason += f"; taste {sim.score:.2f} (like: {', '.join(sim.like[:3])})"
 
+            # Trained preference model (if any): P(you'd approve this).
+            from ..preferences import predict
+
+            p_like = predict(config, feats)
+            if p_like is not None:
+                feats["model"] = {"p_like": p_like}
+                quality = round(quality + taste_cfg.model_weight * 10 * p_like, 3)
+                reason += f"; model {p_like:.0%}"
+
             session.add(
                 Candidate(
                     title_id=title.id,
-                    source=CandidateSource.discovery,
+                    source=item.disc.origin,
                     status=CandidateStatus.approved if auto else CandidateStatus.new,
                     reason=reason,
                     score=quality,
@@ -267,7 +280,7 @@ async def run_discovery(config: AppConfig) -> DiscoveryStats:
     stats = DiscoveryStats()
     status = RunStatus.success
     try:
-        sources = build_sources(config.discovery)
+        sources = build_sources(config.discovery, config.secrets)
         stats.sources = len(sources)
         log.info("discovery.start", sources=[s.name for s in sources])
 

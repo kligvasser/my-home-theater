@@ -7,12 +7,13 @@ from dataclasses import asdict
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..config import get_config
 from ..db.models import TitleKind
 from ..errors import NotConfiguredError
 from ..metadata.tmdb import TMDbClient
+from .auth import require_token
 
 router = APIRouter(prefix="/api", tags=["insights"])
 
@@ -41,6 +42,16 @@ async def api_insights() -> dict[str, Any]:
 
     # sklearn fit is sync CPU work; keep it off the event loop.
     return await asyncio.to_thread(_clusters_payload)
+
+
+@router.post("/preferences/train", dependencies=[Depends(require_token)])
+async def api_train() -> dict[str, Any]:
+    """(Re)train the preference classifier from your approve/reject decisions."""
+
+    from ..preferences import train
+
+    stats = await asyncio.to_thread(train, get_config())
+    return stats.as_dict()
 
 
 @router.get("/similarity")

@@ -48,6 +48,7 @@ metadata:
 discovery:
   trending: true        # pull TMDb trending
   top_rated: false      # also pull TMDb top-rated
+  watchlist: true       # Trakt watchlist (needs keys + `home-theater trakt-auth`)
   include_movies: true
   include_series: true
   trending_window: week # day | week
@@ -64,6 +65,7 @@ taste:
   neighbors: 5          # kNN size for the similarity score
   weight: 0.5           # discovery score blend: + weight*10*similarity
   max_clusters: 8       # upper bound for the /insights clustering
+  model_weight: 0.5     # blend for the trained classifier: + weight*10*p(like)
 
 acquisition:
   # Quality profile NAMES as configured inside Radarr/Sonarr (release selection).

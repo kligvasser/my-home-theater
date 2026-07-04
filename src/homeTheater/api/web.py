@@ -129,6 +129,69 @@ async def status_page(request: Request) -> HTMLResponse:
     )
 
 
+@router.get("/gaps", response_class=HTMLResponse)
+async def gaps(request: Request) -> HTMLResponse:
+    """'Why not owned?' — top-rated titles above your thresholds that you don't
+    have (and haven't rejected). TMDb-list data only: no per-title API cost."""
+
+    import httpx
+
+    from ..config import effective_config
+    from ..db.models import TitleKind
+    from ..discovery.filters import evaluate
+    from ..discovery.service import _owned_live_rejected
+    from ..metadata.tmdb import TMDbClient
+
+    cfg = effective_config()
+    rows: list[dict[str, object]] = []
+    error: str | None = None
+    if cfg.secrets.tmdb_api_key is None:
+        error = "TMDB_API_KEY is not configured."
+    else:
+        owned, live, rejected = await asyncio.to_thread(_owned_live_rejected)
+        taken = owned | live | rejected
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            tmdb = TMDbClient(
+                cfg.secrets.tmdb_api_key.get_secret_value(),
+                http,
+                language=cfg.metadata.language,
+                cache_days=cfg.metadata.cache_days,
+            )
+            for kind in (TitleKind.movie, TitleKind.series):
+                for t in await tmdb.top_rated(kind, limit=60):
+                    if (kind, t.tmdb_id) in taken:
+                        continue
+                    outcome = evaluate(
+                        imdb_rating=None,  # list payloads are TMDb-only
+                        imdb_votes=None,
+                        tmdb_rating=t.tmdb_rating,
+                        tmdb_votes=t.tmdb_votes,
+                        genres=[],
+                        thresholds=cfg.thresholds.for_kind(kind.value),
+                        excluded_genres=cfg.discovery.excluded_genres,
+                    )
+                    if not outcome.passed:
+                        continue
+                    rows.append(
+                        {
+                            "tmdb_id": t.tmdb_id,
+                            "title": t.title,
+                            "year": t.year,
+                            "kind": kind.value,
+                            "rating": t.tmdb_rating,
+                            "votes": t.tmdb_votes,
+                            "poster_url": t.poster_url,
+                            "overview": t.overview,
+                        }
+                    )
+        rows.sort(key=lambda r: float(r["rating"] or 0.0), reverse=True)  # type: ignore[arg-type]
+    return templates.TemplateResponse(
+        request,
+        "gaps.html",
+        {"rows": rows, "error": error, "active": "gaps", "version": __version__},
+    )
+
+
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request) -> HTMLResponse:
     cfg = get_config()
@@ -155,8 +218,10 @@ def settings_page(request: Request) -> HTMLResponse:
 def insights(request: Request) -> HTMLResponse:
     """Taste clusters per kind. Sync-def: sklearn runs in the threadpool."""
 
+    from ..preferences import model_info
     from ..taste import build_index
 
+    model = model_info(get_config())
     cfg = get_config().taste
     sections = []
     for kind_label, kind in (("Movies", "movie"), ("Series", "series")):
@@ -175,7 +240,7 @@ def insights(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "insights.html",
-        {"sections": sections, "active": "insights", "version": __version__},
+        {"sections": sections, "model": model, "active": "insights", "version": __version__},
     )
 
 

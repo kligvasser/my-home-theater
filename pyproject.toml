@@ -75,7 +75,7 @@ warn_unused_ignores = true
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["guessit.*", "smbprotocol.*", "smbclient.*", "apscheduler.*", "sklearn.*"]
+module = ["guessit.*", "smbprotocol.*", "smbclient.*", "apscheduler.*", "sklearn.*", "joblib.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -112,6 +112,7 @@ class Discovery(BaseModel):
 
     trending: bool = True
     top_rated: bool = False
+    watchlist: bool = True  # Trakt watchlist (needs keys + `home-theater trakt-auth`)
     include_movies: bool = True
     include_series: bool = True
     trending_window: str = Field("week", pattern="^(day|week)$")
@@ -144,6 +145,9 @@ class Taste(BaseModel):
     neighbors: int = Field(5, ge=1, description="kNN size for the similarity score")
     weight: float = Field(0.5, ge=0, description="score blend: + weight*10*similarity")
     max_clusters: int = Field(8, ge=2, description="upper bound for auto-k clustering")
+    # Trained preference classifier (homeTheater.preferences); blended only
+    # once a model exists (needs enough approve/reject labels to train).
+    model_weight: float = Field(0.5, ge=0, description="score blend: + weight*10*p(like)")
 
 
 class Acquisition(BaseModel):

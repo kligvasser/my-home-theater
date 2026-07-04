@@ -471,6 +471,25 @@ Each phase is shippable and has explicit acceptance criteria. Build in order.
   config.yaml by `config.runtime.effective_config()` and applied on the next
   discovery run — `dry_run` deliberately file-only. Dashboard: "Recently added"
   poster wall. 151 tests, ruff+mypy clean; all pages + auth verified live.
+- **Phase 13 — Watchlist, gaps, and the trained classifier.** ✅ **Done** —
+  **Trakt**: device-flow OAuth (`home-theater trakt-auth`, tokens in the
+  `setting` table with auto-refresh); the watchlist is a discovery source whose
+  items bypass thresholds (the human chose them) and land with
+  `source=watchlist`. **Gaps** (`/gaps`): all-time top-rated titles above your
+  thresholds that you don't own / haven't queued / haven't rejected, with
+  one-click add — TMDb list data only, no per-title API cost. **Preference
+  classifier** (`homeTheater/preferences.py`): logistic regression over
+  candidate feature snapshots labeled by your decisions (approved/queued/
+  imported=1, rejected=0; owned titles as weak 0.25-weight bootstrap
+  positives), DictVectorizer over content tokens + numerics, 3-fold AUC on real
+  labels, persisted joblib next to the DB; refuses below 20 labels / 5 per
+  class. Blended into discovery scoring as "model NN%" via
+  `taste.model_weight` once trained; insights page shows the model card with
+  the most-influential tokens (explainability) + a Train button
+  (`POST /api/preferences/train`, `home-theater train`). kNN taste answers
+  "like what I own?", the classifier answers "like what I approve?".
+  157 tests, ruff+mypy clean; gaps/insights/train verified live (105 gaps
+  found; trainer correctly refuses with 0 labels).
 - **Phase 11 — Taste model + dashboard visualizations.** ✅ **Done** —
   unsupervised content-based taste model (`homeTheater/taste.py`, scikit-learn):
   per-kind TF-IDF over namespaced tokens (genres, keywords, cast, directors,

@@ -100,6 +100,17 @@
         btn.disabled = true;
         btn.textContent = "added ✓";
         flash(`Added candidate #${out.id}.`);
+      } else if (act === "train-model") {
+        btn.disabled = true;
+        btn.textContent = "training…";
+        try {
+          const out = await api("POST", "/api/preferences/train");
+          flash(out.message || "trained");
+          if (out.trained) window.setTimeout(() => window.location.reload(), 900);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "🧠 Train now";
+        }
       } else if (act === "save-settings") {
         const form = document.getElementById("settings-form");
         const out = await api("PUT", "/api/settings", collectSettings(form));

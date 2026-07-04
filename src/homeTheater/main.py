@@ -140,6 +140,53 @@ def reconcile() -> None:
     log.info("reconcile.cli_done", **stats.as_dict())
 
 
+def trakt_auth() -> None:
+    """Authorize Trakt via the device flow; tokens land in the setting table."""
+
+    import asyncio
+
+    import httpx
+
+    from .config import get_config
+    from .db import init_db
+    from .trakt import TraktClient
+
+    _configure()
+    secrets = get_config().secrets
+    client_id, client_secret = secrets.trakt_client_id, secrets.trakt_client_secret
+    if client_id is None or client_secret is None:
+        print("TRAKT_CLIENT_ID / TRAKT_CLIENT_SECRET are not set in .env.")
+        return
+    init_db()
+
+    async def flow() -> None:
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            client = TraktClient(client_id, client_secret.get_secret_value(), http)
+            device = await client.device_code()
+            print(f"\nGo to {device['verification_url']} and enter: {device['user_code']}\n")
+            print("Waiting for approval…")
+            await client.poll_device_token(device)
+            items = await client.watchlist()
+            print(f"Authorized ✓ — your watchlist has {len(items)} item(s).")
+
+    asyncio.run(flow())
+
+
+def train() -> None:
+    """Train the preference classifier from approve/reject decisions."""
+
+    from .config import get_config
+    from .db import init_db
+    from .preferences import train as train_model
+
+    _configure()
+    init_db()
+    stats = train_model(get_config())
+    print(stats.message)
+    if stats.trained:
+        print(f"model -> {stats.model_path} (AUC: {stats.auc})")
+
+
 def insights() -> None:
     """Cluster the owned library by content and print the taste profile."""
 
@@ -191,6 +238,8 @@ def main() -> None:
     sub.add_parser("sync", help="advance in-flight download states from Radarr/Sonarr")
     sub.add_parser("reconcile", help="reconcile Radarr/Sonarr owned items into the catalog")
     sub.add_parser("insights", help="cluster the owned library and print the taste profile")
+    sub.add_parser("trakt-auth", help="authorize Trakt (device flow) for the watchlist source")
+    sub.add_parser("train", help="train the preference classifier from approve/reject labels")
     sub.add_parser("backup", help="write a timestamped SQLite backup")
     args = parser.parse_args()
 
@@ -210,6 +259,10 @@ def main() -> None:
         reconcile()
     elif args.command == "insights":
         insights()
+    elif args.command == "trakt-auth":
+        trakt_auth()
+    elif args.command == "train":
+        train()
     elif args.command == "backup":
         backup()
     else:
