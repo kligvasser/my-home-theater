@@ -110,6 +110,115 @@ async def check_smb(config: AppConfig) -> ProviderStatus:
     return ProviderStatus("smb", configured, None, "configured" if configured else "not set")
 
 
+async def check_transmission(config: AppConfig) -> ProviderStatus:
+    """Torrent download client: version + how many torrents it's holding."""
+
+    if config.acquisition.backend != "torrent":
+        return ProviderStatus("transmission", False, None, "acquisition backend is 'arr'")
+    from typing import cast
+
+    from ..acquisition.torrent.service import _download_client
+    from ..acquisition.torrent.transmission import TransmissionClient
+
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as http:
+            client = cast(TransmissionClient, _download_client(config, http))
+            version, n = await client.ping()
+            return ProviderStatus("transmission", True, True, f"v{version} · {n} active torrent(s)")
+    except Exception as exc:
+        return ProviderStatus("transmission", True, False, redact_exc(exc))
+
+
+async def check_nas_mount(config: AppConfig) -> ProviderStatus:
+    """The local library mount used for reliable NAS reads/writes (macOS TCC)."""
+
+    import os
+
+    base = config.torrent.library_base_dir or config.subtitles.library_base_dir
+    if not base:
+        return ProviderStatus("nas-mount", False, None, "writing via SMB (no local mount set)")
+    try:
+        # A dead SMB mount can make stat() hang; bound it.
+        mounted = await asyncio.wait_for(asyncio.to_thread(os.path.ismount, base), timeout=3.0)
+    except Exception:
+        return ProviderStatus("nas-mount", True, False, f"{base} unreachable (stale mount?)")
+    if mounted:
+        return ProviderStatus("nas-mount", True, True, f"mounted at {base}")
+    try:
+        exists = await asyncio.wait_for(asyncio.to_thread(os.path.isdir, base), timeout=3.0)
+    except Exception:
+        exists = False
+    if exists:
+        return ProviderStatus("nas-mount", True, True, f"{base} (local dir)")
+    return ProviderStatus("nas-mount", True, False, f"{base} NOT mounted")
+
+
+async def check_opensubtitles(config: AppConfig) -> ProviderStatus:
+    """OpenSubtitles.com: reachability + today's remaining download quota."""
+
+    if config.subtitles.backend != "native":
+        return ProviderStatus("opensubtitles.com", False, None, "subtitles backend is 'bazarr'")
+    s = config.secrets
+    if s.opensubtitles_api_key is None:
+        return ProviderStatus("opensubtitles.com", False, None, "no API key")
+    headers = {
+        "Api-Key": s.opensubtitles_api_key.get_secret_value(),
+        "User-Agent": config.subtitles.opensubtitles_user_agent,
+        "Content-Type": "application/json",
+    }
+    base = "https://api.opensubtitles.com/api/v1"
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as http:
+            if not (s.opensubtitles_username and s.opensubtitles_password):
+                (await http.get(f"{base}/infos/formats", headers=headers)).raise_for_status()
+                return ProviderStatus("opensubtitles.com", True, True, "search only (no login)")
+            login = await http.post(
+                f"{base}/login",
+                json={
+                    "username": s.opensubtitles_username,
+                    "password": s.opensubtitles_password.get_secret_value(),
+                },
+                headers=headers,
+            )
+            login.raise_for_status()
+            token = login.json().get("token")
+            info = await http.get(
+                f"{base}/infos/user", headers={**headers, "Authorization": f"Bearer {token}"}
+            )
+            info.raise_for_status()
+            d = info.json().get("data", {})
+            return ProviderStatus(
+                "opensubtitles.com",
+                True,
+                True,
+                f"{d.get('remaining_downloads', '?')}/{d.get('allowed_downloads', '?')} "
+                "downloads left today",
+            )
+    except Exception as exc:
+        return ProviderStatus("opensubtitles.com", True, False, redact_exc(exc))
+
+
+def _configured(name: str, ok: bool, yes: str, no: str) -> ProviderStatus:
+    return ProviderStatus(name, ok, None, yes if ok else no)
+
+
+async def check_subtitle_accounts(config: AppConfig) -> list[ProviderStatus]:
+    """Config-state for the other native subtitle sources (login probes are heavy)."""
+
+    if config.subtitles.backend != "native":
+        return []
+    s = config.secrets
+    sources = config.subtitles.sources
+    out: list[ProviderStatus] = []
+    if "opensubtitles_org" in sources:
+        ok = bool(s.opensubtitles_org_username and s.opensubtitles_org_password)
+        out.append(_configured("opensubtitles.org", ok, "credentials set", "no credentials"))
+    if "ktuvit" in sources:
+        ok = bool(s.ktuvit_email and s.ktuvit_password)
+        out.append(_configured("ktuvit", ok, "account set (Hebrew)", "no account"))
+    return out
+
+
 _cache: tuple[float, list[ProviderStatus]] | None = None
 _cache_lock = asyncio.Lock()
 
@@ -122,22 +231,25 @@ def clear_cache() -> None:
 
 
 async def check_all(config: AppConfig) -> list[ProviderStatus]:
-    """Probe all providers, serving results from a short-lived cache."""
+    """Probe the services relevant to the configured stack (short-lived cache)."""
 
     global _cache
     async with _cache_lock:
         now = time.monotonic()
         if _cache is not None and now - _cache[0] < CACHE_TTL_SECONDS:
             return _cache[1]
-        statuses = list(
-            await asyncio.gather(
-                check_tmdb(config),
-                check_omdb(config),
-                check_radarr(config),
-                check_sonarr(config),
-                check_bazarr(config),
-                check_smb(config),
-            )
-        )
+
+        checks = [check_tmdb(config), check_omdb(config), check_smb(config)]
+        if config.acquisition.backend == "torrent":
+            checks += [check_transmission(config), check_nas_mount(config)]
+        else:
+            checks += [check_radarr(config), check_sonarr(config)]
+        if config.subtitles.backend == "native":
+            checks.append(check_opensubtitles(config))
+        else:
+            checks.append(check_bazarr(config))
+
+        statuses = list(await asyncio.gather(*checks))
+        statuses += await check_subtitle_accounts(config)
         _cache = (now, statuses)
         return statuses

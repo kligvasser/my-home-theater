@@ -151,17 +151,27 @@ def subtitles(request: Request, lang: str | None = None) -> HTMLResponse:
 
 @router.get("/status", response_class=HTMLResponse)
 async def status_page(request: Request) -> HTMLResponse:
+    from ..dashboard import candidate_counts, get_stats
     from ..health import check_all
 
     cfg = get_config()
-    # recent_runs is sync SQLAlchemy; keep it off the event loop.
-    runs = await asyncio.to_thread(recent_runs, 50)
+    # sync SQLAlchemy — keep off the event loop.
+    runs = await asyncio.to_thread(recent_runs, 20)
+    counts = await asyncio.to_thread(candidate_counts)
+    stats = await asyncio.to_thread(get_stats, cfg.subtitles.primary, cfg.subtitles.languages)
+    window = cfg.acquisition.window
     return templates.TemplateResponse(
         request,
         "status.html",
         {
             "providers": await check_all(cfg),
-            "failures": [r for r in runs if r.status == "failed"],
+            "runs": runs,
+            "counts": counts,
+            "stats": stats,
+            "acq_backend": cfg.acquisition.backend,
+            "sub_backend": cfg.subtitles.backend,
+            "sub_sources": cfg.subtitles.sources,
+            "window": window,
             "dry_run": cfg.features.dry_run,
             "auto_approve": cfg.features.auto_approve,
             "scheduler": cfg.schedule.enabled,

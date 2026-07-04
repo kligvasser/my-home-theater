@@ -25,8 +25,16 @@ _STATUS_DOWNLOAD_WAIT = 3
 _STATUS_DOWNLOADING = 4
 
 _FIELDS = [
-    "hashString", "name", "percentDone", "status", "downloadDir", "error", "errorString",
-    "rateDownload", "peersSendingToUs", "eta",
+    "hashString",
+    "name",
+    "percentDone",
+    "status",
+    "downloadDir",
+    "error",
+    "errorString",
+    "rateDownload",
+    "peersSendingToUs",
+    "eta",
 ]
 
 # torrent id lookups accept the hash string directly (rpc-spec §3.1).
@@ -126,3 +134,10 @@ class TransmissionClient:
         await self._rpc(
             "torrent-set-location", {"ids": [infohash], "location": location, "move": move}
         )
+
+    async def ping(self) -> tuple[str, int]:
+        """Health probe: (server version, number of torrents)."""
+
+        sess = await self._rpc("session-get", {"fields": ["version"]})
+        got = await self._rpc("torrent-get", {"fields": ["hashString"]})
+        return str(sess.get("version", "?")), len(got.get("torrents", []))
