@@ -8,9 +8,10 @@ SHA256 → base64. After login (cookie session) we ``SearchPage_search``, scrape
 the film's subtitle ids off ``MovieInfo.aspx``, request a one-shot download
 identifier, and fetch the file from ``DownloadFile.ashx``.
 
-Hebrew-only and movies-first (series episode selection isn't handled yet). Every
-step is defensive — any failure yields an empty result, so a ktuvit outage or a
-salt/format change never sinks a sweep (OpenSubtitles still covers Hebrew).
+Hebrew-only. Supports both movies (subtitle ids off ``MovieInfo.aspx``) and
+series per-episode (ids off ``GetModuleAjax.ashx`` for a given season/episode).
+Every step is defensive — any failure yields an empty result, so a ktuvit outage
+or a salt/format change never sinks a sweep (OpenSubtitles still covers Hebrew).
 Needs a ktuvit.me account (``KTUVIT_*`` in .env).
 """
 
@@ -37,7 +38,9 @@ _BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
+# Movies list ids on <a data-subtitle-id>; episodes on <input data-sub-id>.
 _SUBTITLE_ID_RE = re.compile(r'data-subtitle-id="([^"]+)"')
+_SUB_ID_RE = re.compile(r'data-sub-id="([^"]+)"')
 _SALT_RE = re.compile(r"encryptionSalt\s*=\s*'([0-9A-Za-z]+)'")
 
 
@@ -103,16 +106,21 @@ class KtuvitSource:
         return self._logged_in
 
     async def search(self, query: SubtitleQuery) -> list[SubtitleResult]:
-        if query.kind is not TitleKind.movie:
-            log.info("ktuvit.series_unsupported", title=query.title)
-            return []
+        is_series = query.kind is TitleKind.series
+        if is_series and (query.season is None or query.episode is None):
+            return []  # can't target an episode without season/episode
         try:
             if not await self._login():
                 return []
-            film_id = await self._find_film(query.title, query.year)
-            if film_id is None:
+            content_id = await self._find_content(
+                query.title, query.year, search_type="1" if is_series else "0"
+            )
+            if content_id is None:
                 return []
-            sub_ids = await self._subtitle_ids(film_id)
+            if is_series:
+                sub_ids = await self._episode_subtitle_ids(content_id, query.season, query.episode)
+            else:
+                sub_ids = await self._movie_subtitle_ids(content_id)
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             log.warning("ktuvit.search_failed", title=query.title, detail=str(exc))
             return []
@@ -120,14 +128,14 @@ class KtuvitSource:
             SubtitleResult(
                 source=self.name,
                 lang="he",
-                name=f"ktuvit:{film_id}:{sid}",
+                name=f"ktuvit:{content_id}:{sid}",
                 score=float(len(sub_ids) - i),  # ktuvit lists best first
-                ref={"film_id": film_id, "subtitle_id": sid},
+                ref={"film_id": content_id, "subtitle_id": sid},
             )
             for i, sid in enumerate(sub_ids)
         ]
 
-    async def _find_film(self, title: str, year: int | None) -> str | None:
+    async def _find_content(self, title: str, year: int | None, *, search_type: str) -> str | None:
         req: dict[str, Any] = {
             "FilmName": title,
             "Actors": [],
@@ -139,8 +147,10 @@ class KtuvitSource:
             "Year": str(year) if year else "",
             "Rating": [],
             "Page": 1,
-            "SearchType": "0",  # 0 = movies
-            "WithSubsOnly": True,
+            "SearchType": search_type,  # 0 = movies, 1 = series
+            # False, not True: WithSubsOnly filters out series here (and we check
+            # for real subtitle ids in the next step regardless).
+            "WithSubsOnly": False,
         }
         resp = await self._client.post(
             f"{self._base}/Services/ContentProvider.svc/SearchPage_search",
@@ -152,7 +162,7 @@ class KtuvitSource:
         films = _unwrap(resp.json()).get("Films") or []
         return str(films[0]["ID"]) if films else None
 
-    async def _subtitle_ids(self, film_id: str) -> list[str]:
+    async def _movie_subtitle_ids(self, film_id: str) -> list[str]:
         resp = await self._client.get(
             f"{self._base}/MovieInfo.aspx",
             params={"ID": film_id},
@@ -160,10 +170,24 @@ class KtuvitSource:
             timeout=self._timeout,
         )
         resp.raise_for_status()
-        seen: dict[str, None] = {}
-        for sid in _SUBTITLE_ID_RE.findall(resp.text):
-            seen.setdefault(sid, None)
-        return list(seen)
+        return _dedupe(_SUBTITLE_ID_RE.findall(resp.text))
+
+    async def _episode_subtitle_ids(
+        self, series_id: str, season: int | None, episode: int | None
+    ) -> list[str]:
+        resp = await self._client.get(
+            f"{self._base}/Services/GetModuleAjax.ashx",
+            params={
+                "moduleName": "SubtitlesList",
+                "SeriesID": series_id,
+                "Season": season,
+                "Episode": episode,
+            },
+            headers={"User-Agent": _BROWSER_UA},
+            timeout=self._timeout,
+        )
+        resp.raise_for_status()
+        return _dedupe(_SUB_ID_RE.findall(resp.text))
 
     async def download(self, result: SubtitleResult) -> bytes:
         await self._login()
@@ -192,6 +216,15 @@ class KtuvitSource:
         )
         got.raise_for_status()
         return _extract_srt(got.content)
+
+
+def _dedupe(ids: list[str]) -> list[str]:
+    """De-dup subtitle ids preserving ktuvit's order (best first)."""
+
+    seen: dict[str, None] = {}
+    for sid in ids:
+        seen.setdefault(sid, None)
+    return list(seen)
 
 
 def _iv_from_email(data: str) -> bytes:

@@ -233,8 +233,39 @@ async def test_ktuvit_login_search_download_zip() -> None:
     assert data == b"1\nshalom"
 
 
-async def test_ktuvit_skips_series() -> None:
+async def test_ktuvit_skips_series_without_episode() -> None:
     from homeTheater.subtitles.native.ktuvit import KtuvitSource
+
+    async with httpx.AsyncClient() as http:
+        q = SubtitleQuery(  # no season/episode -> returns [] before any network call
+            lang="he",
+            kind=TitleKind.series,
+            title="Show",
+            year=2020,
+            imdb_id="tt1",
+            release_name="Show",
+            season=None,
+            episode=None,
+        )
+        assert await KtuvitSource("e", "p", http).search(q) == []
+
+
+@respx.mock
+async def test_ktuvit_series_episode_lists_subs() -> None:
+    from homeTheater.subtitles.native.ktuvit import KtuvitSource
+
+    respx.get(f"{KTUVIT}/").mock(
+        return_value=httpx.Response(200, text="var encryptionSalt = 'ABCDEF0123456789';")
+    )
+    respx.post(f"{KTUVIT}/Services/MembershipService.svc/Login").mock(
+        return_value=httpx.Response(200, json={"d": "ok"}, headers={"Set-Cookie": "Login=tok"})
+    )
+    search = respx.post(f"{KTUVIT}/Services/ContentProvider.svc/SearchPage_search").mock(
+        return_value=httpx.Response(200, json={"d": '{"Films":[{"ID":"SER1"}]}'})
+    )
+    module = respx.get(f"{KTUVIT}/Services/GetModuleAjax.ashx").mock(
+        return_value=httpx.Response(200, text='<input data-sub-id="E5"><input data-sub-id="E5">')
+    )
 
     async with httpx.AsyncClient() as http:
         q = SubtitleQuery(
@@ -243,11 +274,20 @@ async def test_ktuvit_skips_series() -> None:
             title="Show",
             year=2020,
             imdb_id="tt1",
-            release_name="Show.S01E01",
-            season=1,
-            episode=1,
+            release_name="Show.S02E07",
+            season=2,
+            episode=7,
         )
-        assert await KtuvitSource("e", "p", http).search(q) == []
+        results = await KtuvitSource("me@x.com", "pw", http).search(q)
+
+    assert len(results) == 1  # de-duped
+    assert results[0].ref == {"film_id": "SER1", "subtitle_id": "E5"}
+    import json as _json
+
+    assert _json.loads(search.calls.last.request.content)["request"]["SearchType"] == "1"
+    mod_params = module.calls.last.request.url.params
+    assert mod_params["SeriesID"] == "SER1"
+    assert mod_params["Season"] == "2" and mod_params["Episode"] == "7"
 
 
 # --- end-to-end sweep -------------------------------------------------------

@@ -28,7 +28,7 @@ Capped at `max_searches_per_sweep` downloads per run to respect provider quotas.
 | Source | Languages | Notes |
 |---|---|---|
 | `opensubtitles` | he, en, many | REST API (opensubtitles**.com** login — the account is shared with .org). Search needs only the API key; **download needs username+password** (free tier ≈ a few/day). Reliable anchor. Query params are sent alphabetically sorted (the API 301s otherwise). |
-| `ktuvit` | he | Hebrew specialist (ktuvit.me account). **Movies only** for now (series return nothing). Login is a bespoke scheme — the client scrapes the site's rotating `encryptionSalt`, runs PBKDF2-HMAC-SHA1 → AES-CBC(password, iv-from-email) → SHA256 → base64. Verified working; if ktuvit changes that scheme it degrades to empty results and OpenSubtitles covers Hebrew. |
+| `ktuvit` | he | Hebrew specialist (ktuvit.me account). Movies **and** series per-episode. Login is a bespoke scheme — the client scrapes the site's rotating `encryptionSalt`, runs PBKDF2-HMAC-SHA1 → AES-CBC(password, iv-from-email) → SHA256 → base64. Verified working; if ktuvit changes that scheme it degrades to empty results and OpenSubtitles covers Hebrew. |
 
 ## Setup
 
@@ -60,7 +60,7 @@ with UNC paths are skipped with a clear "set subtitles.library_base_dir" error.
 
 ## Limitations
 
-- **ktuvit is movies-only** (per-episode series selection isn't implemented);
-  OpenSubtitles handles episodes via the series imdb id + season/episode.
 - No re-sync/upgrade: once a language is present it's considered covered.
 - No subtitle-to-audio sync verification beyond release/hash matching.
+- ktuvit matches a series/movie by name+year (first hit); a very generic title
+  could mis-match. OpenSubtitles uses the imdb id, which is exact.
