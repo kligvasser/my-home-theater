@@ -44,7 +44,7 @@ def scan() -> None:
     log.info("scan.cli_done", **stats.as_dict())
 
 
-def enrich() -> None:
+def enrich(force: bool = False) -> None:
     """Backfill TMDb/IMDb ids, ratings, votes, and genres onto the catalog."""
 
     import asyncio
@@ -56,7 +56,7 @@ def enrich() -> None:
     _configure()
     config = get_config()
     init_db()  # dev convenience; production uses Alembic
-    stats = asyncio.run(enrich_catalog(config))
+    stats = asyncio.run(enrich_catalog(config, force=force))
     log.info("enrich.cli_done", **stats.as_dict())
 
 
@@ -152,11 +152,12 @@ def insights() -> None:
     cfg = get_config().taste
     init_db()  # dev convenience; production uses Alembic
     for kind in TitleKind:
+        label = "movies" if kind is TitleKind.movie else "series"
         index = build_index(kind, min_library=cfg.min_library)
         if index is None:
-            print(f"{kind.value}s: not enough enriched owned titles (need {cfg.min_library}+)")
+            print(f"{label}: not enough enriched owned titles (need {cfg.min_library}+)")
             continue
-        print(f"\n{kind.value}s — {index.size} titles:")
+        print(f"\n{label} — {index.size} titles:")
         for c in index.clusters(cfg.max_clusters):
             print(f"  [{c.size:>3}] {c.label}")
             print(f"        e.g. {', '.join(c.titles[:5])}")
@@ -178,7 +179,12 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("serve", help="run the dashboard/API server (default)")
     sub.add_parser("scan", help="scan the NAS and update the owned catalog")
-    sub.add_parser("enrich", help="backfill TMDb/IMDb metadata onto the catalog")
+    enrich_p = sub.add_parser("enrich", help="backfill TMDb/IMDb metadata onto the catalog")
+    enrich_p.add_argument(
+        "--force",
+        action="store_true",
+        help="re-attempt titles still missing data, ignoring the retry cooldown",
+    )
     sub.add_parser("discover", help="find candidate titles that pass your thresholds")
     sub.add_parser("subtitles", help="ask Bazarr to search for missing subtitles")
     sub.add_parser("acquire", help="queue approved candidates to Radarr/Sonarr")
@@ -191,7 +197,7 @@ def main() -> None:
     if args.command == "scan":
         scan()
     elif args.command == "enrich":
-        enrich()
+        enrich(force=args.force)
     elif args.command == "discover":
         discover()
     elif args.command == "subtitles":

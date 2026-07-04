@@ -7,7 +7,7 @@ Layering (see plan §5.1): defaults (these models) -> ``config.yaml`` (non-secre
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -166,6 +166,19 @@ class Secrets(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore", case_sensitive=False
     )
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, v: object) -> object:
+        """Treat an empty/whitespace env var (e.g. ``OMDB_API_KEY=``) as unset.
+
+        Otherwise pydantic builds ``SecretStr("")`` and downstream ``is not None``
+        checks think the provider is configured — then every call 401s.
+        """
+
+        if isinstance(v, str) and v.strip() == "":
+            return None
+        return v
 
     # Metadata
     tmdb_api_key: SecretStr | None = None

@@ -44,6 +44,11 @@ def configure_logging(level: str = "INFO", json_logs: bool = False) -> None:
         level=getattr(logging, level.upper(), logging.INFO),
     )
 
+    # SMB/auth libraries log every packet at INFO/DEBUG — deafening during a
+    # scan. Keep them at WARNING regardless of our level.
+    for noisy in ("smbprotocol", "smbclient", "spnego", "httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
     shared: list[Any] = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,

@@ -251,3 +251,71 @@ async def test_omdb_rate_limit_response_not_cached(
         await client.by_imdb_id("tt0000001")
         await client.by_imdb_id("tt0000001")
     assert route.call_count == 3  # one live call, second served from cache
+
+
+@respx.mock
+async def test_omdb_failure_does_not_discard_tmdb_details(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing OMDb call must not throw away the TMDb details we already got."""
+
+    _setup_env(monkeypatch)
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Title
+    from homeTheater.metadata import enrich_catalog
+
+    init_db()
+    with session_scope() as s:
+        s.add(Title(title="The Matrix", year=1999, kind=TitleKind.movie))
+
+    respx.get(f"{TMDB}/search/movie").mock(return_value=httpx.Response(200, json=MATRIX_SEARCH))
+    respx.get(f"{TMDB}/movie/603").mock(return_value=httpx.Response(200, json=MATRIX_DETAILS))
+    respx.get(OMDB).mock(return_value=httpx.Response(401, json={"Error": "Invalid API key!"}))
+
+    stats = await enrich_catalog(get_config())
+    assert stats.details_updated == 1  # TMDb details persisted despite OMDb 401
+    assert stats.ratings_updated == 0
+    assert not stats.errors  # OMDb failure is non-fatal, not a title error
+
+    with session_scope() as s:
+        from sqlalchemy import select
+
+        t = s.scalar(select(Title).where(Title.title == "The Matrix"))
+        assert t.tmdb_id == 603 and t.imdb_id == "tt0133093"  # kept
+        assert t.imdb_rating is None  # ratings just missing
+
+
+@respx.mock
+async def test_force_reenriches_recently_attempted_titles(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`force=True` backfills a title enriched moments ago (e.g. after adding OMDb)."""
+
+    _setup_env(monkeypatch)
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Title
+    from homeTheater.metadata import enrich_catalog
+
+    init_db()
+    with session_scope() as s:
+        s.add(Title(title="The Matrix", year=1999, kind=TitleKind.movie))
+
+    respx.get(f"{TMDB}/search/movie").mock(return_value=httpx.Response(200, json=MATRIX_SEARCH))
+    respx.get(f"{TMDB}/movie/603").mock(return_value=httpx.Response(200, json=MATRIX_DETAILS))
+    # First pass: OMDb unavailable -> title gets details but no rating, and a
+    # fresh last_enriched_at that would normally block re-enrichment for days.
+    omdb = respx.get(OMDB).mock(return_value=httpx.Response(401, json={"Error": "nope"}))
+    await enrich_catalog(get_config())
+
+    # OMDb now works; a normal run skips (recently enriched), force backfills.
+    omdb.mock(return_value=httpx.Response(200, json=MATRIX_OMDB))
+    assert (await enrich_catalog(get_config())).titles_considered == 0
+    forced = await enrich_catalog(get_config(), force=True)
+    assert forced.ratings_updated == 1
+
+    with session_scope() as s:
+        from sqlalchemy import select
+
+        assert s.scalar(select(Title.imdb_rating).where(Title.title == "The Matrix")) == 8.7

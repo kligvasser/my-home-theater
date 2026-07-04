@@ -65,21 +65,21 @@ class _Result:
     error: str | None = None
 
 
-def _load_pending(retry_days: int) -> list[_Snapshot]:
+def _load_pending(retry_days: int, force: bool = False) -> list[_Snapshot]:
     """Titles missing a TMDb id or an IMDb rating, not attempted recently.
 
     ``last_enriched_at`` keeps unresolvable titles (bad filenames, titles OMDb
-    doesn't know) from being re-enqueued on every single run.
+    doesn't know) from being re-enqueued on every single run. ``force`` drops
+    that time guard — the escape hatch for "I just configured a new provider
+    (e.g. OMDb) and want the still-incomplete titles backfilled now".
     """
 
-    cutoff = utcnow() - timedelta(days=max(retry_days, 1))
+    where = [or_(Title.tmdb_id.is_(None), Title.imdb_rating.is_(None))]
+    if not force:
+        cutoff = utcnow() - timedelta(days=max(retry_days, 1))
+        where.append(or_(Title.last_enriched_at.is_(None), Title.last_enriched_at < cutoff))
     with session_scope() as session:
-        rows = session.scalars(
-            select(Title).where(
-                or_(Title.tmdb_id.is_(None), Title.imdb_rating.is_(None)),
-                or_(Title.last_enriched_at.is_(None), Title.last_enriched_at < cutoff),
-            )
-        ).all()
+        rows = session.scalars(select(Title).where(*where)).all()
         return [_Snapshot(t.id, t.title, t.year, t.kind, t.tmdb_id, t.imdb_id) for t in rows]
 
 
@@ -97,7 +97,12 @@ async def _enrich_one(
 
             ratings: OmdbRatings | None = None
             if omdb is not None and imdb_id:
-                ratings = await omdb.by_imdb_id(imdb_id)
+                # A ratings failure (bad key, quota, outage) must not discard the
+                # TMDb details + features we just fetched — ratings stay None.
+                try:
+                    ratings = await omdb.by_imdb_id(imdb_id)
+                except Exception as exc:
+                    log.warning("enrich.omdb_failed", title=snap.title, error=redact_exc(exc))
             return _Result(snapshot=snap, tmdb=details, ratings=ratings)
         except Exception as exc:  # keep enriching the rest
             log.warning("enrich.title_failed", title=snap.title, error=redact_exc(exc))
@@ -238,8 +243,12 @@ def _persist(results: list[_Result], stats: EnrichStats) -> None:
             stats.errors.append(f"{res.snapshot.title}: {redact_exc(exc)}")
 
 
-async def enrich_catalog(config: AppConfig) -> EnrichStats:
-    """Enrich all pending titles. Returns run statistics; records a ``job_run``."""
+async def enrich_catalog(config: AppConfig, *, force: bool = False) -> EnrichStats:
+    """Enrich all pending titles. Returns run statistics; records a ``job_run``.
+
+    ``force`` re-attempts every title still missing data, ignoring the
+    ``last_enriched_at`` retry guard (use after adding a provider like OMDb).
+    """
 
     secrets = config.secrets
     if secrets.tmdb_api_key is None:
@@ -255,7 +264,7 @@ async def enrich_catalog(config: AppConfig) -> EnrichStats:
     stats = EnrichStats()
     status = RunStatus.success
     try:
-        pending = _load_pending(retry_days=config.metadata.cache_days)
+        pending = _load_pending(retry_days=config.metadata.cache_days, force=force)
         stats.titles_considered = len(pending)
         log.info("enrich.start", pending=len(pending))
 

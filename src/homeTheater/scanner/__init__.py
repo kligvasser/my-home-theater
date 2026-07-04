@@ -40,14 +40,15 @@ def build_filesystem(config: AppConfig) -> FileSystem:
         )
     if not share:
         raise ValueError("nas.share is not set in config.yaml (the SMB share name).")
-    if not (secrets.smb_user and secrets.smb_pass):
-        raise ValueError("SMB_USER / SMB_PASS are not set in .env.")
 
+    # No (or password-less) credentials => guest/public share, common on
+    # consumer NAS; SMBFileSystem opens a guest session in that case.
+    password = secrets.smb_pass.get_secret_value() if secrets.smb_pass else None
     return SMBFileSystem(
         host=host,
         share=share,
         username=secrets.smb_user,
-        password=secrets.smb_pass.get_secret_value(),
+        password=password,
     )
 
 

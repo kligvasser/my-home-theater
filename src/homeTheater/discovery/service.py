@@ -119,11 +119,15 @@ async def _enrich(
     async with sem:
         try:
             details = await tmdb.details(disc.tmdb.tmdb_id, disc.kind)
-            ratings = (
-                await omdb.by_imdb_id(details.imdb_id)
-                if omdb is not None and details.imdb_id
-                else None
-            )
+            ratings = None
+            if omdb is not None and details.imdb_id:
+                # OMDb failure is non-fatal: fall back to TMDb rating/votes.
+                try:
+                    ratings = await omdb.by_imdb_id(details.imdb_id)
+                except Exception as exc:
+                    log.warning(
+                        "discovery.omdb_failed", title=disc.tmdb.title, error=redact_exc(exc)
+                    )
             return _Enriched(disc, details, ratings)
         except Exception as exc:
             log.warning("discovery.enrich_failed", title=disc.tmdb.title, error=redact_exc(exc))

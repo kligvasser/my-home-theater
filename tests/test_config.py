@@ -33,3 +33,21 @@ def test_invalid_config_fails_fast(tmp_path: Path) -> None:
 def test_secrets_not_in_repr(config_file: Path) -> None:
     cfg = load_config(config_file)
     assert "dashboard_token" not in repr(cfg)
+
+
+def test_blank_env_secret_is_unset(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty env var (OMDB_API_KEY=) must resolve to None, not SecretStr('').
+
+    Otherwise `is not None` provider checks think it's configured and every call
+    401s (and, worse, discards the co-fetched TMDb data).
+    """
+
+    monkeypatch.setenv("TMDB_API_KEY", "realkey")
+    monkeypatch.setenv("OMDB_API_KEY", "")  # present but blank
+    monkeypatch.setenv("SMB_USER", "   ")  # whitespace-only
+    cfg = load_config(config_file)
+    assert cfg.secrets.tmdb_api_key is not None
+    assert cfg.secrets.omdb_api_key is None
+    assert cfg.secrets.smb_user is None

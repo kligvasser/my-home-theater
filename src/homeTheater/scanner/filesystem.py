@@ -93,7 +93,9 @@ class SMBFileSystem:
     fallback for flaky ``.local`` mDNS (plan §5.2). Read-only: never writes.
     """
 
-    def __init__(self, host: str, share: str, username: str, password: str) -> None:
+    def __init__(
+        self, host: str, share: str, username: str | None = None, password: str | None = None
+    ) -> None:
         self.host = host
         self.share = share
         self._username = username
@@ -105,7 +107,22 @@ class SMBFileSystem:
             return
         import smbclient  # imported lazily so tests don't require smbprotocol
 
-        smbclient.register_session(self.host, username=self._username, password=self._password)
+        if self._username and self._password:
+            # Authenticated session: keep SMB signing on (the secure default).
+            smbclient.register_session(self.host, username=self._username, password=self._password)
+        else:
+            # Guest / password-less share — the same access Kodi/Finder use for a
+            # public NAS share. Guest sessions have no signing key, so many NAS
+            # (e.g. WD MyCloud) reject them unless signing and secure-negotiate
+            # are relaxed. Safe here: there are no credentials to protect and the
+            # walk is read-only over a LAN share.
+            smbclient.ClientConfig(require_secure_negotiate=False)
+            smbclient.register_session(
+                self.host,
+                username=self._username or "guest",
+                password=self._password or "",
+                require_signing=False,
+            )
         self._registered = True
 
     def _unc(self, *parts: str) -> str:
