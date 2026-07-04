@@ -27,7 +27,8 @@ Capped at `max_searches_per_sweep` downloads per run to respect provider quotas.
 
 | Source | Languages | Notes |
 |---|---|---|
-| `opensubtitles` | he, en, many | REST API (opensubtitles**.com** login — the account is shared with .org). Search needs only the API key; **download needs username+password** (free tier ≈ a few/day). Reliable anchor. Query params are sent alphabetically sorted (the API 301s otherwise). |
+| `opensubtitles` | he, en, many | opensubtitles**.com** REST API. Search needs only the API key; **download needs username+password** and is **capped ≈ 20/day** (free tier). Query params are sent alphabetically sorted (the API 301s otherwise). |
+| `opensubtitles_org` | he, en, many | opensubtitles**.org** legacy **XML-RPC** (separate account/password). **No daily download cap** — useful for bulk English. Deprecated + rate-limited, and needs a **registered `User-Agent`** (`subtitles.opensubtitles_org_user_agent`; the temporary one is throttled). Download links are gzip. |
 | `ktuvit` | he | Hebrew specialist (ktuvit.me account). Movies **and** series per-episode. Login is a bespoke scheme — the client scrapes the site's rotating `encryptionSalt`, runs PBKDF2-HMAC-SHA1 → AES-CBC(password, iv-from-email) → SHA256 → base64. Verified working; if ktuvit changes that scheme it degrades to empty results and OpenSubtitles covers Hebrew. |
 
 ## Setup
@@ -44,9 +45,14 @@ Capped at `max_searches_per_sweep` downloads per run to respect provider quotas.
    ```yaml
    subtitles:
      backend: native
-     sources: [ktuvit, opensubtitles]   # Hebrew from ktuvit first, else OpenSubtitles
+     # first hit wins -> put uncapped sources first
+     sources: [ktuvit, opensubtitles_org, opensubtitles]
      library_base_dir: /Volumes/Elements_25A1-1   # write beside media via the mount
    ```
+   Ordering is preference: `ktuvit` (Hebrew, uncapped) → `opensubtitles_org`
+   (English, uncapped XML-RPC) → `opensubtitles` (.com REST, exact imdb match but
+   20 downloads/day). For heavy `.org` use, register a User-Agent at
+   opensubtitles.org and set `opensubtitles_org_user_agent`.
 3. Run `home-theater subtitles` (or the token-gated `POST /api/subtitles/search`).
    Coverage on the `/subtitles` page reflects the newly-written subs.
 

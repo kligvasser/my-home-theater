@@ -185,6 +185,100 @@ async def test_opensubtitles_search_uses_parent_imdb_for_series() -> None:
     assert params["season_number"] == "2" and params["episode_number"] == "3"
 
 
+# --- opensubtitles.org (XML-RPC) --------------------------------------------
+
+
+@respx.mock
+async def test_opensubtitles_org_login_search_download() -> None:
+    import gzip
+    import xmlrpc.client
+
+    from homeTheater.subtitles.native.opensubtitles_org import OpenSubtitlesOrgSource
+
+    ORG = "https://api.opensubtitles.org/xml-rpc"
+
+    def _resp(value: object) -> httpx.Response:
+        return httpx.Response(200, text=xmlrpc.client.dumps((value,), methodresponse=True))
+
+    search_data = {
+        "status": "200 OK",
+        "data": [
+            {
+                "SubFileName": "popular.srt",
+                "SubDownloadsCnt": "9000",
+                "SubDownloadLink": "https://dl.org/a.gz",
+                "SubHearingImpaired": "0",
+            },
+            {
+                "SubFileName": "hashmatch.srt",
+                "SubDownloadsCnt": "10",
+                "MatchedBy": "moviehash",
+                "SubDownloadLink": "https://dl.org/b.gz",
+                "SubHearingImpaired": "0",
+            },
+        ],
+    }
+    # login then search are two POSTs to the same endpoint
+    respx.post(ORG).mock(
+        side_effect=[
+            _resp({"token": "TOK", "status": "200 OK"}),
+            _resp(search_data),
+        ]
+    )
+    respx.get("https://dl.org/b.gz").mock(
+        return_value=httpx.Response(200, content=gzip.compress(b"1\nmatched sub"))
+    )
+
+    async with httpx.AsyncClient() as http:
+        src = OpenSubtitlesOrgSource("user", "pass", http)
+        q = SubtitleQuery(
+            lang="en",
+            kind=TitleKind.movie,
+            title="The Matrix",
+            year=1999,
+            imdb_id="tt0133093",
+            release_name="The.Matrix",
+            moviehash="abc",
+            filesize=123,
+        )
+        results = await src.search(q)
+        best = max(results, key=lambda r: r.score)
+        data = await src.download(best)
+
+    assert len(results) == 2
+    assert best.ref["link"] == "https://dl.org/b.gz"  # hash match beats popularity
+    assert data == b"1\nmatched sub"  # gunzipped
+
+
+@respx.mock
+async def test_opensubtitles_org_no_results_returns_empty() -> None:
+    import xmlrpc.client
+
+    from homeTheater.subtitles.native.opensubtitles_org import OpenSubtitlesOrgSource
+
+    ORG = "https://api.opensubtitles.org/xml-rpc"
+
+    def _resp(value: object) -> httpx.Response:
+        return httpx.Response(200, text=xmlrpc.client.dumps((value,), methodresponse=True))
+
+    respx.post(ORG).mock(
+        side_effect=[
+            _resp({"token": "T", "status": "200 OK"}),
+            _resp({"status": "200 OK", "data": False}),  # .org returns False, not []
+        ]
+    )
+    async with httpx.AsyncClient() as http:
+        q = SubtitleQuery(
+            lang="en",
+            kind=TitleKind.movie,
+            title="Nope",
+            year=2000,
+            imdb_id="tt9999999",
+            release_name="Nope",
+        )
+        assert await OpenSubtitlesOrgSource("u", "p", http).search(q) == []
+
+
 # --- ktuvit client ----------------------------------------------------------
 
 

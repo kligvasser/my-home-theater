@@ -26,6 +26,7 @@ from ...logging_setup import bind_run, clear_run, get_logger
 from .base import SubtitleQuery, SubtitleSource, opensubtitles_hash
 from .ktuvit import KtuvitSource
 from .opensubtitles import OpenSubtitlesSource
+from .opensubtitles_org import OpenSubtitlesOrgSource
 from .placement import resolve_local_media, subtitle_dest, write_subtitle
 
 log = get_logger(__name__)
@@ -80,6 +81,19 @@ def _build_sources(config: AppConfig, http: httpx.AsyncClient) -> list[SubtitleS
                     timeout=sub.request_timeout,
                 )
             )
+        elif name == "opensubtitles_org":
+            if not (s.opensubtitles_org_username and s.opensubtitles_org_password):
+                log.warning("subtitle.source_unconfigured", source=name)
+                continue
+            out.append(
+                OpenSubtitlesOrgSource(
+                    s.opensubtitles_org_username,
+                    s.opensubtitles_org_password.get_secret_value(),
+                    http,
+                    user_agent=sub.opensubtitles_org_user_agent,
+                    timeout=sub.request_timeout,
+                )
+            )
         elif name == "ktuvit":
             if not (s.ktuvit_email and s.ktuvit_password):
                 log.warning("subtitle.source_unconfigured", source=name)
@@ -129,7 +143,7 @@ async def _fetch_one(config: AppConfig, sources: list[SubtitleSource], item: _Wo
     """Search + download + place one subtitle; return the dest path or ``None``."""
 
     local_media = resolve_local_media(item.media_path, config)  # may raise NotConfigured
-    moviehash = opensubtitles_hash(local_media) if os.path.exists(local_media) else None
+    exists = os.path.exists(local_media)
     query = SubtitleQuery(
         lang=item.lang,
         kind=item.kind,
@@ -139,7 +153,8 @@ async def _fetch_one(config: AppConfig, sources: list[SubtitleSource], item: _Wo
         release_name=os.path.splitext(os.path.basename(local_media))[0],
         season=item.season,
         episode=item.episode,
-        moviehash=moviehash,
+        moviehash=opensubtitles_hash(local_media) if exists else None,
+        filesize=os.path.getsize(local_media) if exists else None,
     )
     for source in sources:
         if not source.supports(item.lang):

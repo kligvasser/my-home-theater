@@ -148,6 +148,9 @@ class Subtitles(BaseModel):
     hearing_impaired: bool = False
     # Sent to OpenSubtitles as required by their API terms.
     opensubtitles_user_agent: str = "my-home-theater v1"
+    # opensubtitles.org XML-RPC requires a *registered* user agent; the temporary
+    # one is heavily rate-limited. Register yours and set it here.
+    opensubtitles_org_user_agent: str = "TemporaryUserAgent"
     request_timeout: float = Field(20.0, gt=0)
 
     @property
@@ -304,6 +307,9 @@ class Secrets(BaseSettings):
     opensubtitles_api_key: SecretStr | None = None
     opensubtitles_username: str | None = None
     opensubtitles_password: SecretStr | None = None
+    # Legacy opensubtitles.org XML-RPC (separate account/password from .com).
+    opensubtitles_org_username: str | None = None
+    opensubtitles_org_password: SecretStr | None = None
     ktuvit_email: str | None = None
     ktuvit_password: SecretStr | None = None
 

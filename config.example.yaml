@@ -61,7 +61,11 @@ subtitles:
   # backend: bazarr (trigger Bazarr) | native (fetch providers ourselves, no arr stack)
   backend: bazarr
   # --- native backend only ---
-  sources: [opensubtitles]   # best-first: opensubtitles (he+en), ktuvit (Hebrew)
+  # best-first (first hit wins): ktuvit (Hebrew), opensubtitles_org (legacy
+  # XML-RPC, uncapped English), opensubtitles (.com REST, he+en, 20 dl/day cap)
+  sources: [opensubtitles]
+  # opensubtitles.org XML-RPC needs a registered user agent (temporary one is throttled)
+  opensubtitles_org_user_agent: "TemporaryUserAgent"
   # Where owned media is reachable locally so subs can be written beside it.
   # null -> derive the NAS path over SMB (unreliable on some NAS); prefer a mount.
   library_base_dir: null

@@ -29,6 +29,7 @@ class SubtitleQuery:
     season: int | None = None  # series only
     episode: int | None = None
     moviehash: str | None = None  # OpenSubtitles hash of the file, if computable
+    filesize: int | None = None  # media file size in bytes (for .org hash matching)
 
 
 @dataclass(frozen=True, slots=True)
