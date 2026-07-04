@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Activity · my-home-theater{% endblock %}
+{% block content %}
+<h1>Activity <span class="muted small" id="act-live"></span></h1>
+<p class="muted small">Live view of everything in the acquisition pipeline:
+  grab → download → copy to NAS → subtitles. Refreshes automatically.</p>
+
+<div id="act-window" class="windowbar"></div>
+
+<div class="pipeline-controls">
+  <button type="button" data-action="acquire-now">⬇ Grab approved now</button>
+  <button type="button" data-action="sync-now">↻ Advance downloads</button>
+  <button type="button" data-action="scan-now">🔎 Rescan NAS</button>
+  <button type="button" data-action="subs-now">💬 Fetch subtitles</button>
+</div>
+
+<div id="activity-list">
+  <p class="muted">Loading…</p>
+</div>
+{% endblock %}

@@ -105,6 +105,24 @@ never fatal).
 4. Flip `dry_run: false` and run `acquire` then `sync`; watch the candidate move
    `queued → downloading → imported`.
 
+## Watching the pipeline (dashboard)
+
+The **Activity** page (`/activity`) shows every in-flight candidate as a live
+stepper — **Grabbed → Downloading → Imported to NAS → Subtitles** — with live
+progress, seeders, speed and ETA polled from Transmission, plus per-language
+subtitle coverage. A compact stepper also appears on each in-flight candidate
+card. The page exposes manual stage triggers: **Grab approved now**, **Advance
+downloads** (sync), **Rescan NAS**, and **Fetch subtitles**.
+
+**When to grab.** `acquisition.window` is an optional nightly window (editable on
+the Settings page) that the *scheduled* acquire job respects; **Grab now** on a
+candidate and **Grab approved now** on Activity always bypass it. Approve leaves a
+candidate "scheduled" (grabbed in the next window); "Grab now" is immediate.
+
+**Stop seeding after import.** With `torrent.delete_local_after_import: true`, a
+movie is removed from Transmission (and its local copy deleted) once it's copied
+to the NAS, so it no longer uploads.
+
 ## Limitations
 
 - **Series import is not done here.** A completed series torrent is marked

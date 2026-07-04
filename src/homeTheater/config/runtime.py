@@ -28,9 +28,13 @@ log = get_logger(__name__)
 
 SETTING_KEY = "runtime_overrides"
 
-# Top-level sections the dashboard may override, and (for features) which keys.
-OVERRIDABLE_SECTIONS = ("thresholds", "discovery", "taste", "subtitles", "features")
+# Top-level sections the dashboard may override, and (for features/acquisition)
+# which keys within them.
+OVERRIDABLE_SECTIONS = ("thresholds", "discovery", "taste", "subtitles", "features", "acquisition")
 OVERRIDABLE_FEATURES = ("auto_approve",)
+# Only the nightly download window is dashboard-editable under acquisition;
+# backend/profiles/paths stay in config.yaml.
+OVERRIDABLE_ACQUISITION = ("window",)
 
 
 class OverrideError(ValueError):
@@ -54,6 +58,10 @@ def _validate_shape(overrides: dict[str, Any]) -> None:
     for key in features:
         if key not in OVERRIDABLE_FEATURES:
             raise OverrideError(f"features.{key} cannot be overridden at runtime")
+    acquisition = overrides.get("acquisition") or {}
+    for key in acquisition:
+        if key not in OVERRIDABLE_ACQUISITION:
+            raise OverrideError(f"acquisition.{key} cannot be overridden at runtime")
 
 
 def _merged(config: AppConfig, overrides: dict[str, Any]) -> AppConfig:

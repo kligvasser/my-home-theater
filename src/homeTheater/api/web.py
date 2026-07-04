@@ -105,6 +105,17 @@ def candidates(
     )
 
 
+@router.get("/activity", response_class=HTMLResponse)
+def activity_page(request: Request) -> HTMLResponse:
+    """Live acquisition-pipeline view (populated client-side from /api/activity)."""
+
+    return templates.TemplateResponse(
+        request,
+        "activity.html",
+        {"active": "activity", "version": __version__},
+    )
+
+
 @router.get("/subtitles", response_class=HTMLResponse)
 def subtitles(request: Request, lang: str | None = None) -> HTMLResponse:
     from ..config import effective_config
@@ -249,6 +260,7 @@ def settings_page(request: Request) -> HTMLResponse:
         "taste": cfg.taste.model_dump(mode="json"),
         "subtitles": cfg.subtitles.model_dump(mode="json"),
         "organizer": cfg.organizer.model_dump(mode="json"),
+        "acquisition": cfg.acquisition.model_dump(mode="json"),
         "features": {"auto_approve": cfg.features.auto_approve},
     }
     return templates.TemplateResponse(

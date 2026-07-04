@@ -106,6 +106,13 @@ acquisition:
   movie_root_folder: null
   series_root_folder: null
   search_on_add: true   # tell Radarr/Sonarr to search immediately after adding
+  # Nightly window for the SCHEDULED acquire job (also editable on the Settings
+  # page). "Grab approved now" (Activity page) always bypasses it. Local hours,
+  # wraps past midnight (e.g. 22→6). enabled: false = grab every acquire cycle.
+  window:
+    enabled: false
+    start_hour: 2
+    end_hour: 6
 
 # Native torrent backend — used only when acquisition.backend: torrent.
 # You are responsible for your sources and their legality; keep features.dry_run

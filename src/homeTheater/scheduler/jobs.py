@@ -89,7 +89,18 @@ async def run_subtitle_job(config: AppConfig) -> None:
 
 
 async def run_acquire_job(config: AppConfig) -> None:
+    from datetime import datetime
+
     from ..acquisition import queue_approved
+
+    # Respect the nightly download window on the *scheduled* path only; a manual
+    # "grab now" (CLI/dashboard) calls queue_approved directly and bypasses this.
+    window = config.acquisition.window
+    if not window.is_open(datetime.now().hour):
+        log.info(
+            "acquire.window_closed", start=window.start_hour, end=window.end_hour
+        )
+        return
 
     async def body() -> str | None:
         stats = await queue_approved(config)

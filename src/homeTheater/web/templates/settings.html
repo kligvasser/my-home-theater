@@ -83,6 +83,17 @@ Saving requires the dashboard token (🔒 top-right).</p>
     </section>
 
     <section class="card settings-card">
+      <h2>Download window (scheduled grabs)</h2>
+      {% set fw = file.acquisition.window %}{% set owin = ov.get("acquisition", {}).get("window", {}) %}
+      <label>Restrict to a nightly window {{ boolsel("acquisition.window.enabled", fw.enabled, owin.get("enabled")) }}</label>
+      <label>Start hour (0–23) {{ num("acquisition.window.start_hour", fw.start_hour, owin.get("start_hour"), minv="0") }}</label>
+      <label>End hour (0–23) {{ num("acquisition.window.end_hour", fw.end_hour, owin.get("end_hour"), minv="0") }}</label>
+      <p class="muted small">When on, the <b>scheduled</b> acquire job only grabs approved
+      candidates between these local hours (wraps past midnight, e.g. 22→6).
+      <b>Grab approved now</b> on the Activity page always bypasses it.</p>
+    </section>
+
+    <section class="card settings-card">
       <h2>Taste model</h2>
       <label>Enabled {{ boolsel("taste.enabled", file.taste.enabled, ov.get("taste", {}).get("enabled")) }}</label>
       <label>Score weight {{ num("taste.weight", file.taste.weight, ov.get("taste", {}).get("weight"), step="0.1") }}</label>

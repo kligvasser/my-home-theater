@@ -24,7 +24,10 @@ _SESSION_HEADER = "X-Transmission-Session-Id"
 _STATUS_DOWNLOAD_WAIT = 3
 _STATUS_DOWNLOADING = 4
 
-_FIELDS = ["hashString", "name", "percentDone", "status", "downloadDir", "error", "errorString"]
+_FIELDS = [
+    "hashString", "name", "percentDone", "status", "downloadDir", "error", "errorString",
+    "rateDownload", "peersSendingToUs", "eta",
+]
 
 # torrent id lookups accept the hash string directly (rpc-spec §3.1).
 
@@ -99,6 +102,7 @@ class TransmissionClient:
             state in (_STATUS_DOWNLOAD_WAIT, _STATUS_DOWNLOADING) or progress > 0.0
         )
         error = t.get("errorString") or None if t.get("error") else None
+        eta = t.get("eta")
         return TorrentStatus(
             infohash=str(t.get("hashString", infohash)).lower(),
             progress=progress,
@@ -107,6 +111,9 @@ class TransmissionClient:
             save_path=t.get("downloadDir") or None,
             name=t.get("name") or None,
             error=error,
+            down_rate=int(t.get("rateDownload", 0) or 0),
+            seeders=int(t.get("peersSendingToUs", 0) or 0),
+            eta_seconds=int(eta) if isinstance(eta, int | float) and eta >= 0 else None,
         )
 
     async def remove(self, infohash: str, *, delete_data: bool) -> None:

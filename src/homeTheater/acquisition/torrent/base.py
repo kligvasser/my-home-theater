@@ -79,6 +79,10 @@ class TorrentStatus:
     save_path: str | None  # the client's download dir for this torrent
     name: str | None = None  # torrent name (file or top-level folder)
     error: str | None = None
+    # Live transfer stats for the dashboard (best-effort; None when unknown).
+    down_rate: int | None = None  # bytes/sec
+    seeders: int | None = None  # peers sending to us
+    eta_seconds: int | None = None  # client estimate; negative/None = unknown
 
     def content_path(self) -> str | None:
         """Local path to the downloaded file/folder (``save_path`` joined to

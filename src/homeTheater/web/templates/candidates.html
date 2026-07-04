@@ -71,11 +71,15 @@
       {% endif %}
       <div class="cactions">
         {% if c.status == "new" %}
-        <button type="button" data-action="candidate" data-verb="approve" data-id="{{ c.id }}">✓ Approve</button>
+        <button type="button" data-action="candidate" data-verb="approve" data-id="{{ c.id }}"
+                title="Approve — grabbed by the scheduled acquire job (respects the download window)">✓ Approve (schedule)</button>
         <button type="button" class="danger" data-action="candidate" data-verb="reject" data-id="{{ c.id }}">✗ Reject</button>
-        <button type="button" data-action="candidate" data-verb="queue" data-id="{{ c.id }}">⬇ Queue now</button>
+        <button type="button" data-action="candidate" data-verb="queue" data-id="{{ c.id }}"
+                title="Grab immediately, bypassing the nightly window">⬇ Grab now</button>
         {% elif c.status == "approved" %}
-        <button type="button" data-action="candidate" data-verb="queue" data-id="{{ c.id }}">⬇ Queue now</button>
+        <span class="pill">⏳ scheduled</span>
+        <button type="button" data-action="candidate" data-verb="queue" data-id="{{ c.id }}"
+                title="Grab immediately, bypassing the nightly window">⬇ Grab now</button>
         <button type="button" class="danger" data-action="candidate" data-verb="reject" data-id="{{ c.id }}">✗ Reject</button>
         {% elif c.status == "failed" %}
         <button type="button" data-action="candidate" data-verb="approve" data-id="{{ c.id }}">↻ Retry (approve)</button>
@@ -84,6 +88,9 @@
         <span class="pill">{{ c.status }}</span>
         {% endif %}
       </div>
+      {% if c.status in ["queued", "downloading", "imported", "failed"] %}
+      <div class="exec-slot" data-cand="{{ c.id }}"></div>
+      {% endif %}
     </div>
   </article>
   {% endfor %}

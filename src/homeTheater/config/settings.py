@@ -242,6 +242,27 @@ class Torrent(BaseModel):
     delete_local_after_import: bool = False
 
 
+class DownloadWindow(BaseModel):
+    """A nightly time window during which the *scheduled* acquire job may grab.
+
+    ``enabled: false`` means "no window" — the scheduler grabs approved candidates
+    every interval (the original behaviour). When enabled, the scheduled job only
+    grabs during ``[start_hour, end_hour)`` in local time (wraps past midnight,
+    e.g. 22→6). A manual "grab now" (CLI or the dashboard) always bypasses it.
+    """
+
+    enabled: bool = False
+    start_hour: int = Field(2, ge=0, le=23)
+    end_hour: int = Field(6, ge=0, le=23)
+
+    def is_open(self, hour: int) -> bool:
+        if not self.enabled or self.start_hour == self.end_hour:
+            return True
+        if self.start_hour < self.end_hour:
+            return self.start_hour <= hour < self.end_hour
+        return hour >= self.start_hour or hour < self.end_hour  # wraps midnight
+
+
 class Acquisition(BaseModel):
     """How approved candidates are grabbed (plan §5.6).
 
@@ -259,6 +280,8 @@ class Acquisition(BaseModel):
     movie_root_folder: str | None = None  # None -> use the arr's first root folder
     series_root_folder: str | None = None
     search_on_add: bool = True
+    # Optional nightly window for the scheduled acquire job (dashboard-editable).
+    window: DownloadWindow = Field(default_factory=DownloadWindow)
 
 
 class Secrets(BaseSettings):
