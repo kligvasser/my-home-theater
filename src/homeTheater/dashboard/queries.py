@@ -74,9 +74,8 @@ class TitleRow:
     added_at: str | None = None  # ISO date the catalog first saw it
 
 
-# Library sort options: query-param value -> ORDER BY. "added" first: the
-# dashboard's default is "what landed recently".
-TITLE_SORTS = ("added", "rating", "title", "year")
+# Library sort options + directions are defined next to the sort logic below
+# (TITLE_SORTS / TITLE_DIRS), keyed off _SORT_KEYS.
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,9 +106,7 @@ class CandidateRow:
     taste_like: list[str] = field(default_factory=list)
 
 
-def get_stats(
-    sub_lang: str = DEFAULT_SUB_LANG, sub_langs: list[str] | None = None
-) -> LibraryStats:
+def get_stats(sub_lang: str = DEFAULT_SUB_LANG, sub_langs: list[str] | None = None) -> LibraryStats:
     langs = sub_langs or [sub_lang]
     with session_scope() as s:
         stats = LibraryStats()
@@ -166,9 +163,7 @@ def get_stats(
             ).all()
         ]
         stats.avg_imdb = s.scalar(
-            select(func.round(func.avg(Title.imdb_rating), 2)).where(
-                Title.imdb_rating.is_not(None)
-            )
+            select(func.round(func.avg(Title.imdb_rating), 2)).where(Title.imdb_rating.is_not(None))
         )
 
         stats.languages = [
@@ -225,15 +220,46 @@ def _title_row(t: Title, sub_lang: str) -> TitleRow:
     )
 
 
-def _title_order(sort: str | None) -> tuple[Any, ...]:
-    if sort == "title":
-        return (Title.title,)
-    if sort == "year":
-        return (Title.year.is_(None), Title.year.desc(), Title.title)
-    if sort == "rating":
-        return (Title.imdb_rating.is_(None), Title.imdb_rating.desc(), Title.title)
-    # default: most recently added first
-    return (Title.created_at.desc(), Title.id.desc())
+_RES_RANK = {"2160p": 4, "4k": 4, "1080p": 3, "720p": 2, "576p": 1, "480p": 1}
+
+
+def _res_rank(resolutions: list[str]) -> int | None:
+    ranks = [_RES_RANK.get(r.lower(), 0) for r in resolutions]
+    return max(ranks) if ranks else None
+
+
+# Every library column is sortable. Value ``None`` (missing rating, no files, …)
+# always sorts last, regardless of direction. Second element = default direction
+# when a column is first clicked (True = descending).
+_SORT_KEYS: dict[str, tuple[Any, bool]] = {
+    "title": (lambda r: r.title.lower(), False),
+    "year": (lambda r: r.year, True),
+    "kind": (lambda r: r.kind, False),
+    "rating": (lambda r: r.imdb_rating, True),  # IMDb column
+    "votes": (lambda r: r.imdb_votes, True),
+    "genres": (lambda r: (", ".join(r.genres).lower() or None), False),
+    "added": (lambda r: r.id, True),  # id is a monotonic proxy for insert order
+    "files": (lambda r: r.owned_count, True),
+    "res": (lambda r: _res_rank(r.resolutions), True),
+    "subs": (lambda r: (1 if r.has_sub else 0), True),
+}
+TITLE_SORTS = tuple(_SORT_KEYS)
+TITLE_DIRS = ("asc", "desc")
+
+
+def default_dir(sort: str) -> str:
+    """The natural first-click direction for a column (desc for numeric/date)."""
+
+    return "desc" if _SORT_KEYS.get(sort, _SORT_KEYS["added"])[1] else "asc"
+
+
+def _sorted_rows(rows: list[TitleRow], sort: str, direction: str | None) -> list[TitleRow]:
+    keyfn, default_desc = _SORT_KEYS.get(sort, _SORT_KEYS["added"])
+    desc = default_desc if direction not in TITLE_DIRS else (direction == "desc")
+    present = [r for r in rows if keyfn(r) is not None]
+    missing = [r for r in rows if keyfn(r) is None]  # always last
+    present.sort(key=keyfn, reverse=desc)
+    return present + missing
 
 
 def list_titles(
@@ -243,23 +269,27 @@ def list_titles(
     page_size: int = PAGE_SIZE,
     sub_lang: str = DEFAULT_SUB_LANG,
     sort: str | None = "added",
+    direction: str | None = None,
 ) -> tuple[list[TitleRow], int]:
+    """Filtered, fully-sortable, paginated title list.
+
+    Sorting is done in Python (the catalog is small) so computed columns — files,
+    resolution, subtitle coverage, genres — sort as naturally as the DB columns.
+    """
+
     page = max(page, 1)
     with session_scope() as s:
         stmt = select(Title).options(selectinload(Title.genres), selectinload(Title.owned_files))
-        count_stmt = select(func.count()).select_from(Title)
         if q:
-            like = f"%{q}%"
-            stmt = stmt.where(Title.title.ilike(like))
-            count_stmt = count_stmt.where(Title.title.ilike(like))
+            stmt = stmt.where(Title.title.ilike(f"%{q}%"))
         if kind in (TitleKind.movie, TitleKind.series):
             stmt = stmt.where(Title.kind == kind)
-            count_stmt = count_stmt.where(Title.kind == kind)
-
-        total = s.scalar(count_stmt) or 0
-        stmt = stmt.order_by(*_title_order(sort)).limit(page_size).offset((page - 1) * page_size)
         rows = [_title_row(t, sub_lang) for t in s.scalars(stmt).all()]
-        return rows, total
+
+    rows = _sorted_rows(rows, sort or "added", direction)
+    total = len(rows)
+    start = (page - 1) * page_size
+    return rows[start : start + page_size], total
 
 
 def recent_titles(limit: int = 12, sub_lang: str = DEFAULT_SUB_LANG) -> list[TitleRow]:

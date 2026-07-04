@@ -273,3 +273,14 @@ button.mini {
 }
 button.mini:hover:not(:disabled) { border-color: var(--accent); }
 button.mini:disabled { opacity: .5; cursor: default; }
+
+/* --- Sortable library table headers --------------------------------------- */
+.sortable-table th.sortable { padding: 0; }
+.sortable-table th.sortable a {
+  display: block; padding: 7px 10px; color: var(--muted); white-space: nowrap;
+  text-transform: uppercase; font-size: .82rem; letter-spacing: .03em; font-weight: 600;
+}
+.sortable-table th.sortable a:hover { color: var(--text); background: var(--panel-2); }
+.sortable-table th.sorted a { color: var(--text); }
+.sortable-table th .arrow { margin-left: 5px; opacity: .35; font-size: .85em; }
+.sortable-table th.sorted .arrow { opacity: 1; color: var(--accent); }

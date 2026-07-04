@@ -21,7 +21,7 @@ from ..dashboard import (
     recent_runs,
     recent_titles,
 )
-from ..dashboard.queries import PAGE_SIZE
+from ..dashboard.queries import PAGE_SIZE, TITLE_DIRS, default_dir
 from ..db.models import CandidateStatus
 from .templates import templates
 
@@ -51,12 +51,17 @@ def library(
     q: str | None = None,
     kind: str | None = None,
     sort: str = "added",
+    dir: str = "",
     page: int = Query(1, ge=1),
 ) -> HTMLResponse:
     if sort not in TITLE_SORTS:
         sort = "added"
-    rows, total = list_titles(q=q, kind=kind, page=page, sort=sort)
+    direction = dir if dir in TITLE_DIRS else None
+    rows, total = list_titles(q=q, kind=kind, page=page, sort=sort, direction=direction)
     pages = max(1, ceil(total / PAGE_SIZE))
+    # The effective direction (falls back to the column's default) so headers show
+    # the right arrow and the next click toggles correctly.
+    effective_dir = direction or default_dir(sort)
     return templates.TemplateResponse(
         request,
         "library.html",
@@ -66,6 +71,7 @@ def library(
             "q": q,
             "kind": kind,
             "sort": sort,
+            "dir": effective_dir,
             "page": page,
             "pages": pages,
             "active": "library",

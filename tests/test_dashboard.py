@@ -94,6 +94,24 @@ def test_list_titles_search_and_filter(config_file: Path) -> None:
     assert rows[0].has_sub is False
 
 
+def test_list_titles_sorting(config_file: Path) -> None:
+    _reset()
+    _seed()
+    from homeTheater.dashboard import list_titles
+
+    def order(sort: str, direction: str) -> list[str]:
+        rows, _ = list_titles(sort=sort, direction=direction)
+        return [r.title for r in rows]
+
+    assert order("title", "asc") == ["Breaking Bad", "The Matrix"]
+    assert order("year", "asc") == ["The Matrix", "Breaking Bad"]  # 1999, 2008
+    assert order("year", "desc") == ["Breaking Bad", "The Matrix"]
+    # rating: Breaking Bad has no rating -> always last, both directions
+    assert order("rating", "desc") == ["The Matrix", "Breaking Bad"]
+    assert order("res", "desc") == ["The Matrix", "Breaking Bad"]  # 1080p > 720p
+    assert order("subs", "desc") == ["The Matrix", "Breaking Bad"]  # he+en vs none
+
+
 def test_html_pages_render(config_file: Path) -> None:
     _reset()
     _seed()
