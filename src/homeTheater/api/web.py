@@ -130,7 +130,13 @@ async def status_page(request: Request) -> HTMLResponse:
 
 
 @router.get("/gaps", response_class=HTMLResponse)
-async def gaps(request: Request) -> HTMLResponse:
+async def gaps(
+    request: Request,
+    kind: str | None = None,
+    min_rating: float = Query(0, ge=0, le=10),
+    decade: int | None = Query(None, ge=1900, le=2030),
+    q: str | None = None,
+) -> HTMLResponse:
     """'Why not owned?' — top-rated titles above your thresholds that you don't
     have (and haven't rejected). TMDb-list data only: no per-title API cost."""
 
@@ -143,6 +149,11 @@ async def gaps(request: Request) -> HTMLResponse:
     from ..metadata.tmdb import TMDbClient
 
     cfg = effective_config()
+    kinds = (
+        [TitleKind(kind)]
+        if kind in (TitleKind.movie, TitleKind.series)
+        else [TitleKind.movie, TitleKind.series]
+    )
     rows: list[dict[str, object]] = []
     error: str | None = None
     if cfg.secrets.tmdb_api_key is None:
@@ -150,6 +161,7 @@ async def gaps(request: Request) -> HTMLResponse:
     else:
         owned, live, rejected = await asyncio.to_thread(_owned_live_rejected)
         taken = owned | live | rejected
+        needle = (q or "").strip().lower()
         async with httpx.AsyncClient(timeout=15.0) as http:
             tmdb = TMDbClient(
                 cfg.secrets.tmdb_api_key.get_secret_value(),
@@ -157,9 +169,9 @@ async def gaps(request: Request) -> HTMLResponse:
                 language=cfg.metadata.language,
                 cache_days=cfg.metadata.cache_days,
             )
-            for kind in (TitleKind.movie, TitleKind.series):
-                for t in await tmdb.top_rated(kind, limit=60):
-                    if (kind, t.tmdb_id) in taken:
+            for k in kinds:
+                for t in await tmdb.top_rated(k, limit=60):
+                    if (k, t.tmdb_id) in taken:
                         continue
                     outcome = evaluate(
                         imdb_rating=None,  # list payloads are TMDb-only
@@ -167,17 +179,23 @@ async def gaps(request: Request) -> HTMLResponse:
                         tmdb_rating=t.tmdb_rating,
                         tmdb_votes=t.tmdb_votes,
                         genres=[],
-                        thresholds=cfg.thresholds.for_kind(kind.value),
+                        thresholds=cfg.thresholds.for_kind(k.value),
                         excluded_genres=cfg.discovery.excluded_genres,
                     )
                     if not outcome.passed:
+                        continue
+                    if min_rating and (t.tmdb_rating or 0) < min_rating:
+                        continue
+                    if decade and not (t.year and decade <= t.year < decade + 10):
+                        continue
+                    if needle and needle not in t.title.lower():
                         continue
                     rows.append(
                         {
                             "tmdb_id": t.tmdb_id,
                             "title": t.title,
                             "year": t.year,
-                            "kind": kind.value,
+                            "kind": k.value,
                             "rating": t.tmdb_rating,
                             "votes": t.tmdb_votes,
                             "poster_url": t.poster_url,
@@ -185,10 +203,22 @@ async def gaps(request: Request) -> HTMLResponse:
                         }
                     )
         rows.sort(key=lambda r: float(r["rating"] or 0.0), reverse=True)  # type: ignore[arg-type]
+
+    decades = list(range(2020, 1949, -10))
     return templates.TemplateResponse(
         request,
         "gaps.html",
-        {"rows": rows, "error": error, "active": "gaps", "version": __version__},
+        {
+            "rows": rows,
+            "error": error,
+            "kind": kind if kind in ("movie", "series") else "",
+            "min_rating": min_rating,
+            "decade": decade,
+            "decades": decades,
+            "q": q or "",
+            "active": "gaps",
+            "version": __version__,
+        },
     )
 
 

@@ -191,3 +191,25 @@ details.overview p { color: var(--muted); font-size: .85rem; margin: 6px 0 0; ma
 .wall img, .wall .noposter { width: 100%; aspect-ratio: 2/3; object-fit: cover; border-radius: 10px; border: 1px solid var(--border); }
 .wall .noposter { display: flex; align-items: center; justify-content: center; background: var(--panel-2); color: var(--muted); font-size: .8rem; text-align: center; padding: 6px; }
 .wall .tname { font-size: .78rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* --- theme + control polish (Phase 13.1) ------------------------------- */
+/* Declare the color scheme so native widgets (buttons, inputs, prompts,
+   scrollbars) render dark with the dark theme instead of OS-default white. */
+:root { color-scheme: dark; }
+@media (prefers-color-scheme: light) { :root { color-scheme: light; } }
+
+/* Dark base style for every button; specific classes still override. */
+button {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 12px; cursor: pointer; font: inherit; font-size: .9rem;
+}
+button:hover { border-color: var(--accent); }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.lockbtn.unlocked { border-color: var(--ok); color: var(--ok); }
+
+/* Gaps table: compact rows, small posters, filter pills on top. */
+.gaps td.poster { width: 40px; padding: 4px; }
+.gaps td.poster img { width: 36px; height: 54px; object-fit: cover; border-radius: 4px; display: block; }
+.gaps .r { white-space: nowrap; }

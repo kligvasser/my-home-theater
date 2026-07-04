@@ -3,30 +3,67 @@
 {% block content %}
 <h1>Why not owned?</h1>
 <p class="muted">All-time top-rated titles that clear your thresholds and aren't in your
-library, queue, or reject history. <b>add</b> creates a candidate (token required).</p>
+library, queue, or reject history. <b>add</b> creates a candidate (🔒 unlock first).</p>
+
+<nav class="statusfilter">
+  {% set base = "min_rating=" ~ min_rating ~ ("&decade=" ~ decade if decade else "") ~ ("&q=" ~ (q | urlencode) if q else "") %}
+  <a href="/gaps?{{ base }}" class="{{ 'active' if not kind }}">All</a>
+  <a href="/gaps?kind=movie&{{ base }}" class="{{ 'active' if kind == 'movie' }}">🎬 Movies</a>
+  <a href="/gaps?kind=series&{{ base }}" class="{{ 'active' if kind == 'series' }}">📺 Series</a>
+</nav>
+
+<form class="filters" method="get" action="/gaps">
+  {% if kind %}<input type="hidden" name="kind" value="{{ kind }}" />{% endif %}
+  <input type="search" name="q" value="{{ q }}" placeholder="Filter by title…" />
+  <select name="min_rating">
+    <option value="0" {{ 'selected' if not min_rating }}>Any rating</option>
+    {% for r in [7.5, 8.0, 8.3, 8.5] %}
+    <option value="{{ r }}" {{ 'selected' if min_rating == r }}>TMDb ≥ {{ r }}</option>
+    {% endfor %}
+  </select>
+  <select name="decade">
+    <option value="" {{ 'selected' if not decade }}>Any decade</option>
+    {% for d in decades %}
+    <option value="{{ d }}" {{ 'selected' if decade == d }}>{{ d }}s</option>
+    {% endfor %}
+  </select>
+  <button type="submit">Apply</button>
+  <span class="muted">{{ rows | length }} gap{{ 's' if rows | length != 1 }}</span>
+</form>
 
 {% if error %}
 <p class="muted">{{ error }}</p>
 {% elif rows %}
-<div class="sresults">
+<table class="library gaps">
+  <thead>
+    <tr><th></th><th>Title</th><th>Year</th><th>Kind</th><th>TMDb</th><th>Votes</th><th></th></tr>
+  </thead>
+  <tbody>
   {% for r in rows %}
-  <div class="sresult">
-    {% if r.poster_url %}<img src="{{ r.poster_url }}" alt="" loading="lazy" />{% endif %}
-    <span>
-      {{ r.title }}{% if r.year %} <span class="muted">({{ r.year }})</span>{% endif %}
-      <span class="pill">{{ r.kind }}</span>
-      <span class="muted small">TMDb {{ "%.1f"|format(r.rating) if r.rating else "—" }}
-        · {{ "{:,}".format(r.votes) if r.votes else 0 }} votes</span>
-      {% if r.overview %}
-      <details class="overview"><summary>description</summary><p>{{ r.overview }}</p></details>
-      {% endif %}
-    </span>
-    <button data-action="add-candidate" data-tmdb-id="{{ r.tmdb_id }}" data-kind="{{ r.kind }}">add</button>
-  </div>
+    <tr>
+      <td class="poster">
+        {% if r.poster_url %}<img src="{{ r.poster_url }}" alt="" loading="lazy" />{% endif %}
+      </td>
+      <td>
+        {{ r.title }}
+        {% if r.overview %}
+        <details class="overview"><summary>description</summary><p>{{ r.overview }}</p></details>
+        {% endif %}
+      </td>
+      <td>{{ r.year or "—" }}</td>
+      <td>{{ "🎬" if r.kind == "movie" else "📺" }} {{ r.kind }}</td>
+      <td class="r">{{ "%.1f"|format(r.rating) if r.rating else "—" }}</td>
+      <td class="r">{{ "{:,}".format(r.votes) if r.votes else 0 }}</td>
+      <td>
+        <button class="primary" data-action="add-candidate"
+                data-tmdb-id="{{ r.tmdb_id }}" data-kind="{{ r.kind }}">＋ add</button>
+      </td>
+    </tr>
   {% endfor %}
-</div>
+  </tbody>
+</table>
 {% else %}
-<p class="muted">No gaps — everything top-rated above your thresholds is already owned,
-queued, or rejected. 🎉</p>
+<p class="muted">No gaps for these filters — everything top-rated above your thresholds is
+already owned, queued, or rejected. 🎉</p>
 {% endif %}
 {% endblock %}

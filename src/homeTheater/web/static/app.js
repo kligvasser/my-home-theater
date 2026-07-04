@@ -8,23 +8,49 @@
   "use strict";
 
   const KEY = "ht_token";
+  const TTL_MS = 60 * 60 * 1000; // unlock lasts 60 minutes
+
+  function stored() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(KEY) || "null");
+      if (raw && raw.t && raw.exp > Date.now()) return raw;
+    } catch (e) { /* legacy/garbage value */ }
+    localStorage.removeItem(KEY);
+    return null;
+  }
+
+  function unlock() {
+    const tok = (window.prompt("Dashboard token (DASHBOARD_TOKEN from .env) — unlocks for 60 min:") || "").trim();
+    if (tok) localStorage.setItem(KEY, JSON.stringify({ t: tok, exp: Date.now() + TTL_MS }));
+    updateLockUi();
+    return tok;
+  }
 
   function getToken(promptIfMissing) {
-    let tok = localStorage.getItem(KEY) || "";
-    if (!tok && promptIfMissing) {
-      tok = window.prompt("Dashboard token (DASHBOARD_TOKEN from .env):") || "";
-      if (tok) localStorage.setItem(KEY, tok.trim());
+    const cur = stored();
+    if (cur) {
+      cur.exp = Date.now() + TTL_MS; // activity extends the window
+      localStorage.setItem(KEY, JSON.stringify(cur));
+      return cur.t;
     }
-    return (tok || "").trim();
+    return promptIfMissing ? unlock() : "";
   }
 
   function updateLockUi() {
     const el = document.getElementById("lock");
     if (!el) return;
-    const unlocked = !!localStorage.getItem(KEY);
-    el.textContent = unlocked ? "🔓" : "🔒";
-    el.title = unlocked ? "Token saved — click to forget" : "Unlock actions (enter token)";
+    const cur = stored();
+    el.classList.toggle("unlocked", !!cur);
+    if (cur) {
+      const mins = Math.max(1, Math.round((cur.exp - Date.now()) / 60000));
+      el.textContent = "🔓 " + mins + "m";
+      el.title = "Unlocked (auto-locks after inactivity) — click to lock now";
+    } else {
+      el.textContent = "🔒 unlock";
+      el.title = "Enter the dashboard token once; actions work for 60 minutes";
+    }
   }
+  window.setInterval(updateLockUi, 30000);
 
   async function api(method, url, body) {
     const tok = getToken(true);
@@ -62,9 +88,12 @@
     const act = btn.dataset.action;
 
     if (act === "lock") {
-      if (localStorage.getItem(KEY)) localStorage.removeItem(KEY);
-      else getToken(true);
-      updateLockUi();
+      if (stored()) {
+        localStorage.removeItem(KEY);
+        updateLockUi();
+      } else {
+        unlock();
+      }
       return;
     }
 
