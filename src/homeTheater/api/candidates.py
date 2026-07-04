@@ -33,14 +33,17 @@ class ManualAdd(BaseModel):
 def api_list(
     status: CandidateStatus | None = CandidateStatus.new,
     kind: TitleKind | None = None,
-    sort: str = Query("score", pattern="^(score|taste|year|rating|added)$"),
-    limit: int = Query(100, ge=1, le=500),
+    sort: str = Query("score", pattern="^(score|taste|rating|votes|year|release|added)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(60, ge=1, le=500),
 ) -> dict[str, Any]:
+    rows, total = list_candidates(
+        status=status, kind=kind, sort=sort, page=page, page_size=page_size
+    )
     return {
         "counts": candidate_counts(),
-        "items": [
-            asdict(c) for c in list_candidates(status=status, kind=kind, sort=sort, limit=limit)
-        ],
+        "total": total,
+        "items": [asdict(c) for c in rows],
     }
 
 

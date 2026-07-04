@@ -104,6 +104,7 @@ class CandidateRow:
     overview: str | None = None
     taste_score: float | None = None
     taste_like: list[str] = field(default_factory=list)
+    release_date: str | None = None  # ISO yyyy-mm-dd (finer than year)
 
 
 def get_stats(sub_lang: str = DEFAULT_SUB_LANG, sub_langs: list[str] | None = None) -> LibraryStats:
@@ -341,41 +342,43 @@ def list_missing_subtitles(lang: str = DEFAULT_SUB_LANG, limit: int = 500) -> li
         return rows
 
 
-# Candidate sort options: query-param value -> ordering. "taste" sorts on the
-# snapshot's taste score (JSON), done in Python after the fetch.
-CANDIDATE_SORTS = ("score", "taste", "year", "rating", "added")
+CANDIDATE_PAGE_SIZE = 60
+
+# Candidate queue sorts. All sort best-first (descending); ``None`` sorts last.
+# Sorted in Python (bounded queue) so JSON-derived taste ranks alongside DB fields.
+_CANDIDATE_SORT_KEYS: dict[str, Any] = {
+    "score": lambda r: r.score,
+    "taste": lambda r: r.taste_score,
+    "rating": lambda r: r.imdb_rating,  # IMDb score
+    "votes": lambda r: r.imdb_votes,
+    "year": lambda r: r.year,
+    "release": lambda r: r.release_date,  # ISO date -> chronological
+    "added": lambda r: r.id,
+}
+CANDIDATE_SORTS = tuple(_CANDIDATE_SORT_KEYS)
 
 
 def list_candidates(
     status: str | None = "new",
     kind: str | None = None,
     sort: str = "score",
-    limit: int = 100,
-) -> list[CandidateRow]:
-    """Ranked candidate queue. Defaults to the pending (``new``) queue."""
+    page: int = 1,
+    page_size: int = CANDIDATE_PAGE_SIZE,
+) -> tuple[list[CandidateRow], int]:
+    """Ranked candidate queue (defaults to the pending ``new`` queue).
 
-    order: tuple[Any, ...]
-    if sort == "year":
-        order = (Title.year.is_(None), Title.year.desc(), Candidate.score.desc())
-    elif sort == "rating":
-        order = (Title.imdb_rating.is_(None), Title.imdb_rating.desc(), Candidate.score.desc())
-    elif sort == "added":
-        order = (Candidate.id.desc(),)
-    else:  # score (and taste: re-sorted below)
-        order = (Candidate.score.is_(None), Candidate.score.desc())
+    Returns ``(page_rows, total_matching)``. Every column sorts best-first with
+    missing values last; sorting is in Python since the queue is small.
+    """
 
+    page = max(page, 1)
     with session_scope() as s:
-        stmt = (
-            select(Candidate, Title)
-            .join(Title, Title.id == Candidate.title_id)
-            .order_by(*order)
-            .limit(limit)
-        )
+        stmt = select(Candidate, Title).join(Title, Title.id == Candidate.title_id)
         if status:
             stmt = stmt.where(Candidate.status == status)
         if kind in (TitleKind.movie, TitleKind.series):
             stmt = stmt.where(Title.kind == kind)
-        rows = []
+        rows: list[CandidateRow] = []
         for cand, title in s.execute(stmt).all():
             taste = (cand.features or {}).get("taste") or {}
             rows.append(
@@ -394,11 +397,18 @@ def list_candidates(
                     overview=title.overview,
                     taste_score=taste.get("score"),
                     taste_like=list(taste.get("like") or [])[:4],
+                    release_date=title.release_date,
                 )
             )
-        if sort == "taste":
-            rows.sort(key=lambda r: (r.taste_score is None, -(r.taste_score or 0)))
-        return rows
+
+    keyfn = _CANDIDATE_SORT_KEYS.get(sort, _CANDIDATE_SORT_KEYS["score"])
+    present = [r for r in rows if keyfn(r) is not None]
+    missing = [r for r in rows if keyfn(r) is None]  # always last
+    present.sort(key=keyfn, reverse=True)
+    ordered = present + missing
+    total = len(ordered)
+    start = (page - 1) * page_size
+    return ordered[start : start + page_size], total
 
 
 def candidate_counts() -> dict[str, int]:

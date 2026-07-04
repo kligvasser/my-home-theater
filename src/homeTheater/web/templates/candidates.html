@@ -20,14 +20,17 @@
     <option value="series" {{ 'selected' if kind == 'series' }}>📺 Series</option>
   </select>
   <select name="sort">
-    <option value="score" {{ 'selected' if sort == 'score' }}>Sort: score</option>
+    <option value="score" {{ 'selected' if sort == 'score' }}>Sort: best score</option>
     <option value="taste" {{ 'selected' if sort == 'taste' }}>Sort: taste match</option>
-    <option value="year" {{ 'selected' if sort == 'year' }}>Sort: release year</option>
     <option value="rating" {{ 'selected' if sort == 'rating' }}>Sort: IMDb rating</option>
-    <option value="added" {{ 'selected' if sort == 'added' }}>Sort: newest first</option>
+    <option value="votes" {{ 'selected' if sort == 'votes' }}>Sort: IMDb votes</option>
+    <option value="release" {{ 'selected' if sort == 'release' }}>Sort: release date</option>
+    <option value="year" {{ 'selected' if sort == 'year' }}>Sort: release year</option>
+    <option value="added" {{ 'selected' if sort == 'added' }}>Sort: newest added</option>
   </select>
   <button type="submit">Apply</button>
-  <span class="muted">{{ candidates | length }} shown</span>
+  <span class="muted">{{ total }} {{ status }} · showing {{ candidates | length }}
+    {% if pages > 1 %}(page {{ page }}/{{ pages }}){% endif %}</span>
 </form>
 
 <section class="findmore">
@@ -95,6 +98,15 @@
   </article>
   {% endfor %}
 </div>
+
+{% if pages > 1 %}
+{% set cqs = "status=" ~ (status | urlencode) ~ "&kind=" ~ ((kind or '') | urlencode) ~ "&sort=" ~ (sort | urlencode) %}
+<nav class="pager">
+  {% if page > 1 %}<a href="/candidates?{{ cqs }}&page={{ page - 1 }}">← Prev</a>{% endif %}
+  <span>Page {{ page }} / {{ pages }}</span>
+  {% if page < pages %}<a href="/candidates?{{ cqs }}&page={{ page + 1 }}">Next →</a>{% endif %}
+</nav>
+{% endif %}
 {% else %}
 <p class="muted">No <b>{{ status }}</b> candidates. Use <b>Discover more</b> above or the TMDb search box.</p>
 {% endif %}

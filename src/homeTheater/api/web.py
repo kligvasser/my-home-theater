@@ -21,7 +21,7 @@ from ..dashboard import (
     recent_runs,
     recent_titles,
 )
-from ..dashboard.queries import PAGE_SIZE, TITLE_DIRS, default_dir
+from ..dashboard.queries import CANDIDATE_PAGE_SIZE, PAGE_SIZE, TITLE_DIRS, default_dir
 from ..db.models import CandidateStatus
 from .templates import templates
 
@@ -86,6 +86,7 @@ def candidates(
     status: str = "new",
     kind: str | None = None,
     sort: str = "score",
+    page: int = Query(1, ge=1),
 ) -> HTMLResponse:
     # Unknown ?status= values would otherwise blow up at enum binding; fall back.
     try:
@@ -96,15 +97,20 @@ def candidates(
         sort = "score"
     if kind not in ("movie", "series"):
         kind = None
+    rows, total = list_candidates(status=shown, kind=kind, sort=sort, page=page)
+    pages = max(1, ceil(total / CANDIDATE_PAGE_SIZE))
     return templates.TemplateResponse(
         request,
         "candidates.html",
         {
-            "candidates": list_candidates(status=shown, kind=kind, sort=sort),
+            "candidates": rows,
             "counts": candidate_counts(),
             "status": str(shown),
             "kind": kind or "",
             "sort": sort,
+            "page": page,
+            "pages": pages,
+            "total": total,
             "active": "candidates",
             "version": __version__,
         },

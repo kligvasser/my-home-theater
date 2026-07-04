@@ -126,9 +126,7 @@ def test_delete_title_api(config_file: Path) -> None:
             assert s.query(model).count() == 0, model.__name__
 
 
-def test_search_and_discover_endpoints(
-    config_file: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_search_and_discover_endpoints(config_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _reset()
     monkeypatch.setenv("TMDB_API_KEY", "k")
     _reset()
@@ -145,8 +143,13 @@ def test_search_and_discover_endpoints(
                     200,
                     json={
                         "results": [
-                            {"id": 603, "title": "The Matrix", "release_date": "1999-03-30",
-                             "vote_average": 8.2, "poster_path": "/m.jpg"}
+                            {
+                                "id": 603,
+                                "title": "The Matrix",
+                                "release_date": "1999-03-30",
+                                "vote_average": 8.2,
+                                "poster_path": "/m.jpg",
+                            }
                         ]
                     },
                 )
@@ -166,9 +169,7 @@ def test_search_and_discover_endpoints(
 
         monkeypatch.setattr(discovery_mod, "run_discovery", fake_run)
         assert client.post("/api/candidates/discover", json={}).status_code == 401
-        r = client.post(
-            "/api/candidates/discover", json={"max_per_source": 50}, headers=TOKEN
-        )
+        r = client.post("/api/candidates/discover", json={"max_per_source": 50}, headers=TOKEN)
         assert r.status_code == 200 and r.json() == {"started": True, "max_per_source": 50}
         assert calls == [50]  # TestClient runs background tasks before returning
 
@@ -201,20 +202,38 @@ def test_candidate_sort_and_kind_filter(config_file: Path) -> None:
 
     init_db()
     with session_scope() as s:
-        movie = Title(tmdb_id=1, title="Old Movie", year=1999, kind=TitleKind.movie,
-                      imdb_rating=9.0)
-        series = Title(tmdb_id=1, title="New Series", year=2024, kind=TitleKind.series,
-                       imdb_rating=7.0)
+        movie = Title(
+            tmdb_id=1, title="Old Movie", year=1999, kind=TitleKind.movie, imdb_rating=9.0
+        )
+        series = Title(
+            tmdb_id=1, title="New Series", year=2024, kind=TitleKind.series, imdb_rating=7.0
+        )
         s.add_all([movie, series])
         s.flush()
-        s.add(Candidate(title_id=movie.id, source=CandidateSource.discovery, score=10.0,
-                        features={"taste": {"score": 0.2, "like": []}}))
-        s.add(Candidate(title_id=series.id, source=CandidateSource.discovery, score=20.0,
-                        features={"taste": {"score": 0.9, "like": []}}))
+        s.add(
+            Candidate(
+                title_id=movie.id,
+                source=CandidateSource.discovery,
+                score=10.0,
+                features={"taste": {"score": 0.2, "like": []}},
+            )
+        )
+        s.add(
+            Candidate(
+                title_id=series.id,
+                source=CandidateSource.discovery,
+                score=20.0,
+                features={"taste": {"score": 0.9, "like": []}},
+            )
+        )
 
-    assert [c.title for c in list_candidates(sort="score")] == ["New Series", "Old Movie"]
-    assert [c.title for c in list_candidates(sort="year")] == ["New Series", "Old Movie"]
-    assert [c.title for c in list_candidates(sort="rating")] == ["Old Movie", "New Series"]
-    assert [c.title for c in list_candidates(sort="taste")] == ["New Series", "Old Movie"]
-    assert [c.title for c in list_candidates(kind="movie")] == ["Old Movie"]
-    assert [c.title for c in list_candidates(kind="series", sort="year")] == ["New Series"]
+    def titles(**kw: object) -> list[str]:
+        rows, _ = list_candidates(**kw)  # type: ignore[arg-type]
+        return [c.title for c in rows]
+
+    assert titles(sort="score") == ["New Series", "Old Movie"]
+    assert titles(sort="year") == ["New Series", "Old Movie"]
+    assert titles(sort="rating") == ["Old Movie", "New Series"]
+    assert titles(sort="taste") == ["New Series", "Old Movie"]
+    assert titles(kind="movie") == ["Old Movie"]
+    assert titles(kind="series", sort="year") == ["New Series"]
