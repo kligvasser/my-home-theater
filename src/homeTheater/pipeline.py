@@ -177,7 +177,15 @@ def _build(row: _Row, live: Any, target: list[str]) -> ExecutionState:
         dl_step = "done"
     else:  # queued or downloading — it's in the client, transferring
         dl_step = "active"
-    imp_step = "done" if imported else ("failed" if failed else "pending")
+    # Once the bytes are down, "import" is the next active step until it lands.
+    if imported:
+        imp_step = "done"
+    elif failed:
+        imp_step = "failed"
+    elif complete:
+        imp_step = "active"
+    else:
+        imp_step = "pending"
     subs_step = "done" if subs_done else ("active" if imported else "pending")
 
     steps = [
@@ -224,7 +232,8 @@ def _stage(
         missing = [lang for lang in target if lang not in row.subtitle_present]
         return f"Fetching subtitles ({', '.join(missing)})"
     if downloading:
-        return f"Downloading {round((progress or 0) * 100)}%"
+        pct = round((progress or 0) * 100)
+        return "Downloaded — importing…" if pct >= 100 else f"Downloading {pct}%"
     return "Queued"
 
 

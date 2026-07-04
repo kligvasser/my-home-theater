@@ -9,7 +9,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from ..acquisition import queue_candidate
+from ..acquisition import queue_candidate, restart_candidate
 from ..config import effective_config, get_config
 from ..dashboard import candidate_counts, list_candidates
 from ..db.models import CandidateStatus, TitleKind
@@ -166,4 +166,24 @@ async def api_queue(candidate_id: int) -> dict[str, Any]:
         "dry_run": outcome.dry_run,
         "external_id": outcome.external_id,
         "message": outcome.message,
+    }
+
+
+@router.post("/{candidate_id}/restart", dependencies=[Depends(require_token)])
+async def api_restart(candidate_id: int) -> dict[str, Any]:
+    """Wipe a stuck candidate's download and re-grab it from scratch."""
+
+    try:
+        outcome = await restart_candidate(get_config(), candidate_id)
+    except NotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except InvalidTransitionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        code = 404 if "not found" in str(exc) else 400
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
+    return {
+        "queued": outcome.queued,
+        "dry_run": outcome.dry_run,
+        "message": f"Restarted — {outcome.message}",
     }

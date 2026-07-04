@@ -105,6 +105,14 @@
         const out = await api("POST", `/api/candidates/${id}/${verb}`);
         flash(out.message || `${verb}: ok`);
         window.setTimeout(() => window.location.reload(), 600);
+      } else if (act === "restart") {
+        const id = btn.dataset.cand;
+        if (!window.confirm("Restart this item?\n\nClears the current download (removing any leftover torrent) and re-grabs from scratch.")) return;
+        btn.disabled = true;
+        const out = await api("POST", `/api/candidates/${id}/restart`);
+        flash(out.message || "restarted");
+        if (typeof pipelineTick === "function") window.setTimeout(pipelineTick, 700);
+        else window.setTimeout(() => window.location.reload(), 700);
       } else if (act === "delete-title") {
         const id = btn.dataset.id;
         const name = btn.dataset.name || `#${id}`;
@@ -318,6 +326,7 @@
       metaHtml(item) +
       subsHtml(item) +
       (item.error ? `<div class="exec-error">⚠ ${esc(item.error)}</div>` : "") +
+      `<div class="exec-actions">${restartBtn(item)}</div>` +
       `</article>`
     );
   }
@@ -326,8 +335,13 @@
       `<div class="stepper compact">${stepperHtml(item)}</div>` +
       progressHtml(item) +
       `<div class="exec-stage-line ${stageClass(item)}">${esc(item.stage)}</div>` +
-      subsHtml(item)
+      subsHtml(item) +
+      `<div class="exec-actions">${restartBtn(item)}</div>`
     );
+  }
+  function restartBtn(item) {
+    return `<button type="button" class="mini" data-action="restart" data-cand="${item.candidate_id}" ` +
+      `title="Clear this download and re-grab from scratch">↻ Restart</button>`;
   }
 
   function windowHtml(w) {
@@ -373,8 +387,8 @@
           slot.innerHTML = it ? slotHtml(it) : "";
         });
       }
-      // Poll faster while something is actively transferring.
-      const active = items.some((it) => it.stage.indexOf("Downloading") === 0 || it.stage.indexOf("Fetching") === 0);
+      // Poll faster while something is actively transferring / importing.
+      const active = items.some((it) => /^(Downloading|Downloaded|Queued|Fetching)/.test(it.stage));
       if (liveEl) liveEl.textContent = active ? "● live" : "";
       window.clearTimeout(timer);
       timer = window.setTimeout(pipelineTick, active ? 3000 : 12000);

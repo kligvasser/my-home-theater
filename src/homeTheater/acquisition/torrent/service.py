@@ -120,6 +120,22 @@ def _download_dir(config: AppConfig, kind: TitleKind) -> str | None:
     return t.movie_download_dir if kind is TitleKind.movie else t.series_download_dir
 
 
+async def remove_torrents(config: AppConfig, hashes: list[str]) -> None:
+    """Remove torrents (+ their local data) from the client; best-effort.
+
+    Used by restart to clear a stuck/leftover grab. A hash the client no longer
+    knows is a harmless no-op.
+    """
+
+    async with httpx.AsyncClient(timeout=config.torrent.request_timeout) as http:
+        client = _download_client(config, http)
+        for infohash in hashes:
+            try:
+                await client.remove(infohash, delete_data=True)
+            except Exception as exc:  # missing torrent / transport hiccup
+                log.warning("torrent.remove_failed", infohash=infohash, detail=redact_exc(exc))
+
+
 async def _search_all(
     sources: list[TorrentSource], query: str, kind: TitleKind
 ) -> list[TorrentRelease]:

@@ -8,6 +8,7 @@ from .service import (
     SyncStats,
     queue_approved,
     queue_candidate,
+    restart_candidate,
     sync_downloads,
 )
 
@@ -23,5 +24,6 @@ __all__ = [
     "SyncStats",
     "queue_approved",
     "queue_candidate",
+    "restart_candidate",
     "sync_downloads",
 ]

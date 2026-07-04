@@ -80,6 +80,18 @@ def test_stage_downloading() -> None:
     }
 
 
+def test_stage_downloaded_awaiting_import() -> None:
+    # 100% down but not yet imported (sync hasn't run): import step goes active.
+    st = _build(
+        _row(CandidateStatus.queued, dl_state="downloading", progress=1.0, present=[]),
+        None,
+        ["he"],
+    )
+    assert st.stage == "Downloaded — importing…"
+    steps = _steps(st)
+    assert steps["download"] == "done" and steps["import"] == "active"
+
+
 def test_stage_imported_but_subs_missing() -> None:
     st = _build(
         _row(CandidateStatus.imported, dl_state="imported", progress=1.0, present=["he"]),

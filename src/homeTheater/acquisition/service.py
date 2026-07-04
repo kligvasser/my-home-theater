@@ -247,6 +247,39 @@ async def queue_candidate(config: AppConfig, candidate_id: int) -> QueueOutcome:
     return QueueOutcome(candidate_id, True, False, result.external_id, message)
 
 
+async def restart_candidate(config: AppConfig, candidate_id: int) -> QueueOutcome:
+    """Wipe a candidate's in-flight state and re-grab it from scratch.
+
+    For a stuck item (e.g. marked ``downloading`` but gone from the client): drop
+    its ``Download`` rows, remove any leftover torrent from the client, reset the
+    candidate to ``approved``, then queue it again (a fresh search + grab).
+    """
+
+    with session_scope() as s:
+        cand = s.get(Candidate, candidate_id)
+        if cand is None:
+            raise ValueError(f"candidate {candidate_id} not found")
+        if cand.status is CandidateStatus.rejected:
+            raise InvalidTransitionError(
+                f"candidate {candidate_id} was rejected; approve it before restarting"
+            )
+        downloads = s.scalars(
+            select(Download).where(Download.candidate_id == candidate_id)
+        ).all()
+        hashes = [d.external_id for d in downloads if d.external_id]
+        for d in downloads:
+            s.delete(d)
+        cand.status = CandidateStatus.approved
+        cand.decided_at = utcnow()
+
+    if config.acquisition.backend == "torrent" and hashes:
+        from .torrent.service import remove_torrents
+
+        await remove_torrents(config, hashes)
+
+    return await queue_candidate(config, candidate_id)
+
+
 async def queue_approved(config: AppConfig) -> AcquireStats:
     """Queue every approved candidate. Records an ``acquire`` job_run."""
 

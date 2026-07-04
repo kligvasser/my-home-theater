@@ -266,3 +266,10 @@ button.danger { background: color-mix(in srgb, var(--fail) 18%, var(--panel)); }
 .exec-stage-line { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: .76rem; font-weight: 600; margin-top: 6px; }
 .exec-error { color: var(--fail); font-size: .82rem; margin-top: 8px; }
 .exec-slot { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 8px; }
+.exec-actions { margin-top: 10px; }
+button.mini {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 7px; padding: 4px 10px; font-size: .8rem; cursor: pointer;
+}
+button.mini:hover:not(:disabled) { border-color: var(--accent); }
+button.mini:disabled { opacity: .5; cursor: default; }

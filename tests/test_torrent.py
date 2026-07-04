@@ -453,3 +453,48 @@ def test_import_completed_movie_local_target(
 
     assert dest.endswith("Movies/The Matrix (1999)/The Matrix (1999).mkv")
     assert Path(dest).read_bytes() == b"movie" * 100
+
+
+@respx.mock
+async def test_restart_clears_and_regrabs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch)
+    _reset()
+    cid = _seed_approved()
+
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate, CandidateStatus, Download
+
+    old_hash = "b" * 40
+    with session_scope() as s:
+        s.add(Download(candidate_id=cid, external_id=old_hash, state="downloading", release="old"))
+        s.get(Candidate, cid).status = CandidateStatus.downloading
+
+    respx.get(f"{APIBAY}/q.php").mock(return_value=httpx.Response(200, json=_apibay_rows()))
+    respx.post(TRANSMISSION).mock(
+        side_effect=[
+            httpx.Response(409, headers={"X-Transmission-Session-Id": "s1"}),
+            httpx.Response(200, json={"result": "success", "arguments": {}}),  # remove old
+            httpx.Response(409, headers={"X-Transmission-Session-Id": "s2"}),
+            httpx.Response(
+                200,
+                json={
+                    "result": "success",
+                    "arguments": {"torrent-added": {"hashString": HASH, "name": "new"}},
+                },
+            ),
+        ]
+    )
+
+    from homeTheater.acquisition import restart_candidate
+    from homeTheater.config import get_config
+
+    outcome = await restart_candidate(get_config(), cid)
+
+    assert outcome.queued
+    with session_scope() as s:
+        dl = s.query(Download).one()  # old row deleted, fresh grab recorded
+        assert dl.external_id == HASH and dl.release != "old"
+        assert s.get(Candidate, cid).status == CandidateStatus.queued
+    # old torrent was removed with delete-local-data
+    removes = [c for c in respx.calls if b'"torrent-remove"' in c.request.content]
+    assert removes and b'"delete-local-data":true' in removes[0].request.content
