@@ -105,6 +105,22 @@
         const out = await api("POST", `/api/candidates/${id}/${verb}`);
         flash(out.message || `${verb}: ok`);
         window.setTimeout(() => window.location.reload(), 600);
+      } else if (act === "restart") {
+        const id = btn.dataset.cand;
+        if (!window.confirm("Restart this item?\n\nClears the current download (removing any leftover torrent) and re-grabs from scratch.")) return;
+        btn.disabled = true;
+        const out = await api("POST", `/api/candidates/${id}/restart`);
+        flash(out.message || "restarted");
+        if (typeof pipelineTick === "function") window.setTimeout(pipelineTick, 700);
+        else window.setTimeout(() => window.location.reload(), 700);
+      } else if (act === "cancel") {
+        const id = btn.dataset.cand;
+        if (!window.confirm("Cancel this item?\n\nRemoves it from Transmission (and its local files) and drops it from the pipeline (rejected).")) return;
+        btn.disabled = true;
+        const out = await api("POST", `/api/candidates/${id}/cancel`);
+        flash(out.message || "cancelled");
+        if (typeof pipelineTick === "function") window.setTimeout(pipelineTick, 500);
+        else window.setTimeout(() => window.location.reload(), 500);
       } else if (act === "delete-title") {
         const id = btn.dataset.id;
         const name = btn.dataset.name || `#${id}`;
@@ -160,6 +176,16 @@
         await api("PUT", "/api/settings", {});
         flash("Overrides cleared.");
         window.setTimeout(() => window.location.reload(), 800);
+      } else if (PIPELINE_JOBS[act]) {
+        const job = PIPELINE_JOBS[act];
+        btn.disabled = true;
+        try {
+          await api("POST", job.url);
+          flash(job.msg);
+          if (typeof pipelineTick === "function") window.setTimeout(pipelineTick, 700);
+        } finally {
+          window.setTimeout(() => (btn.disabled = false), 1500);
+        }
       }
     } catch (err) {
       flash(String(err.message || err), true);
@@ -236,4 +262,151 @@
   }
 
   updateLockUi();
+
+  /* --- Execution pipeline (Activity page + candidate-card steppers) --------- */
+
+  const PIPELINE_JOBS = {
+    "acquire-now": { url: "/api/pipeline/acquire-now", msg: "Grabbing approved candidates now — watch the steppers." },
+    "sync-now": { url: "/api/pipeline/sync", msg: "Advancing downloads (poll + import)…" },
+    "scan-now": { url: "/api/pipeline/scan", msg: "Rescanning the NAS — new files enter the catalog." },
+    "subs-now": { url: "/api/subtitles/search", msg: "Fetching missing subtitles…" },
+  };
+
+  const esc = (s) =>
+    String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+  function fmtRate(bps) {
+    if (!bps) return null;
+    const u = ["B", "KB", "MB", "GB"];
+    let i = 0, v = bps;
+    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+    return v.toFixed(v < 10 ? 1 : 0) + " " + u[i] + "/s";
+  }
+  function fmtEta(sec) {
+    if (sec == null || sec < 0) return null;
+    if (sec < 60) return sec + "s";
+    if (sec < 3600) return Math.round(sec / 60) + "m";
+    return Math.round(sec / 3600) + "h" + Math.round((sec % 3600) / 60) + "m";
+  }
+
+  function stepperHtml(item) {
+    return item.steps
+      .map((s) => `<span class="step ${s.state}"><i class="dot"></i>${esc(s.label)}</span>`)
+      .join('<i class="sep"></i>');
+  }
+  function subsHtml(item) {
+    if (!item.subtitle_target.length) return "";
+    const parts = item.subtitle_target.map((l) =>
+      item.subtitle_present.includes(l)
+        ? `<span class="sub ok">${esc(l)} ✓</span>`
+        : `<span class="sub wait">${esc(l)} …</span>`);
+    return `<div class="exec-subs">Subs: ${parts.join(" · ")}</div>`;
+  }
+  function metaHtml(item) {
+    const bits = [];
+    const r = fmtRate(item.down_rate); if (r) bits.push("▼ " + r);
+    if (item.seeders != null && item.seeders > 0) bits.push(item.seeders + " seeders");
+    const e = fmtEta(item.eta_seconds); if (e) bits.push("ETA " + e);
+    if (item.release) bits.push(esc(item.release));
+    return bits.length ? `<div class="exec-meta">${bits.join(" · ")}</div>` : "";
+  }
+  function stageClass(item) {
+    if (item.stage === "Failed") return "err";
+    if (item.stage === "Done") return "ok";
+    return "run";
+  }
+  function progressHtml(item) {
+    // Show a bar while downloading or importing (both carry a live fraction).
+    if (!/^(Downloading|Importing)/.test(item.stage)) return "";
+    const pct = Math.round((item.progress || 0) * 100);
+    const cls = item.stage.indexOf("Importing") === 0 ? "exec-fill importing" : "exec-fill";
+    return `<div class="exec-progress" title="${pct}%"><div class="${cls}" style="width:${pct}%"></div></div>`;
+  }
+
+  function cardHtml(item) {
+    const yr = item.year ? ` (${item.year})` : "";
+    return (
+      `<article class="exec-card">` +
+      `<div class="exec-head"><b>${esc(item.title)}${yr}</b> ` +
+      `<span class="pill">${esc(item.kind)}</span>` +
+      `<span class="exec-stage ${stageClass(item)}">${esc(item.stage)}</span></div>` +
+      `<div class="stepper">${stepperHtml(item)}</div>` +
+      progressHtml(item) +
+      metaHtml(item) +
+      subsHtml(item) +
+      (item.error ? `<div class="exec-error">⚠ ${esc(item.error)}</div>` : "") +
+      `<div class="exec-actions">${restartBtn(item)} ${cancelBtn(item)}</div>` +
+      `</article>`
+    );
+  }
+  function slotHtml(item) {
+    return (
+      `<div class="stepper compact">${stepperHtml(item)}</div>` +
+      progressHtml(item) +
+      `<div class="exec-stage-line ${stageClass(item)}">${esc(item.stage)}</div>` +
+      subsHtml(item) +
+      `<div class="exec-actions">${restartBtn(item)} ${cancelBtn(item)}</div>`
+    );
+  }
+  function restartBtn(item) {
+    return `<button type="button" class="mini" data-action="restart" data-cand="${item.candidate_id}" ` +
+      `title="Clear this download and re-grab from scratch">↻ Restart</button>`;
+  }
+  function cancelBtn(item) {
+    return `<button type="button" class="mini danger" data-action="cancel" data-cand="${item.candidate_id}" ` +
+      `title="Stop, remove from Transmission, and drop from the pipeline">✖ Cancel</button>`;
+  }
+
+  function windowHtml(w) {
+    if (!w) return "";
+    const hh = (h) => String(h).padStart(2, "0") + ":00";
+    if (!w.enabled)
+      return `<span class="wtag off">⚡ No window — approved items grab every acquire cycle.</span>`;
+    const state = w.is_open
+      ? `<span class="wtag open">🟢 open now</span>`
+      : `<span class="wtag closed">🌙 closed — opens ${hh(w.start_hour)}</span>`;
+    return `<span class="muted">Nightly window ${hh(w.start_hour)}–${hh(w.end_hour)}</span> ${state}`;
+  }
+
+  const listEl = document.getElementById("activity-list");
+  const winEl = document.getElementById("act-window");
+  const liveEl = document.getElementById("act-live");
+  const hasSlots = document.querySelector(".exec-slot");
+  let pipelineTick = null;
+
+  if (listEl || hasSlots) {
+    let timer = null;
+    pipelineTick = async function () {
+      let data;
+      try {
+        const resp = await fetch("/api/activity", { headers: { Accept: "application/json" } });
+        data = await resp.json();
+      } catch (e) { return; }
+      const items = data.items || [];
+      if (winEl) winEl.innerHTML = windowHtml(data.window);
+
+      if (listEl) {
+        if (!items.length) {
+          listEl.innerHTML = `<p class="muted">Nothing in the pipeline. Approve a candidate and grab it to see it here.</p>`;
+        } else {
+          listEl.innerHTML = items.map(cardHtml).join("");
+        }
+      }
+      if (hasSlots) {
+        const byId = {};
+        items.forEach((it) => (byId[it.candidate_id] = it));
+        document.querySelectorAll(".exec-slot").forEach((slot) => {
+          const it = byId[Number(slot.dataset.cand)];
+          slot.innerHTML = it ? slotHtml(it) : "";
+        });
+      }
+      // Poll faster while something is actively transferring / importing.
+      const active = items.some((it) => /^(Downloading|Downloaded|Importing|Queued|Fetching)/.test(it.stage));
+      if (liveEl) liveEl.textContent = active ? "● live" : "";
+      window.clearTimeout(timer);
+      timer = window.setTimeout(pipelineTick, active ? 3000 : 12000);
+    };
+    pipelineTick();
+  }
 })();

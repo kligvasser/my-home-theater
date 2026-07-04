@@ -77,18 +77,18 @@ def discover() -> None:
 
 
 def subtitles() -> None:
-    """Ask Bazarr to search for all missing target-language subtitles."""
+    """Fetch missing target-language subtitles (Bazarr or native backend)."""
 
     import asyncio
 
     from .config import get_config
     from .db import init_db
-    from .subtitles import sweep_missing
+    from .subtitles import sweep_subtitles
 
     _configure()
     config = get_config()
     init_db()  # dev convenience; production uses Alembic
-    stats = asyncio.run(sweep_missing(config))
+    stats = asyncio.run(sweep_subtitles(config))
     log.info("subtitles.cli_done", **stats.as_dict())
 
 

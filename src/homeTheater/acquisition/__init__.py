@@ -6,8 +6,10 @@ from .service import (
     AcquireStats,
     QueueOutcome,
     SyncStats,
+    cancel_candidate,
     queue_approved,
     queue_candidate,
+    restart_candidate,
     sync_downloads,
 )
 
@@ -21,7 +23,9 @@ __all__ = [
     "RadarrClient",
     "SonarrClient",
     "SyncStats",
+    "cancel_candidate",
     "queue_approved",
     "queue_candidate",
+    "restart_candidate",
     "sync_downloads",
 ]

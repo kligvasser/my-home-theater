@@ -9,7 +9,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from ..acquisition import queue_candidate
+from ..acquisition import cancel_candidate, queue_candidate, restart_candidate
 from ..config import effective_config, get_config
 from ..dashboard import candidate_counts, list_candidates
 from ..db.models import CandidateStatus, TitleKind
@@ -33,14 +33,17 @@ class ManualAdd(BaseModel):
 def api_list(
     status: CandidateStatus | None = CandidateStatus.new,
     kind: TitleKind | None = None,
-    sort: str = Query("score", pattern="^(score|taste|year|rating|added)$"),
-    limit: int = Query(100, ge=1, le=500),
+    sort: str = Query("score", pattern="^(score|taste|rating|votes|year|release|added)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(60, ge=1, le=500),
 ) -> dict[str, Any]:
+    rows, total = list_candidates(
+        status=status, kind=kind, sort=sort, page=page, page_size=page_size
+    )
     return {
         "counts": candidate_counts(),
-        "items": [
-            asdict(c) for c in list_candidates(status=status, kind=kind, sort=sort, limit=limit)
-        ],
+        "total": total,
+        "items": [asdict(c) for c in rows],
     }
 
 
@@ -167,3 +170,35 @@ async def api_queue(candidate_id: int) -> dict[str, Any]:
         "external_id": outcome.external_id,
         "message": outcome.message,
     }
+
+
+@router.post("/{candidate_id}/restart", dependencies=[Depends(require_token)])
+async def api_restart(candidate_id: int) -> dict[str, Any]:
+    """Wipe a stuck candidate's download and re-grab it from scratch."""
+
+    try:
+        outcome = await restart_candidate(get_config(), candidate_id)
+    except NotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except InvalidTransitionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        code = 404 if "not found" in str(exc) else 400
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
+    return {
+        "queued": outcome.queued,
+        "dry_run": outcome.dry_run,
+        "message": f"Restarted — {outcome.message}",
+    }
+
+
+@router.post("/{candidate_id}/cancel", dependencies=[Depends(require_token)])
+async def api_cancel(candidate_id: int) -> dict[str, Any]:
+    """Cancel an in-flight item: remove its torrent + drop it from the pipeline."""
+
+    try:
+        name = await cancel_candidate(get_config(), candidate_id)
+    except ValueError as exc:
+        code = 404 if "not found" in str(exc) else 400
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
+    return {"cancelled": True, "message": f"Cancelled '{name}'"}

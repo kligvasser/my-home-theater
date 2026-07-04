@@ -21,7 +21,7 @@ from ..dashboard import (
     recent_runs,
     recent_titles,
 )
-from ..dashboard.queries import PAGE_SIZE
+from ..dashboard.queries import CANDIDATE_PAGE_SIZE, PAGE_SIZE, TITLE_DIRS, default_dir
 from ..db.models import CandidateStatus
 from .templates import templates
 
@@ -51,12 +51,17 @@ def library(
     q: str | None = None,
     kind: str | None = None,
     sort: str = "added",
+    dir: str = "",
     page: int = Query(1, ge=1),
 ) -> HTMLResponse:
     if sort not in TITLE_SORTS:
         sort = "added"
-    rows, total = list_titles(q=q, kind=kind, page=page, sort=sort)
+    direction = dir if dir in TITLE_DIRS else None
+    rows, total = list_titles(q=q, kind=kind, page=page, sort=sort, direction=direction)
     pages = max(1, ceil(total / PAGE_SIZE))
+    # The effective direction (falls back to the column's default) so headers show
+    # the right arrow and the next click toggles correctly.
+    effective_dir = direction or default_dir(sort)
     return templates.TemplateResponse(
         request,
         "library.html",
@@ -66,8 +71,10 @@ def library(
             "q": q,
             "kind": kind,
             "sort": sort,
+            "dir": effective_dir,
             "page": page,
             "pages": pages,
+            "sub_langs": get_config().subtitles.languages,
             "active": "library",
             "version": __version__,
         },
@@ -80,6 +87,7 @@ def candidates(
     status: str = "new",
     kind: str | None = None,
     sort: str = "score",
+    page: int = Query(1, ge=1),
 ) -> HTMLResponse:
     # Unknown ?status= values would otherwise blow up at enum binding; fall back.
     try:
@@ -90,18 +98,34 @@ def candidates(
         sort = "score"
     if kind not in ("movie", "series"):
         kind = None
+    rows, total = list_candidates(status=shown, kind=kind, sort=sort, page=page)
+    pages = max(1, ceil(total / CANDIDATE_PAGE_SIZE))
     return templates.TemplateResponse(
         request,
         "candidates.html",
         {
-            "candidates": list_candidates(status=shown, kind=kind, sort=sort),
+            "candidates": rows,
             "counts": candidate_counts(),
             "status": str(shown),
             "kind": kind or "",
             "sort": sort,
+            "page": page,
+            "pages": pages,
+            "total": total,
             "active": "candidates",
             "version": __version__,
         },
+    )
+
+
+@router.get("/activity", response_class=HTMLResponse)
+def activity_page(request: Request) -> HTMLResponse:
+    """Live acquisition-pipeline view (populated client-side from /api/activity)."""
+
+    return templates.TemplateResponse(
+        request,
+        "activity.html",
+        {"active": "activity", "version": __version__},
     )
 
 
@@ -127,17 +151,27 @@ def subtitles(request: Request, lang: str | None = None) -> HTMLResponse:
 
 @router.get("/status", response_class=HTMLResponse)
 async def status_page(request: Request) -> HTMLResponse:
+    from ..dashboard import candidate_counts, get_stats
     from ..health import check_all
 
     cfg = get_config()
-    # recent_runs is sync SQLAlchemy; keep it off the event loop.
-    runs = await asyncio.to_thread(recent_runs, 50)
+    # sync SQLAlchemy — keep off the event loop.
+    runs = await asyncio.to_thread(recent_runs, 20)
+    counts = await asyncio.to_thread(candidate_counts)
+    stats = await asyncio.to_thread(get_stats, cfg.subtitles.primary, cfg.subtitles.languages)
+    window = cfg.acquisition.window
     return templates.TemplateResponse(
         request,
         "status.html",
         {
             "providers": await check_all(cfg),
-            "failures": [r for r in runs if r.status == "failed"],
+            "runs": runs,
+            "counts": counts,
+            "stats": stats,
+            "acq_backend": cfg.acquisition.backend,
+            "sub_backend": cfg.subtitles.backend,
+            "sub_sources": cfg.subtitles.sources,
+            "window": window,
             "dry_run": cfg.features.dry_run,
             "auto_approve": cfg.features.auto_approve,
             "scheduler": cfg.schedule.enabled,
@@ -249,6 +283,7 @@ def settings_page(request: Request) -> HTMLResponse:
         "taste": cfg.taste.model_dump(mode="json"),
         "subtitles": cfg.subtitles.model_dump(mode="json"),
         "organizer": cfg.organizer.model_dump(mode="json"),
+        "acquisition": cfg.acquisition.model_dump(mode="json"),
         "features": {"auto_approve": cfg.features.auto_approve},
     }
     return templates.TemplateResponse(

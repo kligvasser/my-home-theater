@@ -218,3 +218,79 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.danger { background: #33222a; }
 button.danger { background: color-mix(in srgb, var(--fail) 18%, var(--panel)); }
 .lockbtn { background: var(--panel-2); }
+
+/* --- Execution pipeline (Activity page + candidate steppers) --------------- */
+.windowbar { margin: 4px 0 14px; font-size: .9rem; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.wtag { padding: 2px 10px; border-radius: 999px; font-size: .8rem; font-weight: 600; border: 1px solid var(--border); }
+.wtag.open { background: color-mix(in srgb, var(--ok) 20%, transparent); color: var(--ok); }
+.wtag.closed { background: color-mix(in srgb, var(--running) 20%, transparent); color: var(--running); }
+.wtag.off { background: var(--panel-2); color: var(--muted); }
+
+.pipeline-controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
+.pipeline-controls button {
+  background: var(--panel); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 12px; cursor: pointer; font-size: .9rem;
+}
+.pipeline-controls button:hover:not(:disabled) { border-color: var(--accent); }
+.pipeline-controls button:disabled { opacity: .5; cursor: default; }
+
+#activity-list { display: flex; flex-direction: column; gap: 12px; }
+.exec-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+.exec-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.exec-head b { font-size: 1.02rem; }
+.exec-stage { padding: 2px 10px; border-radius: 999px; font-size: .78rem; font-weight: 600; margin-left: auto; }
+.exec-stage.run, .exec-stage-line.run { color: var(--running); background: color-mix(in srgb, var(--running) 18%, transparent); }
+.exec-stage.ok, .exec-stage-line.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 18%, transparent); }
+.exec-stage.err, .exec-stage-line.err { color: var(--fail); background: color-mix(in srgb, var(--fail) 18%, transparent); }
+
+/* Stepper: dots + connectors, coloured by step state. */
+.stepper { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; font-size: .82rem; }
+.stepper.compact { font-size: .76rem; margin-top: 10px; }
+.step { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); padding: 2px 4px; }
+.step .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--border); display: inline-block; flex: none; }
+.step.done { color: var(--text); }
+.step.done .dot { background: var(--ok); }
+.step.active { color: var(--running); font-weight: 600; }
+.step.active .dot { background: var(--running); box-shadow: 0 0 0 3px color-mix(in srgb, var(--running) 25%, transparent); animation: pulse 1.4s ease-in-out infinite; }
+.step.failed { color: var(--fail); }
+.step.failed .dot { background: var(--fail); }
+.step .sep, .stepper .sep { width: 16px; height: 2px; background: var(--border); flex: none; }
+@keyframes pulse { 50% { opacity: .45; } }
+
+.exec-progress { height: 8px; background: var(--panel-2); border-radius: 5px; overflow: hidden; margin: 10px 0 6px; }
+.exec-fill { height: 100%; background: var(--accent); transition: width .6s ease; }
+.exec-meta { color: var(--muted); font-size: .82rem; margin-top: 4px; }
+.exec-subs { font-size: .82rem; margin-top: 6px; }
+.exec-subs .sub.ok { color: var(--ok); }
+.exec-subs .sub.wait { color: var(--muted); }
+.exec-stage-line { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: .76rem; font-weight: 600; margin-top: 6px; }
+.exec-error { color: var(--fail); font-size: .82rem; margin-top: 8px; }
+.exec-slot { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 8px; }
+.exec-actions { margin-top: 10px; }
+button.mini {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 7px; padding: 4px 10px; font-size: .8rem; cursor: pointer;
+}
+button.mini:hover:not(:disabled) { border-color: var(--accent); }
+button.mini:disabled { opacity: .5; cursor: default; }
+
+/* --- Sortable library table headers --------------------------------------- */
+.sortable-table th.sortable { padding: 0; }
+.sortable-table th.sortable a {
+  display: block; padding: 7px 10px; color: var(--muted); white-space: nowrap;
+  text-transform: uppercase; font-size: .82rem; letter-spacing: .03em; font-weight: 600;
+}
+.sortable-table th.sortable a:hover { color: var(--text); background: var(--panel-2); }
+.sortable-table th.sorted a { color: var(--text); }
+.sortable-table th .arrow { margin-left: 5px; opacity: .35; font-size: .85em; }
+.sortable-table th.sorted .arrow { opacity: 1; color: var(--accent); }
+/* Import copy uses a distinct (green) bar vs the download (accent) bar. */
+.exec-fill.importing { background: var(--ok); }
+button.mini.danger { color: var(--fail); }
+button.mini.danger:hover:not(:disabled) {
+  border-color: var(--fail); background: color-mix(in srgb, var(--fail) 12%, var(--panel-2));
+}
+/* Library per-language subtitle coverage cell */
+.subs .sub { display: inline-block; margin-right: 8px; white-space: nowrap; }
+.subs .sub.ok { color: var(--ok); }
+.subs .sub.no { color: var(--muted); }

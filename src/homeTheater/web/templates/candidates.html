@@ -20,14 +20,17 @@
     <option value="series" {{ 'selected' if kind == 'series' }}>📺 Series</option>
   </select>
   <select name="sort">
-    <option value="score" {{ 'selected' if sort == 'score' }}>Sort: score</option>
+    <option value="score" {{ 'selected' if sort == 'score' }}>Sort: best score</option>
     <option value="taste" {{ 'selected' if sort == 'taste' }}>Sort: taste match</option>
-    <option value="year" {{ 'selected' if sort == 'year' }}>Sort: release year</option>
     <option value="rating" {{ 'selected' if sort == 'rating' }}>Sort: IMDb rating</option>
-    <option value="added" {{ 'selected' if sort == 'added' }}>Sort: newest first</option>
+    <option value="votes" {{ 'selected' if sort == 'votes' }}>Sort: IMDb votes</option>
+    <option value="release" {{ 'selected' if sort == 'release' }}>Sort: release date</option>
+    <option value="year" {{ 'selected' if sort == 'year' }}>Sort: release year</option>
+    <option value="added" {{ 'selected' if sort == 'added' }}>Sort: newest added</option>
   </select>
   <button type="submit">Apply</button>
-  <span class="muted">{{ candidates | length }} shown</span>
+  <span class="muted">{{ total }} {{ status }} · showing {{ candidates | length }}
+    {% if pages > 1 %}(page {{ page }}/{{ pages }}){% endif %}</span>
 </form>
 
 <section class="findmore">
@@ -71,11 +74,15 @@
       {% endif %}
       <div class="cactions">
         {% if c.status == "new" %}
-        <button type="button" data-action="candidate" data-verb="approve" data-id="{{ c.id }}">✓ Approve</button>
+        <button type="button" data-action="candidate" data-verb="approve" data-id="{{ c.id }}"
+                title="Approve — grabbed by the scheduled acquire job (respects the download window)">✓ Approve (schedule)</button>
         <button type="button" class="danger" data-action="candidate" data-verb="reject" data-id="{{ c.id }}">✗ Reject</button>
-        <button type="button" data-action="candidate" data-verb="queue" data-id="{{ c.id }}">⬇ Queue now</button>
+        <button type="button" data-action="candidate" data-verb="queue" data-id="{{ c.id }}"
+                title="Grab immediately, bypassing the nightly window">⬇ Grab now</button>
         {% elif c.status == "approved" %}
-        <button type="button" data-action="candidate" data-verb="queue" data-id="{{ c.id }}">⬇ Queue now</button>
+        <span class="pill">⏳ scheduled</span>
+        <button type="button" data-action="candidate" data-verb="queue" data-id="{{ c.id }}"
+                title="Grab immediately, bypassing the nightly window">⬇ Grab now</button>
         <button type="button" class="danger" data-action="candidate" data-verb="reject" data-id="{{ c.id }}">✗ Reject</button>
         {% elif c.status == "failed" %}
         <button type="button" data-action="candidate" data-verb="approve" data-id="{{ c.id }}">↻ Retry (approve)</button>
@@ -84,10 +91,22 @@
         <span class="pill">{{ c.status }}</span>
         {% endif %}
       </div>
+      {% if c.status in ["queued", "downloading", "imported", "failed"] %}
+      <div class="exec-slot" data-cand="{{ c.id }}"></div>
+      {% endif %}
     </div>
   </article>
   {% endfor %}
 </div>
+
+{% if pages > 1 %}
+{% set cqs = "status=" ~ (status | urlencode) ~ "&kind=" ~ ((kind or '') | urlencode) ~ "&sort=" ~ (sort | urlencode) %}
+<nav class="pager">
+  {% if page > 1 %}<a href="/candidates?{{ cqs }}&page={{ page - 1 }}">← Prev</a>{% endif %}
+  <span>Page {{ page }} / {{ pages }}</span>
+  {% if page < pages %}<a href="/candidates?{{ cqs }}&page={{ page + 1 }}">Next →</a>{% endif %}
+</nav>
+{% endif %}
 {% else %}
 <p class="muted">No <b>{{ status }}</b> candidates. Use <b>Discover more</b> above or the TMDb search box.</p>
 {% endif %}

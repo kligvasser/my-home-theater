@@ -3,22 +3,49 @@
 {% block content %}
 <h1>Status</h1>
 
+<h2>System</h2>
 <section class="cards">
-  <div class="card"><span class="num">{{ "on" if dry_run else "off" }}</span><span class="lbl">dry-run</span></div>
-  <div class="card"><span class="num">{{ "on" if auto_approve else "off" }}</span><span class="lbl">auto-approve</span></div>
+  <div class="card"><span class="num">{{ acq_backend }}</span><span class="lbl">acquisition backend</span></div>
+  <div class="card"><span class="num">{{ sub_backend }}</span><span class="lbl">subtitles backend</span></div>
+  <div class="card"><span class="num {{ 'warn' if dry_run }}">{{ "ON" if dry_run else "off" }}</span><span class="lbl">dry-run</span></div>
   <div class="card"><span class="num">{{ "on" if scheduler else "off" }}</span><span class="lbl">scheduler</span></div>
+  <div class="card"><span class="num">{{ "on" if auto_approve else "off" }}</span><span class="lbl">auto-approve</span></div>
+  <div class="card">
+    <span class="num">{% if window.enabled %}{{ "%02d–%02d"|format(window.start_hour, window.end_hour) }}{% else %}any{% endif %}</span>
+    <span class="lbl">download window</span>
+  </div>
 </section>
 
-<h2>Providers</h2>
+<h2>Library</h2>
+<section class="cards">
+  <div class="card"><span class="num">{{ stats.total_titles }}</span><span class="lbl">owned titles</span></div>
+  <div class="card"><span class="num">{{ stats.movies }}</span><span class="lbl">movies</span></div>
+  <div class="card"><span class="num">{{ stats.series }}</span><span class="lbl">series</span></div>
+  <div class="card"><span class="num">{{ stats.files }}</span><span class="lbl">files</span></div>
+  <div class="card"><span class="num">{{ stats.total_size_bytes | human_size }}</span><span class="lbl">total size</span></div>
+  {% for cov in stats.coverages %}
+  <div class="card"><span class="num">{{ cov.pct }}%</span><span class="lbl">{{ cov.lang }} subs ({{ cov.covered }}/{{ cov.total }})</span></div>
+  {% endfor %}
+</section>
+
+<h2>Pipeline</h2>
+<nav class="statusfilter">
+  {% for st in ["new", "approved", "queued", "downloading", "imported", "rejected", "failed"] %}
+  <a href="/candidates?status={{ st }}">{{ st }} <span class="count">{{ counts.get(st, 0) }}</span></a>
+  {% endfor %}
+</nav>
+<p class="muted small">Watch anything mid-flight on the <a href="/activity">Activity</a> page.</p>
+
+<h2>Services</h2>
 <table>
-  <thead><tr><th>Provider</th><th>Configured</th><th>Reachable</th><th>Detail</th></tr></thead>
+  <thead><tr><th>Service</th><th>Configured</th><th>Status</th><th>Detail</th></tr></thead>
   <tbody>
   {% for p in providers %}
     <tr>
       <td>{{ p.name }}</td>
       <td>{{ "yes" if p.configured else "—" }}</td>
       <td>
-        {% if p.ok is none %}<span class="muted">n/a</span>
+        {% if p.ok is none %}<span class="muted">{{ "ok" if p.configured else "off" }}</span>
         {% elif p.ok %}<span class="pill success">up</span>
         {% else %}<span class="pill failed">down</span>{% endif %}
       </td>
@@ -28,11 +55,6 @@
   </tbody>
 </table>
 
-<h2>Recent failures ({{ failures | length }})</h2>
-{% if failures %}
-{% set runs = failures %}
+<h2>Recent runs</h2>
 {% include "_runs_table.html" %}
-{% else %}
-<p class="muted">No failed jobs recorded. 🎉</p>
-{% endif %}
 {% endblock %}

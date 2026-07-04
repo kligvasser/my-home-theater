@@ -75,18 +75,32 @@ async def run_discovery_job(config: AppConfig) -> None:
 
 
 async def run_subtitle_job(config: AppConfig) -> None:
-    from ..subtitles import sweep_missing
+    from ..subtitles import sweep_subtitles
 
     async def body() -> str | None:
-        stats = await sweep_missing(config)
-        searched = stats.searched_movies + stats.searched_episodes
-        return f"💬 Requested {searched} subtitle search(es)" if searched else None
+        stats = (await sweep_subtitles(config)).as_dict()
+        # native backend reports downloads; bazarr reports triggered searches
+        n = stats.get("downloaded") or (
+            stats.get("searched_movies", 0) + stats.get("searched_episodes", 0)
+        )
+        return f"💬 {n} subtitle(s)" if n else None
 
     await _guarded("subtitle", config, body)
 
 
 async def run_acquire_job(config: AppConfig) -> None:
+    from datetime import datetime
+
     from ..acquisition import queue_approved
+
+    # Respect the nightly download window on the *scheduled* path only; a manual
+    # "grab now" (CLI/dashboard) calls queue_approved directly and bypasses this.
+    window = config.acquisition.window
+    if not window.is_open(datetime.now().hour):
+        log.info(
+            "acquire.window_closed", start=window.start_hour, end=window.end_hour
+        )
+        return
 
     async def body() -> str | None:
         stats = await queue_approved(config)

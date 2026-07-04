@@ -94,6 +94,24 @@ def test_list_titles_search_and_filter(config_file: Path) -> None:
     assert rows[0].has_sub is False
 
 
+def test_list_titles_sorting(config_file: Path) -> None:
+    _reset()
+    _seed()
+    from homeTheater.dashboard import list_titles
+
+    def order(sort: str, direction: str) -> list[str]:
+        rows, _ = list_titles(sort=sort, direction=direction)
+        return [r.title for r in rows]
+
+    assert order("title", "asc") == ["Breaking Bad", "The Matrix"]
+    assert order("year", "asc") == ["The Matrix", "Breaking Bad"]  # 1999, 2008
+    assert order("year", "desc") == ["Breaking Bad", "The Matrix"]
+    # rating: Breaking Bad has no rating -> always last, both directions
+    assert order("rating", "desc") == ["The Matrix", "Breaking Bad"]
+    assert order("res", "desc") == ["The Matrix", "Breaking Bad"]  # 1080p > 720p
+    assert order("subs", "desc") == ["The Matrix", "Breaking Bad"]  # he+en vs none
+
+
 def test_html_pages_render(config_file: Path) -> None:
     _reset()
     _seed()
@@ -142,3 +160,22 @@ def test_json_api(config_file: Path) -> None:
         titles = client.get("/api/titles", params={"kind": "movie"}).json()
         assert titles["total"] == 1
         assert titles["items"][0]["title"] == "The Matrix"
+
+
+def test_library_excludes_unowned_candidate_titles(config_file: Path) -> None:
+    _reset()
+    from homeTheater.dashboard import get_stats, list_titles
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import OwnedFile, Title, TitleKind
+
+    init_db()
+    with session_scope() as s:
+        owned = Title(title="Owned Movie", year=2020, kind=TitleKind.movie)
+        owned.owned_files = [OwnedFile(path="/Movies/o.mkv", kind=TitleKind.movie)]
+        # a discovery candidate: a catalog Title with NO file on disk
+        s.add_all([owned, Title(title="Unreleased 2026", year=2026, kind=TitleKind.movie)])
+
+    rows, total = list_titles()
+    assert total == 1 and [r.title for r in rows] == ["Owned Movie"]
+    # stats count owned only, matching the library
+    assert get_stats().movies == 1 and get_stats().total_titles == 1

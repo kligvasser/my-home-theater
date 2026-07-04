@@ -142,6 +142,30 @@ async def test_discovery_dedups_and_skips_live(
 
 
 @respx.mock
+async def test_imported_candidate_not_resuggested(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An already-imported title must not be re-discovered as a fresh candidate,
+    even before its owned-file record lands in the catalog (torrent import case)."""
+    from sqlalchemy import select
+
+    _env(monkeypatch)
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate, CandidateStatus
+    from homeTheater.discovery import run_discovery
+
+    init_db()
+    _mock_common()
+    await run_discovery(get_config())  # creates the candidate
+    with session_scope() as s:
+        for c in s.scalars(select(Candidate)).all():
+            c.status = CandidateStatus.imported  # imported, but no owned_file yet
+    stats = await run_discovery(get_config())
+    assert stats.created == 0 and stats.live_skipped == 1
+
+
+@respx.mock
 async def test_add_manual(config_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _env(monkeypatch)
     from homeTheater.config import get_config
@@ -223,9 +247,7 @@ async def test_movie_and_series_sharing_tmdb_id_coexist(
         return_value=httpx.Response(
             200,
             json={
-                "results": [
-                    {"id": 1396, "name": "Breaking Bad", "first_air_date": "2008-01-20"}
-                ]
+                "results": [{"id": 1396, "name": "Breaking Bad", "first_air_date": "2008-01-20"}]
             },
         )
     )
@@ -312,9 +334,7 @@ async def test_discovery_without_omdb_uses_tmdb_fallback(
         return_value=httpx.Response(
             200,
             json={
-                "results": [
-                    {"id": 155, "title": "The Dark Knight", "release_date": "2008-07-16"}
-                ]
+                "results": [{"id": 155, "title": "The Dark Knight", "release_date": "2008-07-16"}]
             },
         )
     )
@@ -366,9 +386,7 @@ async def test_taste_similarity_blended_into_candidates(
     assert stats.created == 1
 
     with session_scope() as s:
-        cand = s.scalars(
-            select(Candidate).join(Title).where(Title.tmdb_id == 155)
-        ).one()
+        cand = s.scalars(select(Candidate).join(Title).where(Title.tmdb_id == 155)).one()
         taste = cand.features["taste"]
         assert taste["score"] > 0  # Dark Knight is Action like the library
         assert len(taste["like"]) > 0

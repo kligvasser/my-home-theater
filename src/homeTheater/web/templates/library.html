@@ -1,5 +1,18 @@
 {% extends "base.html" %}
 {% block title %}Library · my-home-theater{% endblock %}
+
+{# base query string (filters), and a sortable-header helper #}
+{% set base = "q=" ~ ((q or '') | urlencode) ~ "&kind=" ~ ((kind or '') | urlencode) %}
+{% macro sorth(key, label, default) %}
+  {% set active = (sort == key) %}
+  {% set ndir = ("asc" if dir == "desc" else "desc") if active else default %}
+  <th class="sortable {{ 'sorted' if active }}">
+    <a href="/library?{{ base }}&sort={{ key }}&dir={{ ndir }}"
+       title="Sort by {{ label }} ({{ 'ascending' if ndir == 'asc' else 'descending' }})">
+      {{ label }}<span class="arrow">{{ ('▲' if dir == 'asc' else '▼') if active else '↕' }}</span></a>
+  </th>
+{% endmacro %}
+
 {% block content %}
 <h1>Library</h1>
 
@@ -10,23 +23,32 @@
     <option value="movie" {{ 'selected' if kind == 'movie' }}>Movies</option>
     <option value="series" {{ 'selected' if kind == 'series' }}>Series</option>
   </select>
-  <select name="sort">
-    <option value="added" {{ 'selected' if sort == 'added' }}>Recently added</option>
-    <option value="rating" {{ 'selected' if sort == 'rating' }}>IMDb rating</option>
-    <option value="title" {{ 'selected' if sort == 'title' }}>Title A→Z</option>
-    <option value="year" {{ 'selected' if sort == 'year' }}>Year</option>
-  </select>
+  {# keep the current sort when filtering #}
+  <input type="hidden" name="sort" value="{{ sort }}" />
+  <input type="hidden" name="dir" value="{{ dir }}" />
   <button type="submit">Apply</button>
-  <span class="muted">{{ total }} match{{ 'es' if total != 1 }}</span>
+  <span class="muted">{{ total }} match{{ 'es' if total != 1 }} · click a column to sort</span>
 </form>
 
-{% set qs = "q=" ~ ((q or '') | urlencode) ~ "&kind=" ~ ((kind or '') | urlencode) ~ "&sort=" ~ (sort | urlencode) %}
+{% set qs = base ~ "&sort=" ~ (sort | urlencode) ~ "&dir=" ~ (dir | urlencode) %}
 
 {% if rows %}
-<table class="library">
+<table class="library sortable-table">
   <thead>
-    <tr><th></th><th>Title</th><th>Year</th><th>Kind</th><th>IMDb</th><th>Votes</th>
-        <th>Genres</th><th>Added</th><th>Files</th><th>Res</th><th>Subs</th><th></th></tr>
+    <tr>
+      <th></th>
+      {{ sorth("title", "Title", "asc") }}
+      {{ sorth("year", "Year", "desc") }}
+      {{ sorth("kind", "Kind", "asc") }}
+      {{ sorth("rating", "IMDb", "desc") }}
+      {{ sorth("votes", "Votes", "desc") }}
+      {{ sorth("genres", "Genres", "asc") }}
+      {{ sorth("added", "Added", "desc") }}
+      {{ sorth("files", "Files", "desc") }}
+      {{ sorth("res", "Res", "desc") }}
+      {{ sorth("subs", "Subs", "desc") }}
+      <th></th>
+    </tr>
   </thead>
   <tbody>
   {% for t in rows %}
@@ -50,7 +72,9 @@
       <td class="small">{{ t.added_at or "—" }}</td>
       <td class="r">{{ t.owned_count }}</td>
       <td class="small">{{ t.resolutions | join(", ") }}</td>
-      <td>{{ "✓" if t.has_sub else "—" }}</td>
+      <td class="subs small">
+        {% for l in sub_langs %}<span class="sub {{ 'ok' if l in t.subtitle_langs else 'no' }}">{{ l }}{{ ' ✓' if l in t.subtitle_langs else ' —' }}</span>{% endfor %}
+      </td>
       <td>
         <button class="danger" type="button" data-action="delete-title"
                 data-id="{{ t.id }}" data-name="{{ t.title }}" title="Remove from catalog">🗑</button>

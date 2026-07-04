@@ -1,161 +1,86 @@
 # my-home-theater
 
-Automate a personal movie & TV library: cataloging, metadata/rating filtering,
-subtitle coverage, source-agnostic acquisition, NAS organization, and an HTML
-dashboard. Python-first, orchestrating a mature media-automation stack
-(Radarr/Sonarr/Bazarr → Prowlarr/qBittorrent) rather than reinventing it.
+Automate a personal movie & TV library end-to-end: scan the NAS, enrich metadata,
+discover what's worth adding (rating/vote filtered + learned taste), grab it,
+import it, fetch subtitles, and drive the whole thing from an HTML dashboard.
+Python-first, SQLite-backed, no Docker required.
 
-See [`docs/my-home-theater-plan.md`](docs/my-home-theater-plan.md) for the full plan.
+![Candidate queue](docs/img/candidates.png)
 
-## Architecture (hybrid)
+## Two ways to run it
 
-The app **drives Radarr/Sonarr/Bazarr** via their REST APIs; those own release
-selection, the download client, import, renaming, and subtitle matching. This app
-owns the parts that are genuinely custom: the **catalog**, **discovery + rating/
-vote filtering**, the **scheduler**, and the **dashboard**. Radarr/Sonarr are the
-single source of truth for "what do I own."
+The app owns the custom parts (catalog, discovery, taste model, scheduler,
+dashboard). How titles are **acquired** and **subtitled** is pluggable:
 
-## Setup (conda)
+| Concern | `arr` / `bazarr` (default) | self-contained (native) |
+|---|---|---|
+| Acquisition | drive Radarr/Sonarr (they own Prowlarr + qBittorrent + import) | search indexers directly → **Transmission** → copy into the NAS layout |
+| Subtitles | trigger Bazarr | fetch from **OpenSubtitles** (.com + .org) and **ktuvit** (Hebrew), write `.srt` beside the media |
 
-```bash
-conda env create -f environment.yaml
-conda activate my-home-theater
-pip install -e .            # editable install of the package + console script
+Select per concern in `config.yaml`: `acquisition.backend: arr|torrent` and
+`subtitles.backend: bazarr|native`. The self-contained path needs **no** arr
+stack — details in [`docs/torrent-backend.md`](docs/torrent-backend.md) and
+[`docs/subtitles-native.md`](docs/subtitles-native.md). Working on the code?
+Start with [`docs/SKILLS.md`](docs/SKILLS.md).
 
-cp config.example.yaml config.yaml   # edit paths/thresholds
-cp .env.example .env                 # add secrets (API keys, SMB creds, token)
-```
-
-Generate a dashboard token:
+## Quick start
 
 ```bash
-python -c "import secrets; print(secrets.token_urlsafe(32))"
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"   # or: conda env create -f environment.yaml
+cp config.example.yaml config.yaml   # NAS paths, thresholds, backends
+cp .env.example .env                 # secrets (see below)
+.venv/bin/alembic upgrade head       # create the schema
+.venv/bin/home-theater               # serve the dashboard at http://localhost:8000
 ```
 
-## Run
+**Secrets (`.env`, never committed).** `DASHBOARD_TOKEN` (gates every mutating
+action — `python -c "import secrets; print(secrets.token_urlsafe(32))"`);
+`TMDB_API_KEY` + `OMDB_API_KEY`; `SMB_HOST`/`SMB_USER`/`SMB_PASS` for the NAS.
+Then per backend: `TRANSMISSION_URL/USER/PASS` (torrent) and/or
+`OPENSUBTITLES_*` + `KTUVIT_*` (native subtitles). Optional: `RADARR_*`/`SONARR_*`/
+`BAZARR_*`, `TRAKT_*` (watchlist), `TELEGRAM_*` (alerts).
+
+## CLI
 
 ```bash
-home-theater                 # serve the dashboard/API (default)
-home-theater scan            # scan the NAS -> owned catalog (Phase 1)
-home-theater enrich          # backfill TMDb/IMDb metadata (Phase 2)
-home-theater discover        # find candidates above your thresholds (Phase 4)
-home-theater subtitles       # ask Bazarr to search for missing subs (Phase 5)
-home-theater acquire         # queue approved candidates to Radarr/Sonarr (Phase 6)
-home-theater sync            # advance in-flight download states (Phase 6)
-home-theater reconcile       # reconcile Radarr/Sonarr owned items -> catalog (Phase 7)
-home-theater backup          # write a timestamped SQLite backup (Phase 9)
-# health:   http://localhost:8000/health
-# readiness http://localhost:8000/ready
+home-theater            # serve the dashboard/API (default)
+home-theater scan       # NAS -> owned catalog
+home-theater enrich     # backfill TMDb/IMDb ratings/votes/genres
+home-theater discover   # find candidates above your thresholds
+home-theater acquire    # grab approved candidates (arr or torrent backend)
+home-theater sync       # advance in-flight downloads (poll -> import)
+home-theater subtitles  # fetch missing subtitles (bazarr or native backend)
+home-theater reconcile  # reconcile arr-owned items into the catalog
+home-theater backup     # timestamped SQLite backup
 ```
 
-### Always-on (no Docker)
+Everything is also on the dashboard: **Library**, **Candidates** (review/approve),
+**Activity** (live grab → download → import → subtitles), **Subtitles**, **Gaps**,
+**Insights**, **Settings**, **Status**.
 
-Run under conda and let the OS keep it alive:
+## Going live safely
 
-- **macOS:** edit paths in [`deploy/com.homeTheater.app.plist`](deploy/com.homeTheater.app.plist),
-  copy it to `~/Library/LaunchAgents/`, then `launchctl load` it.
-- **Linux (mini-PC/NAS):** edit [`deploy/home-theater.service`](deploy/home-theater.service),
-  copy to `/etc/systemd/system/`, then `systemctl enable --now home-theater`.
+1. `scan` → `enrich`, open the dashboard, check **Status** shows your services **up**.
+2. `discover`, then review/approve on **Candidates**.
+3. Keep `features.dry_run: true` until you've watched one clean run; then flip it
+   off and grab a legal/public-domain title to validate acquire → sync → import.
+4. For unattended operation set `schedule.enabled: true` and install the launchd
+   (macOS) / systemd (Linux) unit from [`deploy/`](deploy/).
 
-## Go-live checklist
-
-Everything below is configuration, not code. Do it roughly in order.
-
-1. **Install & configure**
-   - `conda env create -f environment.yaml && conda activate my-home-theater && pip install -e .`
-   - `cp config.example.yaml config.yaml` — set `nas.*` paths and `thresholds`.
-   - `cp .env.example .env` — see the secrets checklist below.
-   - `alembic upgrade head` (creates the schema from the migration baseline).
-
-2. **Secrets in `.env`** (never committed)
-   - `DASHBOARD_TOKEN` — generate: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
-   - `TMDB_API_KEY`, `OMDB_API_KEY` — metadata + ratings.
-   - `SMB_HOST` (IP beats flaky `.local`), `SMB_USER`, `SMB_PASS` — NAS scan.
-   - `RADARR_URL`/`RADARR_API_KEY`, `SONARR_URL`/`SONARR_API_KEY`, `BAZARR_URL`/`BAZARR_API_KEY`.
-   - Optional: `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` for alerts; `TRAKT_*` for a watchlist.
-
-3. **Prove the read path (safe, no writes/grabs)**
-   - `home-theater scan` → `home-theater enrich`.
-   - `home-theater` and open `http://localhost:8000/` — browse Library, and check
-     **Status** (`/status`) shows your providers **up**.
-
-4. **Discovery**
-   - Tune `discovery` + `thresholds` in `config.yaml`; run `home-theater discover`.
-   - Review the **Candidates** page. Approve via the token-gated API:
-     `curl -X POST /api/candidates/<id>/approve -H "X-Auth-Token: $DASHBOARD_TOKEN"`.
-
-5. **Acquisition — stays in dry-run until you trust it**
-   - With `features.dry_run: true` (default), `home-theater acquire` only logs
-     "would add …" — nothing is grabbed. Confirm the intent looks right.
-   - Set matching Radarr/Sonarr **quality profile names** in `acquisition.*`.
-   - Flip `features.dry_run: false` **only** after validating a real add with a
-     legal / public-domain release. Then `acquire` → `sync`.
-
-6. **Import reconciliation (webhooks)**
-   - In Radarr/Sonarr, add a **Webhook** connection (On Import) to
-     `http://<host>:8000/api/webhooks/radarr?token=$DASHBOARD_TOKEN` (and `/sonarr`).
-   - Or poll: `home-theater reconcile`.
-
-7. **Subtitles** — configure providers **inside Bazarr**; then
-   `home-theater subtitles` (or the token-gated `POST /api/subtitles/search`).
-
-8. **Unattended + durable**
-   - Set `schedule.enabled: true` (tune intervals; `0` disables a job). The daily
-     `backup` job runs automatically; `home-theater backup` runs one on demand.
-   - Install the launchd/systemd unit (see *Always-on* above) so it survives reboots.
-
-## Database migrations (Alembic)
-
-```bash
-alembic upgrade head                            # apply schema (production)
-alembic revision --autogenerate -m "message"    # after model changes (SQLite batch mode)
-```
-
-Dev/test also has `init_db()` which creates tables directly.
+You're responsible for your sources and their legality; keep review/dry-run modes
+on until you trust the pipeline.
 
 ## Develop
 
 ```bash
-pytest            # unit + smoke tests (no external services hit)
-ruff check .
-mypy
-pre-commit install
+.venv/bin/pytest        # 214 tests, no external services hit
+.venv/bin/ruff check .
+.venv/bin/black .
+.venv/bin/mypy src/homeTheater
 ```
 
-## Status
-
-Phases 0–2 are in place:
-- **Phase 0** — layered config, SQLAlchemy models + session (SQLite WAL),
-  structured logging, FastAPI health/readiness, dashboard-auth dependency, conda
-  env, launchd/systemd deploy templates, Alembic.
-- **Phase 1** — read-only NAS scanner (SMB + local/fake filesystem), guessit
-  parsing, subtitle sidecar detection, idempotent upserts, `home-theater scan`.
-- **Phase 2** — TMDb + OMDb clients with a TTL cache, concurrent enrichment that
-  backfills ids/ratings/votes/genres, `home-theater enrich`.
-- **Phase 3** — read-only dashboard: Jinja2 pages (`/`, `/library`, `/runs`) with
-  library stats, resolution/genre/decade breakdowns, Hebrew subtitle coverage, and
-  search; plus a JSON API (`/api/stats`, `/api/titles`, `/api/runs`).
-- **Phase 4** — discovery: TMDb trending/top-rated sources, threshold filter +
-  rating×log(votes) scoring, dedup vs. owned/live candidates, review/auto modes,
-  `home-theater discover`, a candidate-queue page, and a token-gated
-  approve/reject/manual API (`/api/candidates`).
-- **Phase 5** — subtitles: thin Bazarr client (read wanted, trigger search-missing),
-  catalog-based coverage + missing-list, `/subtitles` page, `home-theater subtitles`,
-  and a token-gated `POST /api/subtitles/search`.
-- **Phase 6** — acquisition: Radarr/Sonarr `LibraryAutomation` clients, dry-run-gated
-  `queue`/`sync` of approved candidates (they own Prowlarr/qBittorrent/import),
-  `home-theater acquire`/`sync`, and a token-gated `POST /api/candidates/<id>/queue`.
-- **Phase 7** — import reconciliation: idempotent `reconcile_import` from Radarr/Sonarr
-  import webhooks (`POST /api/webhooks/{radarr,sonarr}?token=…`) that links the owned
-  file and flips the candidate to `imported`, plus a `reconcile_library` poll and
-  `home-theater reconcile`.
-- **Phase 8** — scheduling + notifications: APScheduler periodic jobs
-  (scan/discovery/subtitle/sync/reconcile) behind a global concurrency guard, started
-  from `serve` when `schedule.enabled`; Telegram/log notifier for new candidates,
-  imports, and job failures.
-- **Phase 9** — hardening: provider health checks + `/status` page +
-  `/api/{providers,status}`, SQLite online backup (`home-theater backup` + daily job),
-  and a real Alembic initial migration baseline.
-
-All nine phases are in place. Use `alembic upgrade head` in production; `init_db()`
-covers dev/test.
+Schema changes: `alembic revision --autogenerate -m "..."` then `alembic upgrade
+head` (SQLite batch mode). `init_db()` covers dev/test. Architecture, conventions,
+and the hard-won platform gotchas (macOS TCC, SMB mount reliability) are in
+[`docs/SKILLS.md`](docs/SKILLS.md); the original design is
+[`docs/my-home-theater-plan.md`](docs/my-home-theater-plan.md).

@@ -41,11 +41,16 @@ from .sources import Discovered, build_sources
 
 log = get_logger(__name__)
 
+# Statuses that mean "we're already handling (or have handled) this title" — a new
+# discovery hit for it is a duplicate. ``imported`` is included so an already-grabbed
+# title is never re-suggested even if its owned-file record isn't in the catalog yet
+# (e.g. a torrent import before the next NAS scan).
 LIVE_STATUSES = (
     CandidateStatus.new,
     CandidateStatus.approved,
     CandidateStatus.queued,
     CandidateStatus.downloading,
+    CandidateStatus.imported,
 )
 
 # A rejected title stays rejected: trending will resurface it forever otherwise,
@@ -95,18 +100,13 @@ def _owned_live_rejected() -> tuple[set[_Key], set[_Key], set[_Key]]:
             ).all()
             return {(kind, tid) for kind, tid in rows}
 
-        owned = _ids(
-            exists().where(OwnedFile.title_id == Title.id) | Title.arr_has_file.is_(True)
-        )
+        owned = _ids(exists().where(OwnedFile.title_id == Title.id) | Title.arr_has_file.is_(True))
         live = _ids(
-            exists().where(
-                (Candidate.title_id == Title.id) & (Candidate.status.in_(LIVE_STATUSES))
-            )
+            exists().where((Candidate.title_id == Title.id) & (Candidate.status.in_(LIVE_STATUSES)))
         )
         rejected = _ids(
             exists().where(
-                (Candidate.title_id == Title.id)
-                & (Candidate.status == CandidateStatus.rejected)
+                (Candidate.title_id == Title.id) & (Candidate.status == CandidateStatus.rejected)
             )
         )
         return owned, live, rejected
@@ -136,9 +136,7 @@ async def _enrich(
 def _upsert_title(session: Session, kind: TitleKind, t: TmdbTitle) -> Title:
     """Get-or-create by (tmdb_id, kind) — never flips an existing row's kind."""
 
-    title = session.scalar(
-        select(Title).where(Title.tmdb_id == t.tmdb_id, Title.kind == kind)
-    )
+    title = session.scalar(select(Title).where(Title.tmdb_id == t.tmdb_id, Title.kind == kind))
     if title is None:
         title = Title(tmdb_id=t.tmdb_id, kind=kind, title=t.title)
         session.add(title)

@@ -7,6 +7,8 @@ Layering (see plan §5.1): defaults (these models) -> ``config.yaml`` (non-secre
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -121,12 +123,35 @@ class Discovery(BaseModel):
 
 
 class Subtitles(BaseModel):
-    """Subtitle coverage/automation (plan §5.5). Bazarr does the fetching."""
+    """Subtitle coverage/automation (plan §5.5).
+
+    ``backend`` selects the fetcher:
+
+    * ``bazarr`` (default) — trigger Bazarr, which owns provider search + placement.
+    * ``native`` — search providers ourselves (OpenSubtitles, ktuvit) and write the
+      ``.srt`` next to each owned file, driven by our own catalog coverage. No
+      Bazarr/Radarr/Sonarr required.
+    """
 
     languages: list[str] = Field(default_factory=lambda: ["he", "en"])
-    # Cap Bazarr search-missing triggers per sweep so a big backlog doesn't burn
-    # provider quotas in one scheduled run.
+    # Cap search/download work per sweep so a big backlog doesn't burn provider
+    # quotas in one run (OpenSubtitles free tier is a few downloads/day).
     max_searches_per_sweep: int = Field(50, ge=1)
+
+    backend: Literal["bazarr", "native"] = "bazarr"
+    # native sources to query, best-first: "opensubtitles" (he+en, reliable),
+    # "ktuvit" (Hebrew specialist, needs a ktuvit.me account).
+    sources: list[str] = Field(default_factory=lambda: ["opensubtitles"])
+    # Where owned media lives so we can write subs beside it. None -> derive the
+    # NAS path over SMB (unreliable on some NAS); set a local/mounted path.
+    library_base_dir: str | None = None
+    hearing_impaired: bool = False
+    # Sent to OpenSubtitles as required by their API terms.
+    opensubtitles_user_agent: str = "my-home-theater v1"
+    # opensubtitles.org XML-RPC requires a *registered* user agent; the temporary
+    # one is heavily rate-limited. Register yours and set it here.
+    opensubtitles_org_user_agent: str = "TemporaryUserAgent"
+    request_timeout: float = Field(20.0, gt=0)
 
     @property
     def primary(self) -> str:
@@ -170,18 +195,93 @@ class Organizer(BaseModel):
     subs_folder: str = "Subs"
 
 
-class Acquisition(BaseModel):
-    """How approved candidates are handed to Radarr/Sonarr (plan §5.6).
+class Torrent(BaseModel):
+    """Native torrent acquisition (used only when ``acquisition.backend == 'torrent'``).
 
-    Release selection is a Radarr/Sonarr *quality profile* configured once in those
-    apps; we just pick the profile name, root folder, and whether to search on add.
+    We search a set of indexers directly, pick a release, and hand the magnet to a
+    torrent client (Transmission). This bypasses the Radarr/Sonarr stack. It is OFF
+    by default and the arr path remains the recommended one — see the plan's
+    source-agnostic doctrine (§12). Content sourcing and legality are your
+    responsibility; keep ``features.dry_run`` on until you trust a full run.
+
+    Site base URLs are config (not code) because these mirrors move domains often;
+    swap them here without touching the source clients.
     """
 
+    # Which indexers to query. Known: "piratebay" (apibay JSON API, reliable),
+    # "1337x" (HTML scrape, needs FlareSolverr for Cloudflare), "rarbg"
+    # (best-effort against a clone; the original site is defunct).
+    enabled_sources: list[str] = Field(default_factory=lambda: ["piratebay"])
+    min_seeders: int = Field(5, ge=0, description="drop releases below this seeder count")
+    # Allowed release resolutions; None -> reuse thresholds.allowed_resolutions.
+    resolutions: list[str] | None = None
+    max_results_per_source: int = Field(30, ge=1, le=200)
+    # Download target dirs handed to the client; None -> the client's own default.
+    movie_download_dir: str | None = None
+    series_download_dir: str | None = None
+    # Optional FlareSolverr proxy (http://host:8191) for Cloudflare-walled sources
+    # (1337x). Unset -> those sources fetch directly and skip on a challenge.
+    flaresolverr_url: str | None = None
+    # Swappable mirror base URLs.
+    piratebay_api_url: str = "https://apibay.org"
+    x1337_base_url: str = "https://1337x.st"
+    rarbg_base_url: str = "https://en.rarbg-official.is"
+    request_timeout: float = Field(20.0, gt=0)
+    # A download with no client-side progress for this long is treated as failed
+    # (dead magnet / removed by hand in the client). Mirrors the arr path's guard.
+    stale_after_hours: int = Field(6, ge=1)
+
+    # --- Library import (runs after a torrent completes) ---
+    # Copy the finished movie into the NAS layout (Movies/<Title (Year)>/<file>).
+    import_to_library: bool = True
+    # Where the library lives. None -> write to the NAS over SMB (nas.* + SMB_*).
+    # Set to a local/mounted path (e.g. a mounted SMB share) to copy locally.
+    library_base_dir: str | None = None
+    # After a successful import, remove the torrent + its local files from the
+    # client (a true "move"). Default False keeps the local copy seeding.
+    delete_local_after_import: bool = False
+
+
+class DownloadWindow(BaseModel):
+    """A nightly time window during which the *scheduled* acquire job may grab.
+
+    ``enabled: false`` means "no window" — the scheduler grabs approved candidates
+    every interval (the original behaviour). When enabled, the scheduled job only
+    grabs during ``[start_hour, end_hour)`` in local time (wraps past midnight,
+    e.g. 22→6). A manual "grab now" (CLI or the dashboard) always bypasses it.
+    """
+
+    enabled: bool = False
+    start_hour: int = Field(2, ge=0, le=23)
+    end_hour: int = Field(6, ge=0, le=23)
+
+    def is_open(self, hour: int) -> bool:
+        if not self.enabled or self.start_hour == self.end_hour:
+            return True
+        if self.start_hour < self.end_hour:
+            return self.start_hour <= hour < self.end_hour
+        return hour >= self.start_hour or hour < self.end_hour  # wraps midnight
+
+
+class Acquisition(BaseModel):
+    """How approved candidates are grabbed (plan §5.6).
+
+    ``backend`` selects the pipeline:
+
+    * ``arr`` (default) — hand the title to Radarr/Sonarr, which own release
+      selection (a *quality profile*), the download client, and import.
+    * ``torrent`` — search indexers ourselves and push the magnet to Transmission
+      (see :class:`Torrent`). Self-contained; no arr stack required.
+    """
+
+    backend: Literal["arr", "torrent"] = "arr"
     movie_quality_profile: str = "HD-1080p"
     series_quality_profile: str = "HD-1080p"
     movie_root_folder: str | None = None  # None -> use the arr's first root folder
     series_root_folder: str | None = None
     search_on_add: bool = True
+    # Optional nightly window for the scheduled acquire job (dashboard-editable).
+    window: DownloadWindow = Field(default_factory=DownloadWindow)
 
 
 class Secrets(BaseSettings):
@@ -221,6 +321,21 @@ class Secrets(BaseSettings):
     bazarr_url: str | None = None
     bazarr_api_key: SecretStr | None = None
 
+    # Native torrent download client (used when acquisition.backend == 'torrent').
+    transmission_url: str | None = None  # e.g. http://localhost:9091/transmission/rpc
+    transmission_user: str | None = None
+    transmission_pass: SecretStr | None = None
+
+    # Native subtitle providers (used when subtitles.backend == 'native').
+    opensubtitles_api_key: SecretStr | None = None
+    opensubtitles_username: str | None = None
+    opensubtitles_password: SecretStr | None = None
+    # Legacy opensubtitles.org XML-RPC (separate account/password from .com).
+    opensubtitles_org_username: str | None = None
+    opensubtitles_org_password: SecretStr | None = None
+    ktuvit_email: str | None = None
+    ktuvit_password: SecretStr | None = None
+
     # Watchlist
     trakt_client_id: str | None = None
     trakt_client_secret: SecretStr | None = None
@@ -251,5 +366,6 @@ class AppConfig(BaseModel):
     taste: Taste = Field(default_factory=Taste)
     organizer: Organizer = Field(default_factory=Organizer)
     acquisition: Acquisition = Field(default_factory=Acquisition)
+    torrent: Torrent = Field(default_factory=Torrent)
     enabled_providers: list[str] = Field(default_factory=list)
     secrets: Secrets = Field(default_factory=Secrets, repr=False)

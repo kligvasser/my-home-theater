@@ -168,6 +168,11 @@ async def queue_candidate(config: AppConfig, candidate_id: int) -> QueueOutcome:
     a rejected candidate is an error.
     """
 
+    if config.acquisition.backend == "torrent":
+        from .torrent.service import queue_candidate_torrent
+
+        return await queue_candidate_torrent(config, candidate_id)
+
     snap = _load_snap(candidate_id)
     if snap is None:
         raise ValueError(f"candidate {candidate_id} not found")
@@ -242,6 +247,65 @@ async def queue_candidate(config: AppConfig, candidate_id: int) -> QueueOutcome:
     return QueueOutcome(candidate_id, True, False, result.external_id, message)
 
 
+async def restart_candidate(config: AppConfig, candidate_id: int) -> QueueOutcome:
+    """Wipe a candidate's in-flight state and re-grab it from scratch.
+
+    For a stuck item (e.g. marked ``downloading`` but gone from the client): drop
+    its ``Download`` rows, remove any leftover torrent from the client, reset the
+    candidate to ``approved``, then queue it again (a fresh search + grab).
+    """
+
+    with session_scope() as s:
+        cand = s.get(Candidate, candidate_id)
+        if cand is None:
+            raise ValueError(f"candidate {candidate_id} not found")
+        if cand.status is CandidateStatus.rejected:
+            raise InvalidTransitionError(
+                f"candidate {candidate_id} was rejected; approve it before restarting"
+            )
+        downloads = s.scalars(select(Download).where(Download.candidate_id == candidate_id)).all()
+        hashes = [d.external_id for d in downloads if d.external_id]
+        for d in downloads:
+            s.delete(d)
+        cand.status = CandidateStatus.approved
+        cand.decided_at = utcnow()
+
+    if config.acquisition.backend == "torrent" and hashes:
+        from .torrent.service import remove_torrents
+
+        await remove_torrents(config, hashes)
+
+    return await queue_candidate(config, candidate_id)
+
+
+async def cancel_candidate(config: AppConfig, candidate_id: int) -> str:
+    """Stop an in-flight item and remove it from the pipeline.
+
+    Removes its torrent (+ local data) from the client, marks the download
+    ``cancelled``, and rejects the candidate so it leaves the queue and isn't
+    re-discovered. Returns the title for the confirmation message.
+    """
+
+    with session_scope() as s:
+        cand = s.get(Candidate, candidate_id)
+        if cand is None:
+            raise ValueError(f"candidate {candidate_id} not found")
+        title = s.get(Title, cand.title_id)
+        name = title.title if title is not None else str(candidate_id)
+        downloads = s.scalars(select(Download).where(Download.candidate_id == candidate_id)).all()
+        hashes = [d.external_id for d in downloads if d.external_id]
+        for d in downloads:
+            d.state = "cancelled"
+        cand.status = CandidateStatus.rejected
+        cand.decided_at = utcnow()
+
+    if config.acquisition.backend == "torrent" and hashes:
+        from .torrent.service import remove_torrents
+
+        await remove_torrents(config, hashes)
+    return name
+
+
 async def queue_approved(config: AppConfig) -> AcquireStats:
     """Queue every approved candidate. Records an ``acquire`` job_run."""
 
@@ -301,6 +365,11 @@ async def sync_downloads(config: AppConfig) -> SyncStats:
     arr queue without producing a file eventually flip to ``failed`` instead of
     sitting in ``downloading`` forever.
     """
+
+    if config.acquisition.backend == "torrent":
+        from .torrent.service import sync_downloads_torrent
+
+        return await sync_downloads_torrent(config)
 
     with session_scope() as s:
         rows: list[tuple[int, str, TitleKind]] = []
