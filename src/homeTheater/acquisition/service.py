@@ -168,6 +168,11 @@ async def queue_candidate(config: AppConfig, candidate_id: int) -> QueueOutcome:
     a rejected candidate is an error.
     """
 
+    if config.acquisition.backend == "torrent":
+        from .torrent.service import queue_candidate_torrent
+
+        return await queue_candidate_torrent(config, candidate_id)
+
     snap = _load_snap(candidate_id)
     if snap is None:
         raise ValueError(f"candidate {candidate_id} not found")
@@ -301,6 +306,11 @@ async def sync_downloads(config: AppConfig) -> SyncStats:
     arr queue without producing a file eventually flip to ``failed`` instead of
     sitting in ``downloading`` forever.
     """
+
+    if config.acquisition.backend == "torrent":
+        from .torrent.service import sync_downloads_torrent
+
+        return await sync_downloads_torrent(config)
 
     with session_scope() as s:
         rows: list[tuple[int, str, TitleKind]] = []

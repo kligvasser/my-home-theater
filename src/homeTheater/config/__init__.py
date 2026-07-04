@@ -15,6 +15,7 @@ from .settings import (
     Subtitles,
     Taste,
     Thresholds,
+    Torrent,
 )
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     "Subtitles",
     "Taste",
     "Thresholds",
+    "Torrent",
     "effective_config",
     "get_config",
     "load_config",

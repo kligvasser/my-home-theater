@@ -80,6 +80,12 @@ taste:
   model_weight: 0.5     # blend for the trained classifier: + weight*10*p(like)
 
 acquisition:
+  # backend: how approved candidates are grabbed.
+  #   arr     -> hand the title to Radarr/Sonarr (they own indexers + download).
+  #   torrent -> search indexers ourselves and push the magnet to Transmission
+  #              (see the `torrent:` block; no arr stack required).
+  backend: arr
+  # --- arr backend settings (ignored when backend: torrent) ---
   # Quality profile NAMES as configured inside Radarr/Sonarr (release selection).
   movie_quality_profile: HD-1080p
   series_quality_profile: HD-1080p
@@ -87,6 +93,33 @@ acquisition:
   movie_root_folder: null
   series_root_folder: null
   search_on_add: true   # tell Radarr/Sonarr to search immediately after adding
+
+# Native torrent backend — used only when acquisition.backend: torrent.
+# You are responsible for your sources and their legality; keep features.dry_run
+# on until you've watched one clean grab-to-import cycle.
+torrent:
+  enabled_sources:        # piratebay (apibay JSON API, reliable) | 1337x | rarbg
+    - piratebay
+  min_seeders: 5          # drop releases below this many seeders
+  resolutions: null       # null -> reuse thresholds.allowed_resolutions
+  max_results_per_source: 30
+  movie_download_dir: null    # null -> Transmission's own default download dir
+  series_download_dir: null
+  # Optional FlareSolverr proxy (http://host:8191) so Cloudflare-walled sources
+  # (1337x) work. Leave null and those sources are skipped on a challenge.
+  flaresolverr_url: null
+  # Mirror base URLs — these sites move domains often; swap here, no code change.
+  piratebay_api_url: https://apibay.org
+  x1337_base_url: https://1337x.st
+  rarbg_base_url: https://en.rarbg-official.is
+  request_timeout: 20.0
+  stale_after_hours: 6    # no progress for this long -> mark the download failed
+  # --- library import (runs after a torrent completes) ---
+  import_to_library: true      # copy finished MOVIES into Movies/<Title (Year)>/
+  library_base_dir: null       # null -> write to the NAS over SMB (nas.* + SMB_*);
+                               # set a local/mounted path to copy there instead
+  delete_local_after_import: false  # true -> remove torrent+local files after
+                                    # import (a real "move"); false keeps seeding
 
 # Free-form list of provider names you've enabled (metadata/library/subtitle).
 enabled_providers:
