@@ -36,6 +36,20 @@ class SweepStats:
         return asdict(self)
 
 
+async def sweep_subtitles(config: AppConfig) -> Any:
+    """Run the configured subtitle backend: Bazarr (default) or native providers.
+
+    Returns a stats object with ``.as_dict()`` either way (SweepStats or
+    NativeSweepStats), so callers log/serialize it uniformly.
+    """
+
+    if config.subtitles.backend == "native":
+        from .native import sweep_native
+
+        return await sweep_native(config)
+    return await sweep_missing(config)
+
+
 def _wants_lang(item: WantedItem, languages: set[str]) -> bool:
     return any(lang in languages for lang in item.missing_langs)
 

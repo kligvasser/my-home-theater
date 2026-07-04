@@ -75,12 +75,15 @@ async def run_discovery_job(config: AppConfig) -> None:
 
 
 async def run_subtitle_job(config: AppConfig) -> None:
-    from ..subtitles import sweep_missing
+    from ..subtitles import sweep_subtitles
 
     async def body() -> str | None:
-        stats = await sweep_missing(config)
-        searched = stats.searched_movies + stats.searched_episodes
-        return f"💬 Requested {searched} subtitle search(es)" if searched else None
+        stats = (await sweep_subtitles(config)).as_dict()
+        # native backend reports downloads; bazarr reports triggered searches
+        n = stats.get("downloaded") or (
+            stats.get("searched_movies", 0) + stats.get("searched_episodes", 0)
+        )
+        return f"💬 {n} subtitle(s)" if n else None
 
     await _guarded("subtitle", config, body)
 

@@ -123,12 +123,32 @@ class Discovery(BaseModel):
 
 
 class Subtitles(BaseModel):
-    """Subtitle coverage/automation (plan §5.5). Bazarr does the fetching."""
+    """Subtitle coverage/automation (plan §5.5).
+
+    ``backend`` selects the fetcher:
+
+    * ``bazarr`` (default) — trigger Bazarr, which owns provider search + placement.
+    * ``native`` — search providers ourselves (OpenSubtitles, ktuvit) and write the
+      ``.srt`` next to each owned file, driven by our own catalog coverage. No
+      Bazarr/Radarr/Sonarr required.
+    """
 
     languages: list[str] = Field(default_factory=lambda: ["he", "en"])
-    # Cap Bazarr search-missing triggers per sweep so a big backlog doesn't burn
-    # provider quotas in one scheduled run.
+    # Cap search/download work per sweep so a big backlog doesn't burn provider
+    # quotas in one run (OpenSubtitles free tier is a few downloads/day).
     max_searches_per_sweep: int = Field(50, ge=1)
+
+    backend: Literal["bazarr", "native"] = "bazarr"
+    # native sources to query, best-first: "opensubtitles" (he+en, reliable),
+    # "ktuvit" (Hebrew specialist, needs a ktuvit.me account).
+    sources: list[str] = Field(default_factory=lambda: ["opensubtitles"])
+    # Where owned media lives so we can write subs beside it. None -> derive the
+    # NAS path over SMB (unreliable on some NAS); set a local/mounted path.
+    library_base_dir: str | None = None
+    hearing_impaired: bool = False
+    # Sent to OpenSubtitles as required by their API terms.
+    opensubtitles_user_agent: str = "my-home-theater v1"
+    request_timeout: float = Field(20.0, gt=0)
 
     @property
     def primary(self) -> str:
@@ -279,6 +299,13 @@ class Secrets(BaseSettings):
     transmission_url: str | None = None  # e.g. http://localhost:9091/transmission/rpc
     transmission_user: str | None = None
     transmission_pass: SecretStr | None = None
+
+    # Native subtitle providers (used when subtitles.backend == 'native').
+    opensubtitles_api_key: SecretStr | None = None
+    opensubtitles_username: str | None = None
+    opensubtitles_password: SecretStr | None = None
+    ktuvit_email: str | None = None
+    ktuvit_password: SecretStr | None = None
 
     # Watchlist
     trakt_client_id: str | None = None

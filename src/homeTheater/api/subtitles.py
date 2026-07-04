@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from ..config import get_config
 from ..dashboard import get_stats, list_missing_subtitles
-from ..subtitles import sweep_missing
+from ..subtitles import sweep_subtitles
 from .auth import require_token
 
 router = APIRouter(prefix="/api/subtitles", tags=["subtitles"])
@@ -30,10 +30,10 @@ def api_missing() -> dict[str, Any]:
 
 @router.post("/search", dependencies=[Depends(require_token)])
 async def api_search() -> dict[str, Any]:
-    """Ask Bazarr to search for all missing target-language subtitles."""
+    """Fetch missing target-language subtitles (Bazarr or native backend)."""
 
     try:
-        stats = await sweep_missing(get_config())
-    except ValueError as exc:  # Bazarr not configured
+        stats = await sweep_subtitles(get_config())
+    except ValueError as exc:  # backend not configured (Bazarr creds / providers)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return stats.as_dict()
+    return stats.as_dict()  # type: ignore[no-any-return]

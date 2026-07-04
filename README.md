@@ -179,3 +179,9 @@ alternative to the arr stack: indexer clients (apibay/1337x/rarbg) behind a
 download client, and a NAS importer that copies finished movies into
 `Movies/<Title (Year)>/`. No DB migration (reuses `download`). Details +
 per-deployment notes in [`docs/torrent-backend.md`](docs/torrent-backend.md).
+
+**Native subtitle backend (optional, `subtitles.backend: native`).** An
+alternative to Bazarr: `SubtitleSource` providers (OpenSubtitles REST + ktuvit
+for Hebrew) driven off our own catalog coverage, writing `.srt` into each file's
+`Subs/` folder via the SMB mount. Details in
+[`docs/subtitles-native.md`](docs/subtitles-native.md).

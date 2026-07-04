@@ -56,8 +56,17 @@ discovery:
   excluded_genres: []   # e.g. [Documentary, Reality]
 
 subtitles:
-  languages: [he, en]   # target languages; Bazarr does the actual fetching
-  max_searches_per_sweep: 50  # cap Bazarr search triggers per scheduled sweep
+  languages: [he, en]   # target languages
+  max_searches_per_sweep: 50  # cap searches/downloads per sweep (provider quotas)
+  # backend: bazarr (trigger Bazarr) | native (fetch providers ourselves, no arr stack)
+  backend: bazarr
+  # --- native backend only ---
+  sources: [opensubtitles]   # best-first: opensubtitles (he+en), ktuvit (Hebrew)
+  # Where owned media is reachable locally so subs can be written beside it.
+  # null -> derive the NAS path over SMB (unreliable on some NAS); prefer a mount.
+  library_base_dir: null
+  hearing_impaired: false
+  opensubtitles_user_agent: "my-home-theater v1"
 
 # Library folder structure, pushed to Radarr/Sonarr/Bazarr with
 # `home-theater apply-naming` (or the Settings-page button):
