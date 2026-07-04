@@ -551,3 +551,38 @@ def test_register_owned_movie_catalogs_with_unc_path(
         assert of.title_id == tid  # linked to the known title, not a re-resolved dup
         assert of.path == r"\\MyNAS\T\Movies\The Matrix (1999)\The Matrix (1999).mkv"
         assert of.resolution == "1080p"  # parsed from the release name, not the clean filename
+
+
+@respx.mock
+async def test_cancel_removes_torrent_and_rejects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch)
+    _reset()
+    cid = _seed_approved()
+
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate, CandidateStatus, Download
+
+    with session_scope() as s:
+        s.add(Download(candidate_id=cid, external_id=HASH, state="downloading", release="x"))
+        s.get(Candidate, cid).status = CandidateStatus.downloading
+
+    route = respx.post(TRANSMISSION).mock(
+        side_effect=[
+            httpx.Response(409, headers={"X-Transmission-Session-Id": "s"}),
+            httpx.Response(200, json={"result": "success", "arguments": {}}),  # torrent-remove
+        ]
+    )
+
+    from homeTheater.acquisition import cancel_candidate
+    from homeTheater.config import get_config
+
+    name = await cancel_candidate(get_config(), cid)
+
+    assert name == "The Matrix"
+    with session_scope() as s:
+        assert s.get(Candidate, cid).status == CandidateStatus.rejected
+        assert s.query(Download).one().state == "cancelled"
+    removes = [c for c in route.calls if b'"torrent-remove"' in c.request.content]
+    assert removes and b'"delete-local-data":true' in removes[0].request.content

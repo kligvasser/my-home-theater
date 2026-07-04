@@ -263,9 +263,7 @@ async def restart_candidate(config: AppConfig, candidate_id: int) -> QueueOutcom
             raise InvalidTransitionError(
                 f"candidate {candidate_id} was rejected; approve it before restarting"
             )
-        downloads = s.scalars(
-            select(Download).where(Download.candidate_id == candidate_id)
-        ).all()
+        downloads = s.scalars(select(Download).where(Download.candidate_id == candidate_id)).all()
         hashes = [d.external_id for d in downloads if d.external_id]
         for d in downloads:
             s.delete(d)
@@ -278,6 +276,34 @@ async def restart_candidate(config: AppConfig, candidate_id: int) -> QueueOutcom
         await remove_torrents(config, hashes)
 
     return await queue_candidate(config, candidate_id)
+
+
+async def cancel_candidate(config: AppConfig, candidate_id: int) -> str:
+    """Stop an in-flight item and remove it from the pipeline.
+
+    Removes its torrent (+ local data) from the client, marks the download
+    ``cancelled``, and rejects the candidate so it leaves the queue and isn't
+    re-discovered. Returns the title for the confirmation message.
+    """
+
+    with session_scope() as s:
+        cand = s.get(Candidate, candidate_id)
+        if cand is None:
+            raise ValueError(f"candidate {candidate_id} not found")
+        title = s.get(Title, cand.title_id)
+        name = title.title if title is not None else str(candidate_id)
+        downloads = s.scalars(select(Download).where(Download.candidate_id == candidate_id)).all()
+        hashes = [d.external_id for d in downloads if d.external_id]
+        for d in downloads:
+            d.state = "cancelled"
+        cand.status = CandidateStatus.rejected
+        cand.decided_at = utcnow()
+
+    if config.acquisition.backend == "torrent" and hashes:
+        from .torrent.service import remove_torrents
+
+        await remove_torrents(config, hashes)
+    return name
 
 
 async def queue_approved(config: AppConfig) -> AcquireStats:

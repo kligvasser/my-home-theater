@@ -113,6 +113,14 @@
         flash(out.message || "restarted");
         if (typeof pipelineTick === "function") window.setTimeout(pipelineTick, 700);
         else window.setTimeout(() => window.location.reload(), 700);
+      } else if (act === "cancel") {
+        const id = btn.dataset.cand;
+        if (!window.confirm("Cancel this item?\n\nRemoves it from Transmission (and its local files) and drops it from the pipeline (rejected).")) return;
+        btn.disabled = true;
+        const out = await api("POST", `/api/candidates/${id}/cancel`);
+        flash(out.message || "cancelled");
+        if (typeof pipelineTick === "function") window.setTimeout(pipelineTick, 500);
+        else window.setTimeout(() => window.location.reload(), 500);
       } else if (act === "delete-title") {
         const id = btn.dataset.id;
         const name = btn.dataset.name || `#${id}`;
@@ -328,7 +336,7 @@
       metaHtml(item) +
       subsHtml(item) +
       (item.error ? `<div class="exec-error">⚠ ${esc(item.error)}</div>` : "") +
-      `<div class="exec-actions">${restartBtn(item)}</div>` +
+      `<div class="exec-actions">${restartBtn(item)} ${cancelBtn(item)}</div>` +
       `</article>`
     );
   }
@@ -338,12 +346,16 @@
       progressHtml(item) +
       `<div class="exec-stage-line ${stageClass(item)}">${esc(item.stage)}</div>` +
       subsHtml(item) +
-      `<div class="exec-actions">${restartBtn(item)}</div>`
+      `<div class="exec-actions">${restartBtn(item)} ${cancelBtn(item)}</div>`
     );
   }
   function restartBtn(item) {
     return `<button type="button" class="mini" data-action="restart" data-cand="${item.candidate_id}" ` +
       `title="Clear this download and re-grab from scratch">↻ Restart</button>`;
+  }
+  function cancelBtn(item) {
+    return `<button type="button" class="mini danger" data-action="cancel" data-cand="${item.candidate_id}" ` +
+      `title="Stop, remove from Transmission, and drop from the pipeline">✖ Cancel</button>`;
   }
 
   function windowHtml(w) {

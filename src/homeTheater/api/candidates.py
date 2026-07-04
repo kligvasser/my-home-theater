@@ -9,7 +9,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from ..acquisition import queue_candidate, restart_candidate
+from ..acquisition import cancel_candidate, queue_candidate, restart_candidate
 from ..config import effective_config, get_config
 from ..dashboard import candidate_counts, list_candidates
 from ..db.models import CandidateStatus, TitleKind
@@ -190,3 +190,15 @@ async def api_restart(candidate_id: int) -> dict[str, Any]:
         "dry_run": outcome.dry_run,
         "message": f"Restarted — {outcome.message}",
     }
+
+
+@router.post("/{candidate_id}/cancel", dependencies=[Depends(require_token)])
+async def api_cancel(candidate_id: int) -> dict[str, Any]:
+    """Cancel an in-flight item: remove its torrent + drop it from the pipeline."""
+
+    try:
+        name = await cancel_candidate(get_config(), candidate_id)
+    except ValueError as exc:
+        code = 404 if "not found" in str(exc) else 400
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
+    return {"cancelled": True, "message": f"Cancelled '{name}'"}
