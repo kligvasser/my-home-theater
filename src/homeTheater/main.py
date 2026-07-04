@@ -140,6 +140,20 @@ def reconcile() -> None:
     log.info("reconcile.cli_done", **stats.as_dict())
 
 
+def apply_naming() -> None:
+    """Push the library folder-structure policy to Radarr/Sonarr/Bazarr."""
+
+    import asyncio
+
+    from .acquisition.naming import apply_naming_policy
+    from .config import effective_config
+
+    _configure()
+    report = asyncio.run(apply_naming_policy(effective_config()))
+    for service, result in report.as_dict().items():
+        print(f"{service:8} {result}")
+
+
 def trakt_auth() -> None:
     """Authorize Trakt via the device flow; tokens land in the setting table."""
 
@@ -239,6 +253,9 @@ def main() -> None:
     sub.add_parser("reconcile", help="reconcile Radarr/Sonarr owned items into the catalog")
     sub.add_parser("insights", help="cluster the owned library and print the taste profile")
     sub.add_parser("trakt-auth", help="authorize Trakt (device flow) for the watchlist source")
+    sub.add_parser(
+        "apply-naming", help="push the folder-structure policy to Radarr/Sonarr/Bazarr"
+    )
     sub.add_parser("train", help="train the preference classifier from approve/reject labels")
     sub.add_parser("backup", help="write a timestamped SQLite backup")
     args = parser.parse_args()
@@ -261,6 +278,8 @@ def main() -> None:
         insights()
     elif args.command == "trakt-auth":
         trakt_auth()
+    elif args.command == "apply-naming":
+        apply_naming()
     elif args.command == "train":
         train()
     elif args.command == "backup":

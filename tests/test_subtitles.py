@@ -79,6 +79,10 @@ async def test_sweep_triggers_only_target_language(
     config_file: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _env(monkeypatch)
+    # Pin a single target language (the default is now [he, en]) — this test
+    # verifies that non-target languages are filtered out of the sweep.
+    config_file.write_text(config_file.read_text() + "subtitles:\n  languages: [he]\n")
+    _reset()
     from homeTheater.config import get_config
     from homeTheater.db import init_db
     from homeTheater.subtitles import sweep_missing

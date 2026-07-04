@@ -54,6 +54,35 @@ Saving requires the dashboard token (🔒 top-right).</p>
     </section>
 
     <section class="card settings-card">
+      <h2>Subtitles</h2>
+      <label>Languages (comma-separated)
+        <input type="text" data-path="subtitles.languages" data-type="list"
+               value="{{ ov.get("subtitles", {}).get("languages") | join(",") if ov.get("subtitles", {}).get("languages") else '' }}"
+               placeholder="{{ file.subtitles.languages | join(',') }}"
+               class="{{ 'overridden' if ov.get('subtitles', {}).get('languages') }}" />
+      </label>
+      <label>Max Bazarr searches / sweep
+        {{ num("subtitles.max_searches_per_sweep", file.subtitles.max_searches_per_sweep, ov.get("subtitles", {}).get("max_searches_per_sweep"), minv="1") }}
+      </label>
+      <p class="muted small">Both <code>he</code> and <code>en</code> are fetched by default.
+      Bazarr must list the same languages in its own profile.</p>
+    </section>
+
+    <section class="card settings-card">
+      <h2>Library folder structure</h2>
+      <p class="small mono" style="line-height:1.7">
+        Movies/{{ file.organizer.movie_folder_format }}/&lt;file&gt;<br />
+        Movies/{{ file.organizer.movie_folder_format }}/{{ file.organizer.subs_folder }}/<br />
+        TV Shows/{{ file.organizer.series_folder_format }}/{{ file.organizer.season_folder_format }}/&lt;episodes&gt;<br />
+        TV Shows/…/{{ file.organizer.season_folder_format }}/{{ file.organizer.subs_folder }}/
+      </p>
+      <p class="muted small">Applies the naming templates to Radarr/Sonarr and points Bazarr's
+      subtitle placement at <code>{{ file.organizer.subs_folder }}/</code>. Formats live in
+      <code>config.yaml → organizer</code>. Affects titles imported from now on.</p>
+      <div><button type="button" data-action="apply-naming">📁 Apply to Radarr/Sonarr/Bazarr</button></div>
+    </section>
+
+    <section class="card settings-card">
       <h2>Taste model</h2>
       <label>Enabled {{ boolsel("taste.enabled", file.taste.enabled, ov.get("taste", {}).get("enabled")) }}</label>
       <label>Score weight {{ num("taste.weight", file.taste.weight, ov.get("taste", {}).get("weight"), step="0.1") }}</label>

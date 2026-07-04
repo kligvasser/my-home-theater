@@ -29,7 +29,7 @@ log = get_logger(__name__)
 SETTING_KEY = "runtime_overrides"
 
 # Top-level sections the dashboard may override, and (for features) which keys.
-OVERRIDABLE_SECTIONS = ("thresholds", "discovery", "taste", "features")
+OVERRIDABLE_SECTIONS = ("thresholds", "discovery", "taste", "subtitles", "features")
 OVERRIDABLE_FEATURES = ("auto_approve",)
 
 

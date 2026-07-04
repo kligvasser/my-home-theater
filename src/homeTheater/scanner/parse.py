@@ -6,6 +6,7 @@ Pure functions, no I/O, so they're cheap to unit-test against edge cases.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 
 # babelfish ships with guessit; untyped, hence the ignore (like guessit itself).
@@ -102,10 +103,11 @@ def parse_media(path: str, kind_hint: TitleKind | None = None) -> ParsedMedia | 
 
 
 def _language_code(token: str) -> str | None:
-    """Return ``token`` lowercased if it is a real ISO language code, else None.
+    """Normalized (2-letter when possible) code for a real ISO language token.
 
     Validated against babelfish so release tags like ``sdh`` or ``forced`` are
-    not mistaken for languages (2-letter -> ISO 639-1, 3-letter -> ISO 639-2/B).
+    not mistaken for languages. 3-letter codes normalize to their 2-letter form
+    (``heb`` -> ``he``) so coverage counting sees one code per language.
     """
 
     code = token.lower()
@@ -114,11 +116,39 @@ def _language_code(token: str) -> str | None:
             Language.fromalpha2(code)
             return code
         if len(code) == 3:
-            Language.fromalpha3b(code)
-            return code
+            lang = Language.fromalpha3b(code)
+            return str(getattr(lang, "alpha2", None) or code)
     except (ValueError, LanguageReverseError):
         return None
     return None
+
+
+_TOKEN_SPLIT_RE = re.compile(r"[._\-\s]+")
+
+
+def subtitle_lang_standalone(sub_name: str) -> str | None:
+    """Language of a subs-folder file that carries no media stem.
+
+    Release ``Subs/`` folders name files by language alone: ``2_English.srt``,
+    ``Hebrew.srt``, ``heb.srt``. Tokens are checked as ISO codes first, then as
+    full language names (babelfish). Unrecognized names -> :data:`UNKNOWN_LANG`;
+    non-subtitle extensions -> ``None``.
+    """
+
+    stem, ext = os.path.splitext(sub_name)
+    if ext.lower() not in SUBTITLE_EXTENSIONS:
+        return None
+    for token in _TOKEN_SPLIT_RE.split(stem):
+        if not token or token.isdigit():
+            continue
+        if (code := _language_code(token)) is not None:
+            return code
+        try:
+            lang = Language.fromname(token.capitalize())
+            return str(getattr(lang, "alpha2", None) or lang.alpha3)
+        except Exception:  # noqa: BLE001 - babelfish raises several exc types
+            continue
+    return UNKNOWN_LANG
 
 
 def subtitle_lang_for(media_name: str, sub_name: str) -> str | None:

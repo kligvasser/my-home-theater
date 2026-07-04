@@ -66,7 +66,8 @@ def test_kind_hint_breaks_ties() -> None:
         ("Movie (2020) 1080p.mkv", "Movie (2020) 1080p.he.srt", "he"),
         ("Movie (2020) 1080p.mkv", "Movie (2020) 1080p.srt", UNKNOWN_LANG),
         ("Movie (2020) 1080p.mkv", "Movie (2020) 1080p.en.forced.srt", "en"),
-        ("Movie (2020) 1080p.mkv", "Movie (2020) 1080p.eng.srt", "eng"),
+        # 3-letter codes normalize to 2-letter so coverage sees one code per lang
+        ("Movie (2020) 1080p.mkv", "Movie (2020) 1080p.eng.srt", "en"),
         ("Movie (2020) 1080p.mkv", "Different Movie.he.srt", None),
         ("Movie (2020) 1080p.mkv", "Movie (2020) 1080p.he.txt", None),
         # A shared prefix without a "." separator is a different release/movie.
@@ -83,3 +84,16 @@ def test_subtitle_lang_for(media: str, sub: str, expected: str | None) -> None:
 def test_extension_helpers() -> None:
     assert is_media_file("x.mkv") and not is_media_file("x.srt")
     assert is_subtitle_file("x.srt") and not is_subtitle_file("x.mkv")
+
+
+def test_subtitle_lang_standalone() -> None:
+    """Release-style Subs/ folder names: language-only, numbered, or coded."""
+
+    from homeTheater.scanner.parse import subtitle_lang_standalone
+
+    assert subtitle_lang_standalone("2_English.srt") == "en"
+    assert subtitle_lang_standalone("Hebrew.srt") == "he"
+    assert subtitle_lang_standalone("heb.srt") == "he"
+    assert subtitle_lang_standalone("3_French.srt") == "fr"
+    assert subtitle_lang_standalone("whatever.srt") == "und"
+    assert subtitle_lang_standalone("notes.txt") is None

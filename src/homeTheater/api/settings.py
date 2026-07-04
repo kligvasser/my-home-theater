@@ -21,7 +21,7 @@ from .auth import require_token
 
 router = APIRouter(prefix="/api", tags=["settings"])
 
-_SECTIONS = ("thresholds", "discovery", "taste")
+_SECTIONS = ("thresholds", "discovery", "taste", "subtitles")
 
 
 def _snapshot() -> dict[str, Any]:
@@ -55,3 +55,17 @@ def api_settings_save(overrides: dict[str, Any]) -> dict[str, Any]:
     except OverrideError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return _snapshot()
+
+
+@router.post("/settings/naming", dependencies=[Depends(require_token)])
+async def api_apply_naming() -> dict[str, Any]:
+    """Push the folder-structure policy to Radarr/Sonarr/Bazarr (idempotent)."""
+
+    from ..acquisition.naming import apply_naming_policy
+    from ..errors import NotConfiguredError
+
+    try:
+        report = await apply_naming_policy(effective_config())
+    except NotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return report.as_dict()

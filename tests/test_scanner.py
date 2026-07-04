@@ -304,10 +304,10 @@ def test_scan_survives_db_error_for_one_file(
 
     real_upsert = svc._upsert_owned_file
 
-    def flaky_upsert(session: object, title: object, path: str, *args: object) -> bool:
+    def flaky_upsert(session: object, path: str, *args: object) -> tuple[bool, bool]:
         if "Matrix" in path:
             raise RuntimeError("simulated flush failure")
-        return real_upsert(session, title, path, *args)  # type: ignore[arg-type]
+        return real_upsert(session, path, *args)  # type: ignore[arg-type]
 
     monkeypatch.setattr(svc, "_upsert_owned_file", flaky_upsert)
 
@@ -320,3 +320,91 @@ def test_scan_survives_db_error_for_one_file(
         assert s.scalar(select(func.count()).select_from(OwnedFile)) == 1
         ep = s.scalar(select(OwnedFile))
         assert ep is not None and ep.kind is TitleKind.series
+
+
+def test_subs_folder_attaches_to_movie(config_file: Path, tmp_path: Path) -> None:
+    """Movies/<Title (Year)>/Subs/<lang>.srt counts toward that movie's coverage."""
+
+    _reset_singletons()
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import OwnedFile
+    from homeTheater.scanner import scan_library
+    from homeTheater.scanner.filesystem import LocalFileSystem
+
+    init_db()
+    base = tmp_path / "nas-movies"
+    if True:
+        movie_dir = Path(base) / "Movies" / "Heat (1995)"
+        subs = movie_dir / "Subs"
+        subs.mkdir(parents=True)
+        (movie_dir / "Heat (1995) 1080p.mkv").write_bytes(b"x")
+        (subs / "2_English.srt").write_text("sub")
+        (subs / "Hebrew.srt").write_text("sub")
+
+        scan_library(LocalFileSystem(base), {TitleKind.movie: "Movies"})
+
+    with session_scope() as s:
+        owned = s.query(OwnedFile).one()
+        assert owned.subtitle_langs == ["en", "he"]
+
+
+def test_season_subs_folder_matches_episodes_by_stem(config_file: Path, tmp_path: Path) -> None:
+    """Season 01/Subs/<episode stem>.<lang>.srt attaches per episode; a
+    standalone name is NOT attached when the folder has multiple episodes."""
+
+    _reset_singletons()
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import OwnedFile
+    from homeTheater.scanner import scan_library
+    from homeTheater.scanner.filesystem import LocalFileSystem
+
+    init_db()
+    base = tmp_path / "nas-tv"
+    if True:
+        season = Path(base) / "TV Shows" / "The Wire" / "Season 01"
+        subs = season / "Subs"
+        subs.mkdir(parents=True)
+        (season / "The Wire - S01E01 - The Target.mkv").write_bytes(b"x")
+        (season / "The Wire - S01E02 - The Detail.mkv").write_bytes(b"x")
+        (subs / "The Wire - S01E01 - The Target.he.srt").write_text("sub")
+        (subs / "English.srt").write_text("ambiguous")  # 2 episodes: skip
+
+        scan_library(LocalFileSystem(base), {TitleKind.series: "TV Shows"})
+
+    with session_scope() as s:
+        rows = {Path(o.path).name: o.subtitle_langs for o in s.query(OwnedFile).all()}
+        assert rows["The Wire - S01E01 - The Target.mkv"] == ["he"]
+        assert rows["The Wire - S01E02 - The Detail.mkv"] is None
+
+
+def test_rescan_keeps_enriched_title_link(config_file: Path, tmp_path: Path) -> None:
+    """After enrichment renames a title to its canonical TMDb form, a re-scan
+    must NOT create a duplicate title or repoint the file."""
+
+    _reset_singletons()
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import OwnedFile, Title
+    from homeTheater.scanner import scan_library
+    from homeTheater.scanner.filesystem import LocalFileSystem
+
+    init_db()
+    base = tmp_path / "nas"
+    movie_dir = base / "Movies" / "Better.Call.Soul.2015"  # misspelled release name
+    movie_dir.mkdir(parents=True)
+    (movie_dir / "Better.Call.Soul.2015.1080p.mkv").write_bytes(b"x")
+
+    scan_library(LocalFileSystem(str(base)), {TitleKind.movie: "Movies"})
+
+    with session_scope() as s:
+        title = s.query(Title).one()
+        title_id = title.id
+        title.title = "Better Call Saul"  # enrichment canonicalized the name
+        title.tmdb_id = 60059
+
+    stats = scan_library(LocalFileSystem(str(base)), {TitleKind.movie: "Movies"})
+    assert stats.titles_created == 0  # no duplicate from the rename
+
+    with session_scope() as s:
+        assert s.query(Title).count() == 1
+        owned = s.query(OwnedFile).one()
+        assert owned.title_id == title_id  # link preserved

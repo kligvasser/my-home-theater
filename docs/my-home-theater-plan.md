@@ -490,6 +490,23 @@ Each phase is shippable and has explicit acceptance criteria. Build in order.
   "like what I own?", the classifier answers "like what I approve?".
   157 tests, ruff+mypy clean; gaps/insights/train verified live (105 gaps
   found; trainer correctly refuses with 0 labels).
+- **Phase 14 — Library folder policy + he/en subtitles.** ✅ **Done** — the
+  target layout (``Movies/<Title (Year)>/{file,Subs/}``,
+  ``TV Shows/<Series>/Season 01/{episodes,Subs/}``) lives in
+  ``config.organizer`` and is pushed to the stack with one idempotent action
+  (``home-theater apply-naming`` / Settings-page button /
+  ``POST /api/settings/naming``): Radarr+Sonarr naming templates via their
+  config API, Bazarr subtitle placement into ``Subs/``. Subtitle languages
+  default to **he+en** and are runtime-overridable from the Settings page;
+  coverage meters and missing-lists are now per-language. The scanner
+  understands ``Subs/`` subfolders: per-episode stem matching in season
+  folders, and standalone release names (``2_English.srt``, ``Hebrew.srt``)
+  for single-movie folders; 3-letter language codes normalize to 2-letter.
+  Re-scan idempotency fix: an existing owned_file keeps its title link (an
+  enrichment-canonicalized title no longer spawns duplicates on rescan —
+  the live rescan that exposed this created 69 dups, healed by the
+  enrichment merge). Live library: 403 subtitle sidecars now attributed
+  (185 files with he, 30 with en). 166 tests, ruff+mypy clean.
 - **Phase 11 — Taste model + dashboard visualizations.** ✅ **Done** —
   unsupervised content-based taste model (`homeTheater/taste.py`, scikit-learn):
   per-kind TF-IDF over namespaced tokens (genres, keywords, cast, directors,

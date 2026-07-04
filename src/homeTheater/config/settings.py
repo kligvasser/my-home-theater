@@ -123,7 +123,7 @@ class Discovery(BaseModel):
 class Subtitles(BaseModel):
     """Subtitle coverage/automation (plan §5.5). Bazarr does the fetching."""
 
-    languages: list[str] = Field(default_factory=lambda: ["he"])
+    languages: list[str] = Field(default_factory=lambda: ["he", "en"])
     # Cap Bazarr search-missing triggers per sweep so a big backlog doesn't burn
     # provider quotas in one scheduled run.
     max_searches_per_sweep: int = Field(50, ge=1)
@@ -148,6 +148,26 @@ class Taste(BaseModel):
     # Trained preference classifier (homeTheater.preferences); blended only
     # once a model exists (needs enough approve/reject labels to train).
     model_weight: float = Field(0.5, ge=0, description="score blend: + weight*10*p(like)")
+
+
+class Organizer(BaseModel):
+    """Target library layout, pushed to Radarr/Sonarr/Bazarr with one click.
+
+    Radarr/Sonarr own renaming (their template syntax below); Bazarr places
+    subtitles into ``subs_folder`` inside each movie/season folder. The result:
+
+    * ``Movies/<Title (Year)>/<file>`` + ``Movies/<Title (Year)>/Subs/``
+    * ``TV Shows/<Series>/Season 01/<episodes>`` + ``.../Season 01/Subs/``
+    """
+
+    movie_folder_format: str = "{Movie Title} ({Release Year})"
+    movie_file_format: str = "{Movie Title} ({Release Year}) {Quality Full}"
+    series_folder_format: str = "{Series Title}"
+    season_folder_format: str = "Season {season:00}"
+    episode_file_format: str = (
+        "{Series Title} - S{season:00}E{episode:00} - {Episode Title}"
+    )
+    subs_folder: str = "Subs"
 
 
 class Acquisition(BaseModel):
@@ -229,6 +249,7 @@ class AppConfig(BaseModel):
     discovery: Discovery = Field(default_factory=Discovery)
     subtitles: Subtitles = Field(default_factory=Subtitles)
     taste: Taste = Field(default_factory=Taste)
+    organizer: Organizer = Field(default_factory=Organizer)
     acquisition: Acquisition = Field(default_factory=Acquisition)
     enabled_providers: list[str] = Field(default_factory=list)
     secrets: Secrets = Field(default_factory=Secrets, repr=False)

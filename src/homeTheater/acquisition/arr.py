@@ -36,6 +36,16 @@ class _Arr:
         resp.raise_for_status()
         return resp.json()
 
+    async def naming_config(self) -> dict[str, Any]:
+        data: dict[str, Any] = await self._get("/api/v3/config/naming")
+        return data
+
+    async def set_naming_config(self, payload: dict[str, Any]) -> None:
+        resp = await self._client.put(
+            f"{self._base}/api/v3/config/naming", json=payload, headers=self._headers
+        )
+        resp.raise_for_status()
+
     async def quality_profile_id(self, name: str) -> int:
         for p in await self._get("/api/v3/qualityprofile"):
             if p.get("name") == name:

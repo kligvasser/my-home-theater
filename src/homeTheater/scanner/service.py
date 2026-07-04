@@ -33,9 +33,13 @@ from .parse import (
     is_subtitle_file,
     parse_media,
     subtitle_lang_for,
+    subtitle_lang_standalone,
 )
 
 log = get_logger(__name__)
+
+# Subtitle subfolder names (case-insensitive): Movie/Subs/, Season 01/Subs/ ...
+SUBS_DIR_NAMES = frozenset({"subs", "sub", "subtitles"})
 
 # SQLite's bound-parameter limit is comfortably above this.
 _PRUNE_CHUNK = 500
@@ -113,21 +117,27 @@ def _get_or_create_title(session: Session, parsed: ParsedMedia) -> tuple[Title, 
 
 def _upsert_owned_file(
     session: Session,
-    title: Title,
     path: str,
     size: int,
     parsed: ParsedMedia,
     subtitle_langs: list[str] | None,
-) -> bool:
-    """Insert or refresh the row for ``path``; returns True when newly added."""
+) -> tuple[bool, bool]:
+    """Insert or refresh the row for ``path``; returns (added, title_created).
+
+    A path already in the catalog KEEPS its title link: enrichment renames
+    titles to their canonical TMDb form, so re-resolving by parsed filename
+    would repoint files onto fresh duplicate titles and orphan the enriched
+    rows. Only genuinely new paths resolve (or create) a title.
+    """
 
     owned = session.scalar(select(OwnedFile).where(OwnedFile.path == path))
     added = owned is None
+    created = False
     if owned is None:
+        title, created = _get_or_create_title(session, parsed)
         owned = OwnedFile(path=path, title_id=title.id, kind=parsed.kind)
         session.add(owned)
 
-    owned.title_id = title.id
     owned.kind = parsed.kind
     owned.season = parsed.season
     owned.episode = parsed.episode
@@ -136,7 +146,7 @@ def _upsert_owned_file(
     owned.container = parsed.container
     owned.size_bytes = size
     owned.subtitle_langs = subtitle_langs
-    return added
+    return added, created
 
 
 def _prune_missing(start: str, seen_paths: set[str], stats: ScanStats) -> None:
@@ -182,10 +192,42 @@ def _scan_root(
     entries = list(fs.walk(root))  # finish the (slow) walk before any DB write
     stats.files_scanned += len(entries)
 
+    def _split_parent(path: str) -> tuple[str, str]:
+        sep = "\\" if "\\" in path else "/"
+        head, _, tail = path.rpartition(sep)
+        return head, tail
+
+    # Sidecars next to the media file, subtitles inside a Subs/ subfolder
+    # (keyed by the *media* directory), and media counts per directory (a
+    # standalone "Hebrew.srt" is only attributable when the folder holds
+    # exactly one media file — the movie-folder layout).
     subs_by_parent: dict[str, list[str]] = defaultdict(list)
+    subsdir_by_parent: dict[str, list[str]] = defaultdict(list)
+    media_count: dict[str, int] = defaultdict(int)
     for entry in entries:
         if is_subtitle_file(entry.name):
-            subs_by_parent[entry.parent].append(entry.name)
+            head, tail = _split_parent(entry.parent)
+            if tail.lower() in SUBS_DIR_NAMES:
+                subsdir_by_parent[head].append(entry.name)
+            else:
+                subs_by_parent[entry.parent].append(entry.name)
+        elif is_media_file(entry.name):
+            media_count[entry.parent] += 1
+
+    def _langs_for(media_name: str, parent: str) -> list[str]:
+        langs = {
+            lang
+            for sub in subs_by_parent.get(parent, [])
+            if (lang := subtitle_lang_for(media_name, sub)) is not None
+        }
+        for sub in subsdir_by_parent.get(parent, []):
+            lang = subtitle_lang_for(media_name, sub)
+            if lang is None and media_count[parent] == 1:
+                # Movie-folder Subs/: language-named files (2_English.srt).
+                lang = subtitle_lang_standalone(sub)
+            if lang is not None:
+                langs.add(lang)
+        return sorted(langs)
 
     seen_paths: set[str] = set()
     for entry in entries:
@@ -203,17 +245,10 @@ def _scan_root(
                 stats.files_skipped += 1
                 log.warning("scan.unparsable", path=entry.path)
                 continue
-            langs = sorted(
-                {
-                    lang
-                    for sub in subs_by_parent.get(entry.parent, [])
-                    if (lang := subtitle_lang_for(entry.name, sub)) is not None
-                }
-            )
+            langs = _langs_for(entry.name, entry.parent)
             with session_scope() as session:  # short per-file transaction
-                title, created = _get_or_create_title(session, parsed)
-                added = _upsert_owned_file(
-                    session, title, entry.path, entry.size, parsed, langs or None
+                added, created = _upsert_owned_file(
+                    session, entry.path, entry.size, parsed, langs or None
                 )
             stats.titles_created += int(created)
             stats.files_added += int(added)

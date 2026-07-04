@@ -53,6 +53,8 @@ class LibraryStats:
     languages: list[tuple[str, int]] = field(default_factory=list)
     avg_imdb: float | None = None
     coverage: Coverage = field(default_factory=lambda: Coverage(DEFAULT_SUB_LANG, 0, 0))
+    # One meter per configured subtitle language (coverage == coverages[0]).
+    coverages: list[Coverage] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +107,10 @@ class CandidateRow:
     taste_like: list[str] = field(default_factory=list)
 
 
-def get_stats(sub_lang: str = DEFAULT_SUB_LANG) -> LibraryStats:
+def get_stats(
+    sub_lang: str = DEFAULT_SUB_LANG, sub_langs: list[str] | None = None
+) -> LibraryStats:
+    langs = sub_langs or [sub_lang]
     with session_scope() as s:
         stats = LibraryStats()
         stats.movies = s.scalar(select(func.count()).where(Title.kind == TitleKind.movie)) or 0
@@ -177,12 +182,13 @@ def get_stats(sub_lang: str = DEFAULT_SUB_LANG) -> LibraryStats:
             ).all()
         ]
 
-        stats.coverage = _coverage(s, sub_lang)
+        stats.coverages = _coverages(s, langs)
+        stats.coverage = stats.coverages[0]
         return stats
 
 
-def _coverage(session: Session, lang: str) -> Coverage:
-    """% of owned titles that have at least one sidecar in ``lang``.
+def _coverages(session: Session, langs: list[str]) -> list[Coverage]:
+    """% of owned titles that have at least one sidecar in each language.
 
     ``subtitle_langs`` is a JSON list, so membership is computed in Python — fine
     for a home-scale library and avoids DB-specific JSON operators.
@@ -190,12 +196,13 @@ def _coverage(session: Session, lang: str) -> Coverage:
 
     rows = session.execute(select(OwnedFile.title_id, OwnedFile.subtitle_langs)).all()
     owned: set[int] = set()
-    covered: set[int] = set()
-    for title_id, langs in rows:
+    covered: dict[str, set[int]] = {lang: set() for lang in langs}
+    for title_id, file_langs in rows:
         owned.add(title_id)
-        if langs and lang in langs:
-            covered.add(title_id)
-    return Coverage(lang=lang, covered=len(covered), total=len(owned))
+        for lang in langs:
+            if file_langs and lang in file_langs:
+                covered[lang].add(title_id)
+    return [Coverage(lang=lang, covered=len(covered[lang]), total=len(owned)) for lang in langs]
 
 
 def _title_row(t: Title, sub_lang: str) -> TitleRow:

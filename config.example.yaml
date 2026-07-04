@@ -56,8 +56,20 @@ discovery:
   excluded_genres: []   # e.g. [Documentary, Reality]
 
 subtitles:
-  languages: [he]       # target languages; Bazarr does the actual fetching
+  languages: [he, en]   # target languages; Bazarr does the actual fetching
   max_searches_per_sweep: 50  # cap Bazarr search triggers per scheduled sweep
+
+# Library folder structure, pushed to Radarr/Sonarr/Bazarr with
+# `home-theater apply-naming` (or the Settings-page button):
+#   Movies/<Title (Year)>/<file>        + <Title (Year)>/Subs/
+#   TV Shows/<Series>/Season 01/<eps>   + Season 01/Subs/
+organizer:
+  movie_folder_format: "{Movie Title} ({Release Year})"
+  movie_file_format: "{Movie Title} ({Release Year}) {Quality Full}"
+  series_folder_format: "{Series Title}"
+  season_folder_format: "Season {season:00}"
+  episode_file_format: "{Series Title} - S{season:00}E{episode:00} - {Episode Title}"
+  subs_folder: Subs
 
 taste:
   enabled: true         # content-similarity vs your owned library (no labels needed)

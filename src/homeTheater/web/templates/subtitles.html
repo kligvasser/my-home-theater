@@ -4,14 +4,28 @@
 <h1>Subtitle coverage</h1>
 
 <section class="coverage">
-  <div class="bar"><div class="fill" style="width: {{ coverage.pct }}%"></div></div>
-  <p>{{ coverage.covered }} / {{ coverage.total }} owned titles ({{ coverage.pct }}%)
-     have <code>{{ coverage.lang }}</code> subtitles.</p>
-  <p class="muted note">Bazarr does the actual fetching. Trigger a search for all missing via the
+  {% for c in coverages %}
+  <div class="meter" style="margin-bottom:8px">
+    <code style="width:32px">{{ c.lang }}</code>
+    <div class="bar"><div class="fill" style="width: {{ c.pct }}%"></div></div>
+    <span class="mval">{{ c.pct }}%</span>
+    <span class="muted small">{{ c.covered }}/{{ c.total }}</span>
+  </div>
+  {% endfor %}
+  <p class="muted note">Bazarr does the actual fetching (into each title's <code>Subs/</code>
+     folder once the naming policy is applied). Trigger a search for all missing via the
      token-gated API: <code>POST /api/subtitles/search</code>.</p>
 </section>
 
-<h2>Missing <code>{{ coverage.lang }}</code> subtitles ({{ missing | length }})</h2>
+<nav class="statusfilter">
+  {% for c in coverages %}
+  <a href="/subtitles?lang={{ c.lang }}" class="{{ 'active' if shown == c.lang }}">
+    missing {{ c.lang }} <span class="count">{{ c.total - c.covered }}</span>
+  </a>
+  {% endfor %}
+</nav>
+
+<h2>Missing <code>{{ shown }}</code> subtitles ({{ missing | length }})</h2>
 {% if missing %}
 <table class="library">
   <thead><tr><th></th><th>Title</th><th>Year</th><th>Kind</th><th>IMDb</th><th>Files</th></tr></thead>
@@ -29,6 +43,6 @@
   </tbody>
 </table>
 {% else %}
-<p class="muted">Every owned title has <code>{{ coverage.lang }}</code> subtitles. 🎉</p>
+<p class="muted">Every owned title has <code>{{ shown }}</code> subtitles. 🎉</p>
 {% endif %}
 {% endblock %}

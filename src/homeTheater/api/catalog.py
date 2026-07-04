@@ -21,9 +21,13 @@ router = APIRouter(prefix="/api", tags=["catalog"])
 
 @router.get("/stats")
 def api_stats() -> dict[str, Any]:
-    stats = get_stats()
+    from ..config import effective_config
+
+    stats = get_stats(sub_langs=effective_config().subtitles.languages)
     data = asdict(stats)
     data["coverage"]["pct"] = stats.coverage.pct  # property isn't captured by asdict
+    for entry, cov in zip(data["coverages"], stats.coverages, strict=True):
+        entry["pct"] = cov.pct
     return data
 
 

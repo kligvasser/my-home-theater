@@ -29,13 +29,15 @@
 </section>
 
 <section class="coverage">
-  <h2>Hebrew subtitle coverage</h2>
-  <div class="meter">
-    <div class="bar"><div class="fill" style="width: {{ stats.coverage.pct }}%"></div></div>
-    <span class="mval">{{ stats.coverage.pct }}%</span>
+  <h2>Subtitle coverage</h2>
+  {% for c in stats.coverages or [stats.coverage] %}
+  <div class="meter" style="margin-bottom:6px">
+    <code style="width:32px">{{ c.lang }}</code>
+    <div class="bar"><div class="fill" style="width: {{ c.pct }}%"></div></div>
+    <span class="mval">{{ c.pct }}%</span>
+    <span class="muted small">{{ c.covered }}/{{ c.total }}</span>
   </div>
-  <p class="muted small">{{ stats.coverage.covered }} / {{ stats.coverage.total }} owned titles
-     have <code>{{ stats.coverage.lang }}</code> subtitles.</p>
+  {% endfor %}
 </section>
 
 <div class="grid2">

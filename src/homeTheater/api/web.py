@@ -30,11 +30,13 @@ router = APIRouter(include_in_schema=False)
 
 @router.get("/", response_class=HTMLResponse)
 def dashboard(request: Request) -> HTMLResponse:
+    from ..config import effective_config
+
     return templates.TemplateResponse(
         request,
         "dashboard.html",
         {
-            "stats": get_stats(),
+            "stats": get_stats(sub_langs=effective_config().subtitles.languages),
             "recent": recent_titles(12),
             "runs": recent_runs(10),
             "active": "dashboard",
@@ -104,15 +106,19 @@ def candidates(
 
 
 @router.get("/subtitles", response_class=HTMLResponse)
-def subtitles(request: Request) -> HTMLResponse:
-    lang = get_config().subtitles.primary
-    stats = get_stats(sub_lang=lang)
+def subtitles(request: Request, lang: str | None = None) -> HTMLResponse:
+    from ..config import effective_config
+
+    langs = effective_config().subtitles.languages or ["he"]
+    shown = lang if lang in langs else langs[0]
+    stats = get_stats(sub_langs=langs)
     return templates.TemplateResponse(
         request,
         "subtitles.html",
         {
-            "coverage": stats.coverage,
-            "missing": list_missing_subtitles(lang=lang, limit=200),
+            "coverages": stats.coverages,
+            "shown": shown,
+            "missing": list_missing_subtitles(lang=shown, limit=200),
             "active": "subtitles",
             "version": __version__,
         },
@@ -241,6 +247,8 @@ def settings_page(request: Request) -> HTMLResponse:
         "thresholds": cfg.thresholds.model_dump(mode="json"),
         "discovery": cfg.discovery.model_dump(mode="json"),
         "taste": cfg.taste.model_dump(mode="json"),
+        "subtitles": cfg.subtitles.model_dump(mode="json"),
+        "organizer": cfg.organizer.model_dump(mode="json"),
         "features": {"auto_approve": cfg.features.auto_approve},
     }
     return templates.TemplateResponse(

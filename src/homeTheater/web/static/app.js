@@ -129,6 +129,16 @@
         btn.disabled = true;
         btn.textContent = "added ✓";
         flash(`Added candidate #${out.id}.`);
+      } else if (act === "apply-naming") {
+        btn.disabled = true;
+        try {
+          const out = await api("POST", "/api/settings/naming");
+          flash(
+            "Radarr: " + out.radarr + " · Sonarr: " + out.sonarr + " · Bazarr: " + out.bazarr
+          );
+        } finally {
+          btn.disabled = false;
+        }
       } else if (act === "train-model") {
         btn.disabled = true;
         btn.textContent = "training…";
@@ -164,6 +174,8 @@
       if (input.value === "") continue;
       let val = input.value;
       if (input.dataset.type === "bool") val = val === "true";
+      else if (input.dataset.type === "list")
+        val = val.split(",").map((s) => s.trim()).filter(Boolean);
       else if (input.dataset.type === "num" || input.type === "number") val = Number(val);
       const path = input.dataset.path.split(".");
       let node = out;
