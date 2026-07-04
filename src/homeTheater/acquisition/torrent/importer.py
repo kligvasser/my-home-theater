@@ -21,8 +21,8 @@ from __future__ import annotations
 import contextlib
 import os
 import re
-import shutil
-from typing import Protocol
+from collections.abc import Callable
+from typing import Any, Protocol
 
 from ...config import AppConfig
 from ...errors import NotConfiguredError
@@ -31,22 +31,41 @@ from ...scanner.parse import is_media_file
 
 log = get_logger(__name__)
 
+# Called during a copy with (bytes_copied, total_bytes) so the dashboard can show
+# NAS-import progress. May be None.
+ProgressCb = Callable[[int, int], None] | None
+
 # Characters illegal in SMB/Windows and most NAS filesystems.
 _ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 # A "sample" clip is only junk when it's also tiny; a real 4 GB file that merely
 # has "sample" in its name is kept.
 _SAMPLE_MAX_BYTES = 300 * 1024 * 1024
-_COPY_CHUNK = 1024 * 1024
+_COPY_CHUNK = 4 * 1024 * 1024  # 4 MiB — throughput + progress granularity
 
 
 class ImportError_(RuntimeError):
     """The completed torrent could not be imported (no media file, copy failed)."""
 
 
+def _copy_stream(fsrc: Any, fdst: Any, total: int, on_progress: ProgressCb) -> int:
+    """Copy fsrc -> fdst in chunks, reporting progress. Returns bytes written."""
+
+    written = 0
+    while chunk := fsrc.read(_COPY_CHUNK):
+        fdst.write(chunk)
+        written += len(chunk)
+        if on_progress is not None:
+            on_progress(written, total)
+    return written
+
+
 class LibraryTarget(Protocol):
-    def import_file(self, local_src: str, rel_dir: str, filename: str) -> str:
+    def import_file(
+        self, local_src: str, rel_dir: str, filename: str, on_progress: ProgressCb = None
+    ) -> str:
         """Copy ``local_src`` into ``rel_dir/filename`` under the library root,
-        creating directories, verifying size, and returning the final path."""
+        creating directories, verifying size, and returning the final path.
+        Calls ``on_progress(copied, total)`` during the copy when provided."""
         ...
 
 
@@ -104,6 +123,7 @@ def import_completed_movie(
     content_path: str,
     title: str,
     year: int | None,
+    on_progress: ProgressCb = None,
 ) -> str:
     """Copy a finished movie into the library and return its destination path."""
 
@@ -113,7 +133,7 @@ def import_completed_movie(
     ext = os.path.splitext(video)[1].lower()
     folder, filename = _movie_dir_and_file(title, year, ext)
     rel_dir = f"{config.nas.movies_root.rstrip('/')}/{folder}"
-    dest = target.import_file(video, rel_dir, filename)
+    dest = target.import_file(video, rel_dir, filename, on_progress)
     log.info("import.done", title=title, source=video, dest=dest)
     return dest
 
@@ -144,13 +164,16 @@ class LocalLibraryTarget:
     def __init__(self, base_dir: str) -> None:
         self.base_dir = base_dir
 
-    def import_file(self, local_src: str, rel_dir: str, filename: str) -> str:
+    def import_file(
+        self, local_src: str, rel_dir: str, filename: str, on_progress: ProgressCb = None
+    ) -> str:
         dest_dir = os.path.join(self.base_dir, *rel_dir.split("/"))
         os.makedirs(dest_dir, exist_ok=True)
         dest = os.path.join(dest_dir, filename)
         tmp = dest + ".part"
-        shutil.copyfile(local_src, tmp)
         src_size = os.path.getsize(local_src)
+        with open(local_src, "rb") as fsrc, open(tmp, "wb") as fdst:
+            _copy_stream(fsrc, fdst, src_size, on_progress)
         if os.path.getsize(tmp) != src_size:
             os.remove(tmp)
             raise ImportError_(f"size mismatch copying to {dest!r}")
@@ -192,7 +215,9 @@ class SMBLibraryTarget:
         parts = [p for p in rel.replace("/", "\\").split("\\") if p]
         return "\\\\" + "\\".join([self.host, self.share, *parts])
 
-    def import_file(self, local_src: str, rel_dir: str, filename: str) -> str:
+    def import_file(
+        self, local_src: str, rel_dir: str, filename: str, on_progress: ProgressCb = None
+    ) -> str:
         import smbclient
 
         self._ensure_session()
@@ -202,8 +227,7 @@ class SMBLibraryTarget:
         remote_tmp = remote + ".part"
         src_size = os.path.getsize(local_src)
         with open(local_src, "rb") as fsrc, smbclient.open_file(remote_tmp, mode="wb") as fdst:
-            while chunk := fsrc.read(_COPY_CHUNK):
-                fdst.write(chunk)
+            _copy_stream(fsrc, fdst, src_size, on_progress)
         if smbclient.stat(remote_tmp).st_size != src_size:
             smbclient.remove(remote_tmp)
             raise ImportError_(f"size mismatch copying to {remote!r}")

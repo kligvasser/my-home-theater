@@ -284,3 +284,5 @@ button.mini:disabled { opacity: .5; cursor: default; }
 .sortable-table th.sorted a { color: var(--text); }
 .sortable-table th .arrow { margin-left: 5px; opacity: .35; font-size: .85em; }
 .sortable-table th.sorted .arrow { opacity: 1; color: var(--accent); }
+/* Import copy uses a distinct (green) bar vs the download (accent) bar. */
+.exec-fill.importing { background: var(--ok); }

@@ -133,9 +133,7 @@ async def _live_progress(config: AppConfig, rows: list[_Row]) -> dict[str, Any]:
 
     if config.acquisition.backend != "torrent":
         return {}
-    hashes = [
-        r.infohash for r in rows if r.infohash and r.dl_state in ("queued", "downloading")
-    ]
+    hashes = [r.infohash for r in rows if r.infohash and r.dl_state in ("queued", "downloading")]
     if not hashes:
         return {}
     from .acquisition.torrent.service import _download_client
@@ -160,20 +158,23 @@ async def _live_progress(config: AppConfig, rows: list[_Row]) -> dict[str, Any]:
 def _build(row: _Row, live: Any, target: list[str]) -> ExecutionState:
     imported = row.status is CandidateStatus.imported or row.dl_state == "imported"
     failed = row.status is CandidateStatus.failed or row.dl_state == "failed"
+    importing = row.dl_state == "importing"
     downloading = row.status is CandidateStatus.downloading or row.dl_state == "downloading"
 
     progress = row.dl_progress
     down_rate = seeders = eta = None
-    if live is not None:
+    # While importing, dl_progress is the NAS-copy fraction — don't let the live
+    # torrent poll (which reads 100% downloaded) clobber it.
+    if live is not None and not importing:
         progress = live.progress
         down_rate, seeders, eta = live.down_rate, live.seeders, live.eta_seconds
 
     subs_done = bool(target) and set(target).issubset(row.subtitle_present)
-    complete = imported or (progress or 0) >= 1.0
+    downloaded = imported or importing or (progress or 0) >= 1.0
 
     if failed:
         dl_step = "failed"
-    elif complete:
+    elif downloaded:
         dl_step = "done"
     else:  # queued or downloading — it's in the client, transferring
         dl_step = "active"
@@ -182,7 +183,7 @@ def _build(row: _Row, live: Any, target: list[str]) -> ExecutionState:
         imp_step = "done"
     elif failed:
         imp_step = "failed"
-    elif complete:
+    elif downloaded:  # completed or actively importing
         imp_step = "active"
     else:
         imp_step = "pending"
@@ -194,7 +195,7 @@ def _build(row: _Row, live: Any, target: list[str]) -> ExecutionState:
         Step("import", "Imported to NAS", imp_step),
         Step("subs", "Subtitles", subs_step),
     ]
-    stage = _stage(failed, imported, downloading, progress, subs_done, target, row)
+    stage = _stage(failed, imported, importing, downloading, progress, subs_done, target, row)
     return ExecutionState(
         candidate_id=row.candidate_id,
         title=row.title,
@@ -218,6 +219,7 @@ def _build(row: _Row, live: Any, target: list[str]) -> ExecutionState:
 def _stage(
     failed: bool,
     imported: bool,
+    importing: bool,
     downloading: bool,
     progress: float | None,
     subs_done: bool,
@@ -226,6 +228,8 @@ def _stage(
 ) -> str:
     if failed:
         return "Failed"
+    if importing:
+        return f"Importing to NAS {round((progress or 0) * 100)}%"
     if imported:
         if subs_done or not target:
             return "Done"

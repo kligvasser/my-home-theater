@@ -197,3 +197,30 @@ def test_activity_api_reports_in_flight_candidate(
         item = data["items"][0]
         assert item["title"] == "Obsession" and item["stage"] == "Downloading 30%"
         assert item["subtitle_target"] == ["he", "en"]
+
+
+def test_stage_importing_shows_copy_progress() -> None:
+    # dl_state 'importing' + progress = NAS-copy fraction (not download %).
+    st = _build(
+        _row(CandidateStatus.downloading, dl_state="importing", progress=0.45, present=[]),
+        None,
+        ["he"],
+    )
+    assert st.stage == "Importing to NAS 45%"
+    steps = _steps(st)
+    assert steps["download"] == "done" and steps["import"] == "active"
+
+
+def test_importing_ignores_live_download_progress() -> None:
+    from homeTheater.acquisition.torrent.base import TorrentStatus
+
+    live = TorrentStatus(
+        infohash="a" * 40, progress=1.0, downloading=False, complete=True, save_path="/d"
+    )
+    st = _build(
+        _row(CandidateStatus.downloading, dl_state="importing", progress=0.3, present=[]),
+        live,
+        ["he"],
+    )
+    assert st.stage == "Importing to NAS 30%"  # copy fraction, not the 100% download
+    assert st.progress == 0.3

@@ -309,9 +309,11 @@
     return "run";
   }
   function progressHtml(item) {
-    if (item.stage.indexOf("Downloading") !== 0) return "";
+    // Show a bar while downloading or importing (both carry a live fraction).
+    if (!/^(Downloading|Importing)/.test(item.stage)) return "";
     const pct = Math.round((item.progress || 0) * 100);
-    return `<div class="exec-progress" title="${pct}%"><div class="exec-fill" style="width:${pct}%"></div></div>`;
+    const cls = item.stage.indexOf("Importing") === 0 ? "exec-fill importing" : "exec-fill";
+    return `<div class="exec-progress" title="${pct}%"><div class="${cls}" style="width:${pct}%"></div></div>`;
   }
 
   function cardHtml(item) {
@@ -388,7 +390,7 @@
         });
       }
       // Poll faster while something is actively transferring / importing.
-      const active = items.some((it) => /^(Downloading|Downloaded|Queued|Fetching)/.test(it.stage));
+      const active = items.some((it) => /^(Downloading|Downloaded|Importing|Queued|Fetching)/.test(it.stage));
       if (liveEl) liveEl.textContent = active ? "● live" : "";
       window.clearTimeout(timer);
       timer = window.setTimeout(pipelineTick, active ? 3000 : 12000);

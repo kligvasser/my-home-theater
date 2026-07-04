@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import httpx
 from sqlalchemy import select as sa_select
@@ -316,7 +318,7 @@ async def sync_downloads_torrent(config: AppConfig) -> SyncStats:
             sa_select(Download, Title)
             .join(Candidate, Candidate.id == Download.candidate_id)
             .join(Title, Title.id == Candidate.title_id)
-            .where(Download.state.in_(("queued", "downloading", "completed")))
+            .where(Download.state.in_(("queued", "downloading", "importing", "completed")))
         ).all():
             if not dl.external_id:
                 continue
@@ -373,6 +375,28 @@ async def sync_downloads_torrent(config: AppConfig) -> SyncStats:
     return stats
 
 
+def _set_download(download_id: int, **fields: Any) -> None:
+    with session_scope() as s:
+        dl = s.get(Download, download_id)
+        if dl is not None:
+            for key, value in fields.items():
+                setattr(dl, key, value)
+
+
+def _import_progress_cb(download_id: int) -> Callable[[int, int], None]:
+    """A throttled callback that records copy progress onto the Download (~1% steps)."""
+
+    last = [0.0]
+
+    def cb(copied: int, total: int) -> None:
+        frac = (copied / total) if total else 0.0
+        if frac - last[0] >= 0.01 or frac >= 1.0:
+            last[0] = frac
+            _set_download(download_id, progress=round(frac, 3))
+
+    return cb
+
+
 async def _finish_completed(
     config: AppConfig,
     client: DownloadClient,
@@ -406,8 +430,18 @@ async def _finish_completed(
                 from .importer import build_library_target, import_completed_movie
 
                 target = build_library_target(config)
-                dest = import_completed_movie(
-                    config, target, content_path=content, title=title, year=year
+                # Mark 'importing' + copy in a worker thread so the big NAS copy
+                # neither blocks the event loop nor hides its progress: the copy
+                # updates Download.progress, which the Activity view polls live.
+                _set_download(download_id, state="importing", progress=0.0)
+                dest = await asyncio.to_thread(
+                    import_completed_movie,
+                    config,
+                    target,
+                    content_path=content,
+                    title=title,
+                    year=year,
+                    on_progress=_import_progress_cb(download_id),
                 )
             except Exception as exc:
                 error = f"import failed: {redact_exc(exc)}"
