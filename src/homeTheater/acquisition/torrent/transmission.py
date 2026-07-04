@@ -118,3 +118,11 @@ class TransmissionClient:
 
     async def remove(self, infohash: str, *, delete_data: bool) -> None:
         await self._rpc("torrent-remove", {"ids": [infohash], "delete-local-data": delete_data})
+
+    async def set_location(self, infohash: str, location: str, *, move: bool = True) -> None:
+        """Move a torrent's data to ``location`` (Transmission does the move, so it
+        works even when our process can't read the current, protected dir)."""
+
+        await self._rpc(
+            "torrent-set-location", {"ids": [infohash], "location": location, "move": move}
+        )

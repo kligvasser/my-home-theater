@@ -105,6 +105,21 @@ never fatal).
 4. Flip `dry_run: false` and run `acquire` then `sync`; watch the candidate move
    `queued → downloading → imported`.
 
+## Download location on macOS (important)
+
+Point `torrent.movie_download_dir` / `series_download_dir` at a plain folder like
+`/Users/<you>/HomeTheaterDownloads` — **not** `~/Downloads`, `~/Desktop` or
+`~/Documents`. Those are privacy-protected (TCC): Transmission can write there, but
+this app (terminal/launchd) is **denied read access**, so import fails with
+"permission denied reading …". If you have torrents stuck in a protected folder,
+the app can move them out via Transmission (`torrent-set-location`) — restart the
+item, or set the download dir and re-grab.
+
+Large imports copy over SMB one at a time; if the mount drops mid-copy the sync
+stops importing for that run and retries the rest next sweep (so one failure
+doesn't cascade). If big copies repeatedly break the mount, prefer an
+authenticated SMB mount over guest.
+
 ## Watching the pipeline (dashboard)
 
 The **Activity** page (`/activity`) shows every in-flight candidate as a live

@@ -498,3 +498,23 @@ async def test_restart_clears_and_regrabs(tmp_path: Path, monkeypatch: pytest.Mo
     # old torrent was removed with delete-local-data
     removes = [c for c in respx.calls if b'"torrent-remove"' in c.request.content]
     assert removes and b'"delete-local-data":true' in removes[0].request.content
+
+
+def test_find_primary_video_reports_permission_denied(tmp_path: Path) -> None:
+    """macOS TCC (or any perms) blocking the download folder must surface a clear
+    error, not the misleading 'no media file found'."""
+    import os
+
+    from homeTheater.acquisition.torrent.importer import ImportError_, find_primary_video
+
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "movie.mkv").write_bytes(b"x" * 1000)
+    os.chmod(locked, 0o000)
+    try:
+        if os.access(str(locked), os.R_OK):  # root / perms not enforced here
+            pytest.skip("directory permissions are not enforced in this environment")
+        with pytest.raises(ImportError_, match="permission denied"):
+            find_primary_video(str(locked))
+    finally:
+        os.chmod(locked, 0o755)

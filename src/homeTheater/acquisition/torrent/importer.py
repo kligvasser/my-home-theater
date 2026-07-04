@@ -57,13 +57,20 @@ def _sanitize(name: str) -> str:
 
 def find_primary_video(content_path: str) -> str | None:
     """The main video file for a completed torrent: the file itself if the torrent
-    is a single file, else the largest non-sample media file in its folder."""
+    is a single file, else the largest non-sample media file in its folder.
+
+    Raises :class:`ImportError_` if the folder can't be read — on macOS,
+    ``~/Downloads``/``~/Desktop``/``~/Documents`` are privacy-protected (TCC) and
+    a terminal/launchd process is denied listing them, which would otherwise look
+    like an empty folder ("no media file found").
+    """
 
     if os.path.isfile(content_path):
         return content_path if is_media_file(os.path.basename(content_path)) else None
+    walk_errors: list[OSError] = []
     best: str | None = None
     best_size = -1
-    for dirpath, _dirnames, filenames in os.walk(content_path):
+    for dirpath, _dirnames, filenames in os.walk(content_path, onerror=walk_errors.append):
         for name in filenames:
             if not is_media_file(name):
                 continue
@@ -76,6 +83,12 @@ def find_primary_video(content_path: str) -> str | None:
                 continue
             if size > best_size:
                 best, best_size = full, size
+    if best is None and any(isinstance(e, PermissionError) for e in walk_errors):
+        raise ImportError_(
+            f"permission denied reading {content_path!r} — on macOS, grant the app "
+            "Full Disk Access, or set torrent.movie_download_dir to a folder outside "
+            "~/Downloads, ~/Desktop and ~/Documents (which are privacy-protected)."
+        )
     return best
 
 

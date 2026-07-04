@@ -123,6 +123,9 @@ torrent:
   min_seeders: 5          # drop releases below this many seeders
   resolutions: null       # null -> reuse thresholds.allowed_resolutions
   max_results_per_source: 30
+  # Download target dir. On macOS DO NOT use ~/Downloads, ~/Desktop or ~/Documents:
+  # privacy protection (TCC) blocks this app from reading them, so imports fail with
+  # "permission denied". Use a plain folder like /Users/<you>/HomeTheaterDownloads.
   movie_download_dir: null    # null -> Transmission's own default download dir
   series_download_dir: null
   # Optional FlareSolverr proxy (http://host:8191) so Cloudflare-walled sources

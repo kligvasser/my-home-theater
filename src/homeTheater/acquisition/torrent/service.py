@@ -275,6 +275,10 @@ async def sync_downloads_torrent(config: AppConfig) -> SyncStats:
             meta[dl.id] = (title.kind, title.title, title.year)
 
     stats = SyncStats()
+    # A large NAS copy that fails (e.g. the SMB mount drops mid-transfer) tends to
+    # break the mount for the rest of the run; don't cascade — stop importing after
+    # the first failure and let the others retry next sweep.
+    imports_blocked = False
     async with httpx.AsyncClient(timeout=config.torrent.request_timeout) as http:
         client = _download_client(config, http)
         for download_id, infohash in rows:
@@ -286,10 +290,14 @@ async def sync_downloads_torrent(config: AppConfig) -> SyncStats:
                 continue
 
             if st is not None and st.complete:
+                if imports_blocked:
+                    continue  # deferred to the next sweep after an earlier failure
                 kind, title, year = meta[download_id]
-                await _finish_completed(
+                err = await _finish_completed(
                     config, client, stats, download_id, infohash, st, kind, title, year
                 )
+                if err is not None:
+                    imports_blocked = True
                 continue
 
             with session_scope() as s:
@@ -326,13 +334,14 @@ async def _finish_completed(
     kind: TitleKind,
     title: str,
     year: int | None,
-) -> None:
+) -> str | None:
     """Import a finished torrent into the library and mark it imported.
 
     Movies are copied into the NAS layout; series are left in the download dir
     (per-episode placement isn't modelled yet) but still marked imported. A
     failed movie import records the error and leaves state ``completed`` so the
     next sync retries — the candidate is not advanced until the file is in place.
+    Returns the error string on a failed import (else ``None``).
     """
 
     dest: str | None = None
@@ -365,7 +374,7 @@ async def _finish_completed(
                 dl.save_path = st.save_path
                 dl.error = error
         stats.errors.append(f"{infohash}: {error}")
-        return
+        return error
 
     if dest is not None and config.torrent.delete_local_after_import:
         try:
@@ -385,3 +394,4 @@ async def _finish_completed(
             if cand is not None and cand.status is not CandidateStatus.rejected:
                 cand.status = CandidateStatus.imported
     stats.completed += 1
+    return None
