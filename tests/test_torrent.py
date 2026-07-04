@@ -518,3 +518,36 @@ def test_find_primary_video_reports_permission_denied(tmp_path: Path) -> None:
             find_primary_video(str(locked))
     finally:
         os.chmod(locked, 0o755)
+
+
+def test_register_owned_movie_catalogs_with_unc_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A just-imported movie is cataloged as an owned file linked to its known
+    Title, with the SMB UNC path the scanner uses (so a later scan reconciles)."""
+    monkeypatch.setenv("SMB_HOST", "MyNAS")
+    _write_config(
+        tmp_path, dry_run=False, monkeypatch=monkeypatch, library_base_dir=str(tmp_path / "lib")
+    )
+    _reset()
+
+    from homeTheater.acquisition.torrent.service import register_owned_movie
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import OwnedFile, Title
+
+    init_db()
+    with session_scope() as s:
+        t = Title(tmdb_id=5, title="The Matrix", year=1999, kind=TitleKind.movie)
+        s.add(t)
+        s.flush()
+        tid = t.id
+
+    dest = str(tmp_path / "lib" / "Movies" / "The Matrix (1999)" / "The Matrix (1999).mkv")
+    ofid = register_owned_movie(get_config(), tid, dest, "The.Matrix.1999.1080p.BluRay.x264")
+
+    with session_scope() as s:
+        of = s.get(OwnedFile, ofid)
+        assert of.title_id == tid  # linked to the known title, not a re-resolved dup
+        assert of.path == r"\\MyNAS\T\Movies\The Matrix (1999)\The Matrix (1999).mkv"
+        assert of.resolution == "1080p"  # parsed from the release name, not the clean filename

@@ -198,6 +198,56 @@ def _record(item: _Work, provider: str, dest: str) -> None:
             f.subtitle_langs = sorted({*(f.subtitle_langs or []), item.lang})
 
 
+async def fetch_for_owned_file(config: AppConfig, owned_file_id: int) -> list[str]:
+    """Fetch missing target-language subtitles for one owned file (used right after
+    a torrent import so the pipeline completes without waiting for a full sweep)."""
+
+    languages = config.subtitles.languages
+    with session_scope() as s:
+        f = s.get(OwnedFile, owned_file_id)
+        if f is None:
+            return []
+        title = s.get(Title, f.title_id)
+        if title is None:
+            return []
+        have = set(f.subtitle_langs or [])
+        works = [
+            _Work(
+                owned_file_id=f.id,
+                title_id=f.title_id,
+                lang=lang,
+                media_path=f.path,
+                kind=f.kind,
+                title=title.title,
+                year=title.year,
+                imdb_id=title.imdb_id,
+                season=f.season,
+                episode=f.episode,
+            )
+            for lang in languages
+            if lang not in have
+        ]
+    if not works:
+        return []
+
+    out: list[str] = []
+    async with httpx.AsyncClient(timeout=config.subtitles.request_timeout) as http:
+        sources = _build_sources(config, http)
+        if not sources:
+            return []
+        for w in works:
+            try:
+                dest = await _fetch_one(config, sources, w)
+            except Exception as exc:
+                log.warning(
+                    "subtitle.fetch_failed", title=w.title, lang=w.lang, detail=redact_exc(exc)
+                )
+                continue
+            if dest is not None:
+                out.append(dest)
+    return out
+
+
 async def sweep_native(config: AppConfig) -> NativeSweepStats:
     """Fetch every missing target-language subtitle for owned files (capped)."""
 

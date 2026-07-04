@@ -13,6 +13,7 @@ follow-up). Movies are the fully-supported path.
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -25,6 +26,7 @@ from ...db.models import (
     Candidate,
     CandidateStatus,
     Download,
+    OwnedFile,
     Title,
     TitleKind,
 )
@@ -118,6 +120,53 @@ def _download_client(config: AppConfig, http: httpx.AsyncClient) -> DownloadClie
 def _download_dir(config: AppConfig, kind: TitleKind) -> str | None:
     t = config.torrent
     return t.movie_download_dir if kind is TitleKind.movie else t.series_download_dir
+
+
+def _mount_to_unc(dest: str, config: AppConfig) -> str:
+    """Map a local mount dest back to the SMB UNC path the scanner uses, so a later
+    NAS scan reconciles this file instead of pruning + re-adding it."""
+
+    base = config.torrent.library_base_dir
+    host = config.secrets.smb_host
+    share = config.nas.share
+    if base and host and share:
+        b = base.rstrip("/")
+        if dest.startswith(b):
+            rel = dest[len(b) :].lstrip("/").replace("/", "\\")
+            return f"\\\\{host}\\{share}\\{rel}"
+    return dest
+
+
+def register_owned_movie(config: AppConfig, title_id: int, dest: str, release_name: str) -> int:
+    """Catalog a just-imported movie as an ``OwnedFile`` linked to its known Title.
+
+    Parses the *release* name (which keeps quality tags the clean library filename
+    drops) for resolution/codec. Idempotent on the UNC path. Returns the owned-file
+    id so callers can fetch its subtitles immediately.
+    """
+
+    from ...scanner.parse import parse_media
+
+    parsed = parse_media(release_name, kind_hint=TitleKind.movie)
+    unc = _mount_to_unc(dest, config)
+    try:
+        size = os.path.getsize(dest)
+    except OSError:
+        size = None
+    with session_scope() as s:
+        owned = s.scalar(sa_select(OwnedFile).where(OwnedFile.path == unc))
+        if owned is None:
+            owned = OwnedFile(path=unc, title_id=title_id, kind=TitleKind.movie)
+            s.add(owned)
+        owned.title_id = title_id  # keep the enriched candidate Title, don't re-resolve
+        owned.kind = TitleKind.movie
+        if parsed is not None:
+            owned.resolution = parsed.resolution
+            owned.codec = parsed.codec
+            owned.container = parsed.container
+        owned.size_bytes = size
+        s.flush()
+        return owned.id
 
 
 async def remove_torrents(config: AppConfig, hashes: list[str]) -> None:
@@ -262,7 +311,7 @@ async def sync_downloads_torrent(config: AppConfig) -> SyncStats:
         # Include "completed": a torrent that finished but whose import failed sits
         # there awaiting a retry.
         rows: list[tuple[int, str]] = []
-        meta: dict[int, tuple[TitleKind, str, int | None]] = {}
+        meta: dict[int, tuple[int, TitleKind, str, int | None]] = {}
         for dl, title in s.execute(
             sa_select(Download, Title)
             .join(Candidate, Candidate.id == Download.candidate_id)
@@ -272,7 +321,7 @@ async def sync_downloads_torrent(config: AppConfig) -> SyncStats:
             if not dl.external_id:
                 continue
             rows.append((dl.id, dl.external_id))
-            meta[dl.id] = (title.kind, title.title, title.year)
+            meta[dl.id] = (title.id, title.kind, title.title, title.year)
 
     stats = SyncStats()
     # A large NAS copy that fails (e.g. the SMB mount drops mid-transfer) tends to
@@ -292,9 +341,9 @@ async def sync_downloads_torrent(config: AppConfig) -> SyncStats:
             if st is not None and st.complete:
                 if imports_blocked:
                     continue  # deferred to the next sweep after an earlier failure
-                kind, title, year = meta[download_id]
+                title_id, kind, title, year = meta[download_id]
                 err = await _finish_completed(
-                    config, client, stats, download_id, infohash, st, kind, title, year
+                    config, client, stats, download_id, infohash, st, title_id, kind, title, year
                 )
                 if err is not None:
                     imports_blocked = True
@@ -331,6 +380,7 @@ async def _finish_completed(
     download_id: int,
     infohash: str,
     st: TorrentStatus,
+    title_id: int,
     kind: TitleKind,
     title: str,
     year: int | None,
@@ -394,4 +444,18 @@ async def _finish_completed(
             if cand is not None and cand.status is not CandidateStatus.rejected:
                 cand.status = CandidateStatus.imported
     stats.completed += 1
+
+    # Complete the pipeline: catalog the file (so it's "owned") and fetch its
+    # subtitles now, instead of waiting for a NAS rescan + a full sweep. Best-effort
+    # — a failure here never un-imports the movie.
+    if kind is TitleKind.movie and dest is not None:
+        try:
+            owned_id = register_owned_movie(config, title_id, dest, st.name or title)
+            if config.subtitles.backend == "native":
+                from ...subtitles.native.service import fetch_for_owned_file
+
+                got = await fetch_for_owned_file(config, owned_id)
+                log.info("import.subtitles", download=download_id, title=title, fetched=len(got))
+        except Exception as exc:
+            log.warning("import.catalog_failed", download=download_id, detail=redact_exc(exc))
     return None
