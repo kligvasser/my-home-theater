@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .queries import (
+    CANDIDATE_SORTS,
     TITLE_SORTS,
     CandidateRow,
     Coverage,
@@ -19,6 +20,7 @@ from .queries import (
 )
 
 __all__ = [
+    "CANDIDATE_SORTS",
     "TITLE_SORTS",
     "CandidateRow",
     "Coverage",

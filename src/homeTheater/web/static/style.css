@@ -213,3 +213,8 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .gaps td.poster { width: 40px; padding: 4px; }
 .gaps td.poster img { width: 36px; height: 54px; object-fit: cover; border-radius: 4px; display: block; }
 .gaps .r { white-space: nowrap; }
+
+/* Solid fallbacks first (older Safari lacks color-mix), then the nicer tint. */
+button.danger { background: #33222a; }
+button.danger { background: color-mix(in srgb, var(--fail) 18%, var(--panel)); }
+.lockbtn { background: var(--panel-2); }

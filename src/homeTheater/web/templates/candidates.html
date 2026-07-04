@@ -5,11 +5,30 @@
 
 <nav class="statusfilter">
   {% for st in ["new", "approved", "rejected", "queued", "downloading", "imported", "failed"] %}
-    <a href="/candidates?status={{ st }}" class="{{ 'active' if status == st }}">
+    <a href="/candidates?status={{ st }}&kind={{ kind }}&sort={{ sort }}"
+       class="{{ 'active' if status == st }}">
       {{ st }} <span class="count">{{ counts.get(st, 0) }}</span>
     </a>
   {% endfor %}
 </nav>
+
+<form class="filters" method="get" action="/candidates">
+  <input type="hidden" name="status" value="{{ status }}" />
+  <select name="kind">
+    <option value="" {{ 'selected' if not kind }}>🎬📺 All kinds</option>
+    <option value="movie" {{ 'selected' if kind == 'movie' }}>🎬 Movies</option>
+    <option value="series" {{ 'selected' if kind == 'series' }}>📺 Series</option>
+  </select>
+  <select name="sort">
+    <option value="score" {{ 'selected' if sort == 'score' }}>Sort: score</option>
+    <option value="taste" {{ 'selected' if sort == 'taste' }}>Sort: taste match</option>
+    <option value="year" {{ 'selected' if sort == 'year' }}>Sort: release year</option>
+    <option value="rating" {{ 'selected' if sort == 'rating' }}>Sort: IMDb rating</option>
+    <option value="added" {{ 'selected' if sort == 'added' }}>Sort: newest first</option>
+  </select>
+  <button type="submit">Apply</button>
+  <span class="muted">{{ candidates | length }} shown</span>
+</form>
 
 <section class="findmore">
   <form id="cand-search" class="filters">

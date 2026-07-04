@@ -191,3 +191,30 @@ def test_library_sort(config_file: Path) -> None:
     assert [t.title for t in by_rating] == ["Old", "New"]
     by_title, _ = list_titles(sort="title")
     assert [t.title for t in by_title] == ["New", "Old"]
+
+
+def test_candidate_sort_and_kind_filter(config_file: Path) -> None:
+    _reset()
+    from homeTheater.dashboard import list_candidates
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate, CandidateSource, Title
+
+    init_db()
+    with session_scope() as s:
+        movie = Title(tmdb_id=1, title="Old Movie", year=1999, kind=TitleKind.movie,
+                      imdb_rating=9.0)
+        series = Title(tmdb_id=1, title="New Series", year=2024, kind=TitleKind.series,
+                       imdb_rating=7.0)
+        s.add_all([movie, series])
+        s.flush()
+        s.add(Candidate(title_id=movie.id, source=CandidateSource.discovery, score=10.0,
+                        features={"taste": {"score": 0.2, "like": []}}))
+        s.add(Candidate(title_id=series.id, source=CandidateSource.discovery, score=20.0,
+                        features={"taste": {"score": 0.9, "like": []}}))
+
+    assert [c.title for c in list_candidates(sort="score")] == ["New Series", "Old Movie"]
+    assert [c.title for c in list_candidates(sort="year")] == ["New Series", "Old Movie"]
+    assert [c.title for c in list_candidates(sort="rating")] == ["Old Movie", "New Series"]
+    assert [c.title for c in list_candidates(sort="taste")] == ["New Series", "Old Movie"]
+    assert [c.title for c in list_candidates(kind="movie")] == ["Old Movie"]
+    assert [c.title for c in list_candidates(kind="series", sort="year")] == ["New Series"]

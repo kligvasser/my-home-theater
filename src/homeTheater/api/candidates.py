@@ -32,11 +32,15 @@ class ManualAdd(BaseModel):
 @router.get("")
 def api_list(
     status: CandidateStatus | None = CandidateStatus.new,
+    kind: TitleKind | None = None,
+    sort: str = Query("score", pattern="^(score|taste|year|rating|added)$"),
     limit: int = Query(100, ge=1, le=500),
 ) -> dict[str, Any]:
     return {
         "counts": candidate_counts(),
-        "items": [asdict(c) for c in list_candidates(status=status, limit=limit)],
+        "items": [
+            asdict(c) for c in list_candidates(status=status, kind=kind, sort=sort, limit=limit)
+        ],
     }
 
 

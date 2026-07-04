@@ -304,18 +304,40 @@ def list_missing_subtitles(lang: str = DEFAULT_SUB_LANG, limit: int = 500) -> li
         return rows
 
 
-def list_candidates(status: str | None = "new", limit: int = 100) -> list[CandidateRow]:
+# Candidate sort options: query-param value -> ordering. "taste" sorts on the
+# snapshot's taste score (JSON), done in Python after the fetch.
+CANDIDATE_SORTS = ("score", "taste", "year", "rating", "added")
+
+
+def list_candidates(
+    status: str | None = "new",
+    kind: str | None = None,
+    sort: str = "score",
+    limit: int = 100,
+) -> list[CandidateRow]:
     """Ranked candidate queue. Defaults to the pending (``new``) queue."""
+
+    order: tuple[Any, ...]
+    if sort == "year":
+        order = (Title.year.is_(None), Title.year.desc(), Candidate.score.desc())
+    elif sort == "rating":
+        order = (Title.imdb_rating.is_(None), Title.imdb_rating.desc(), Candidate.score.desc())
+    elif sort == "added":
+        order = (Candidate.id.desc(),)
+    else:  # score (and taste: re-sorted below)
+        order = (Candidate.score.is_(None), Candidate.score.desc())
 
     with session_scope() as s:
         stmt = (
             select(Candidate, Title)
             .join(Title, Title.id == Candidate.title_id)
-            .order_by(Candidate.score.is_(None), Candidate.score.desc())
+            .order_by(*order)
             .limit(limit)
         )
         if status:
             stmt = stmt.where(Candidate.status == status)
+        if kind in (TitleKind.movie, TitleKind.series):
+            stmt = stmt.where(Title.kind == kind)
         rows = []
         for cand, title in s.execute(stmt).all():
             taste = (cand.features or {}).get("taste") or {}
@@ -337,6 +359,8 @@ def list_candidates(status: str | None = "new", limit: int = 100) -> list[Candid
                     taste_like=list(taste.get("like") or [])[:4],
                 )
             )
+        if sort == "taste":
+            rows.sort(key=lambda r: (r.taste_score is None, -(r.taste_score or 0)))
         return rows
 
 

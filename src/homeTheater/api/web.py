@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse
 from .. import __version__
 from ..config import get_config, load_overrides
 from ..dashboard import (
+    CANDIDATE_SORTS,
     TITLE_SORTS,
     candidate_counts,
     get_stats,
@@ -72,19 +73,30 @@ def library(
 
 
 @router.get("/candidates", response_class=HTMLResponse)
-def candidates(request: Request, status: str = "new") -> HTMLResponse:
+def candidates(
+    request: Request,
+    status: str = "new",
+    kind: str | None = None,
+    sort: str = "score",
+) -> HTMLResponse:
     # Unknown ?status= values would otherwise blow up at enum binding; fall back.
     try:
         shown = CandidateStatus(status)
     except ValueError:
         shown = CandidateStatus.new
+    if sort not in CANDIDATE_SORTS:
+        sort = "score"
+    if kind not in ("movie", "series"):
+        kind = None
     return templates.TemplateResponse(
         request,
         "candidates.html",
         {
-            "candidates": list_candidates(status=shown),
+            "candidates": list_candidates(status=shown, kind=kind, sort=sort),
             "counts": candidate_counts(),
             "status": str(shown),
+            "kind": kind or "",
+            "sort": sort,
             "active": "candidates",
             "version": __version__,
         },
