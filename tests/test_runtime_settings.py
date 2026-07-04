@@ -178,13 +178,18 @@ def test_library_sort(config_file: Path) -> None:
     _reset()
     from homeTheater.dashboard import list_titles
     from homeTheater.db import init_db, session_scope
-    from homeTheater.db.models import Title
+    from homeTheater.db.models import OwnedFile, Title
 
     init_db()
+    # Library lists only OWNED titles, so both need a file on disk.
     with session_scope() as s:
-        s.add(Title(title="Old", year=1990, kind=TitleKind.movie, imdb_rating=9.0))
+        t = Title(title="Old", year=1990, kind=TitleKind.movie, imdb_rating=9.0)
+        t.owned_files = [OwnedFile(path="/Movies/old.mkv", kind=TitleKind.movie)]
+        s.add(t)
     with session_scope() as s:
-        s.add(Title(title="New", year=2024, kind=TitleKind.movie, imdb_rating=6.0))
+        t = Title(title="New", year=2024, kind=TitleKind.movie, imdb_rating=6.0)
+        t.owned_files = [OwnedFile(path="/Movies/new.mkv", kind=TitleKind.movie)]
+        s.add(t)
 
     by_added, _ = list_titles(sort="added")
     assert [t.title for t in by_added] == ["New", "Old"]  # newest catalog entry first

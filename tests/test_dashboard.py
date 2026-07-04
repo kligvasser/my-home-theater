@@ -160,3 +160,22 @@ def test_json_api(config_file: Path) -> None:
         titles = client.get("/api/titles", params={"kind": "movie"}).json()
         assert titles["total"] == 1
         assert titles["items"][0]["title"] == "The Matrix"
+
+
+def test_library_excludes_unowned_candidate_titles(config_file: Path) -> None:
+    _reset()
+    from homeTheater.dashboard import get_stats, list_titles
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import OwnedFile, Title, TitleKind
+
+    init_db()
+    with session_scope() as s:
+        owned = Title(title="Owned Movie", year=2020, kind=TitleKind.movie)
+        owned.owned_files = [OwnedFile(path="/Movies/o.mkv", kind=TitleKind.movie)]
+        # a discovery candidate: a catalog Title with NO file on disk
+        s.add_all([owned, Title(title="Unreleased 2026", year=2026, kind=TitleKind.movie)])
+
+    rows, total = list_titles()
+    assert total == 1 and [r.title for r in rows] == ["Owned Movie"]
+    # stats count owned only, matching the library
+    assert get_stats().movies == 1 and get_stats().total_titles == 1

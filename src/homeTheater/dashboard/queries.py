@@ -110,10 +110,23 @@ class CandidateRow:
 
 def get_stats(sub_lang: str = DEFAULT_SUB_LANG, sub_langs: list[str] | None = None) -> LibraryStats:
     langs = sub_langs or [sub_lang]
+    # Library stats describe what you OWN, not discovery candidates (catalog rows
+    # with no file). Every Title aggregation is scoped to owned titles.
+    owned = Title.owned_files.any() | (Title.arr_has_file.is_(True))
     with session_scope() as s:
         stats = LibraryStats()
-        stats.movies = s.scalar(select(func.count()).where(Title.kind == TitleKind.movie)) or 0
-        stats.series = s.scalar(select(func.count()).where(Title.kind == TitleKind.series)) or 0
+        stats.movies = (
+            s.scalar(
+                select(func.count()).select_from(Title).where(Title.kind == TitleKind.movie, owned)
+            )
+            or 0
+        )
+        stats.series = (
+            s.scalar(
+                select(func.count()).select_from(Title).where(Title.kind == TitleKind.series, owned)
+            )
+            or 0
+        )
         stats.total_titles = stats.movies + stats.series
         stats.files = s.scalar(select(func.count()).select_from(OwnedFile)) or 0
         stats.total_size_bytes = (
@@ -135,6 +148,8 @@ def get_stats(sub_lang: str = DEFAULT_SUB_LANG, sub_langs: list[str] | None = No
             for name, cnt in s.execute(
                 select(Genre.name, func.count(func.distinct(TitleGenre.title_id)))
                 .join(TitleGenre, TitleGenre.genre_id == Genre.id)
+                .join(Title, Title.id == TitleGenre.title_id)
+                .where(owned)
                 .group_by(Genre.name)
                 .order_by(func.count(func.distinct(TitleGenre.title_id)).desc())
             ).all()
@@ -147,7 +162,7 @@ def get_stats(sub_lang: str = DEFAULT_SUB_LANG, sub_langs: list[str] | None = No
             (int(dec), cnt)
             for dec, cnt in s.execute(
                 select(decade.label("decade"), func.count())
-                .where(Title.year.is_not(None))
+                .where(Title.year.is_not(None), owned)
                 .group_by("decade")
                 .order_by("decade")
             ).all()
@@ -159,20 +174,22 @@ def get_stats(sub_lang: str = DEFAULT_SUB_LANG, sub_langs: list[str] | None = No
             (float(b), cnt)
             for b, cnt in s.execute(
                 select(bucket, func.count())
-                .where(Title.imdb_rating.is_not(None))
+                .where(Title.imdb_rating.is_not(None), owned)
                 .group_by("bucket")
                 .order_by("bucket")
             ).all()
         ]
         stats.avg_imdb = s.scalar(
-            select(func.round(func.avg(Title.imdb_rating), 2)).where(Title.imdb_rating.is_not(None))
+            select(func.round(func.avg(Title.imdb_rating), 2)).where(
+                Title.imdb_rating.is_not(None), owned
+            )
         )
 
         stats.languages = [
             (lang, cnt)
             for lang, cnt in s.execute(
                 select(Title.original_language, func.count())
-                .where(Title.original_language.is_not(None))
+                .where(Title.original_language.is_not(None), owned)
                 .group_by(Title.original_language)
                 .order_by(func.count().desc())
                 .limit(10)
@@ -275,15 +292,21 @@ def list_titles(
     sort: str | None = "added",
     direction: str | None = None,
 ) -> tuple[list[TitleRow], int]:
-    """Filtered, fully-sortable, paginated title list.
+    """Filtered, fully-sortable, paginated list of *owned* titles.
 
+    The Library is what you actually have (a file on the NAS, or an arr-reported
+    file) — NOT discovery candidates, which are catalog rows with no owned files.
     Sorting is done in Python (the catalog is small) so computed columns — files,
     resolution, subtitle coverage, genres — sort as naturally as the DB columns.
     """
 
     page = max(page, 1)
     with session_scope() as s:
-        stmt = select(Title).options(selectinload(Title.genres), selectinload(Title.owned_files))
+        stmt = (
+            select(Title).options(selectinload(Title.genres), selectinload(Title.owned_files))
+            # Owned only: has a scanned/imported file, or an arr reports one.
+            .where(Title.owned_files.any() | (Title.arr_has_file.is_(True)))
+        )
         if q:
             stmt = stmt.where(Title.title.ilike(f"%{q}%"))
         if kind in (TitleKind.movie, TitleKind.series):
