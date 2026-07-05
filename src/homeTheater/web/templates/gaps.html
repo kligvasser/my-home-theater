@@ -46,6 +46,12 @@ library, queue, or reject history. <b>add</b> creates a candidate (🔒 unlock f
       </td>
       <td>
         {{ r.title }}
+        <div class="clinks">
+          <a class="extlink imdb" href="{{ r.imdb_url }}" target="_blank"
+             rel="noopener noreferrer" title="Search this title on IMDb (new tab)">IMDb ↗</a>
+          <a class="extlink tmdb" href="{{ r.tmdb_url }}" target="_blank"
+             rel="noopener noreferrer" title="Open on TMDb in a new tab">TMDb ↗</a>
+        </div>
         {% if r.overview %}
         <details class="overview"><summary>description</summary><p>{{ r.overview }}</p></details>
         {% endif %}

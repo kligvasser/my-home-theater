@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from math import ceil
+from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse
@@ -242,6 +243,10 @@ async def gaps(
                         continue
                     if needle and needle not in t.title.lower():
                         continue
+                    segment = "tv" if k is TitleKind.series else "movie"
+                    # No imdb_id in TMDb list payloads (that needs a per-title
+                    # details call this page avoids), so IMDb is a title+year search.
+                    imdb_q = quote_plus(f"{t.title} {t.year}" if t.year else t.title)
                     rows.append(
                         {
                             "tmdb_id": t.tmdb_id,
@@ -252,6 +257,8 @@ async def gaps(
                             "votes": t.tmdb_votes,
                             "poster_url": t.poster_url,
                             "overview": t.overview,
+                            "tmdb_url": f"https://www.themoviedb.org/{segment}/{t.tmdb_id}",
+                            "imdb_url": f"https://www.imdb.com/find/?q={imdb_q}&s=tt",
                         }
                     )
         rows.sort(key=lambda r: float(r["rating"] or 0.0), reverse=True)  # type: ignore[arg-type]
