@@ -64,6 +64,14 @@
         {% if c.imdb_votes is not none %}<span class="muted">{{ "{:,}".format(c.imdb_votes) }} votes</span>{% endif %}
         {% if c.score is not none %}<span class="muted">score {{ c.score }}</span>{% endif %}
       </div>
+      {% if c.imdb_url or c.tmdb_url %}
+      <div class="clinks">
+        {% if c.imdb_url %}<a class="extlink imdb" href="{{ c.imdb_url }}" target="_blank"
+          rel="noopener noreferrer" title="Open on IMDb in a new tab">IMDb ↗</a>{% endif %}
+        {% if c.tmdb_url %}<a class="extlink tmdb" href="{{ c.tmdb_url }}" target="_blank"
+          rel="noopener noreferrer" title="Open on TMDb in a new tab">TMDb ↗</a>{% endif %}
+      </div>
+      {% endif %}
       {% if c.taste_like %}
       <p class="taste small">🎯 {{ "%.0f"|format(c.taste_score * 100) }}% taste match ·
         like {{ c.taste_like | join(", ") }}</p>

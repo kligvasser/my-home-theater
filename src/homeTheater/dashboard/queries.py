@@ -106,6 +106,23 @@ class CandidateRow:
     taste_score: float | None = None
     taste_like: list[str] = field(default_factory=list)
     release_date: str | None = None  # ISO yyyy-mm-dd (finer than year)
+    tmdb_id: int | None = None
+    imdb_id: str | None = None  # e.g. "tt0133093"
+
+    @property
+    def tmdb_url(self) -> str | None:
+        """Public TMDb page for this title (``tv`` path for series)."""
+        if self.tmdb_id is None:
+            return None
+        segment = "tv" if self.kind == "series" else "movie"
+        return f"https://www.themoviedb.org/{segment}/{self.tmdb_id}"
+
+    @property
+    def imdb_url(self) -> str | None:
+        """Public IMDb page for this title, when we have its id."""
+        if not self.imdb_id:
+            return None
+        return f"https://www.imdb.com/title/{self.imdb_id}/"
 
 
 def get_stats(sub_lang: str = DEFAULT_SUB_LANG, sub_langs: list[str] | None = None) -> LibraryStats:
@@ -424,6 +441,8 @@ def list_candidates(
                     taste_score=taste.get("score"),
                     taste_like=list(taste.get("like") or [])[:4],
                     release_date=title.release_date,
+                    tmdb_id=title.tmdb_id,
+                    imdb_id=title.imdb_id,
                 )
             )
 
