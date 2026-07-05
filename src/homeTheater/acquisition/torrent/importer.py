@@ -21,8 +21,11 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import subprocess
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib.parse import quote
 
 from ...config import AppConfig
 from ...errors import NotConfiguredError
@@ -57,6 +60,63 @@ def _copy_stream(fsrc: Any, fdst: Any, total: int, on_progress: ProgressCb) -> i
         if on_progress is not None:
             on_progress(written, total)
     return written
+
+
+@dataclass(frozen=True, slots=True)
+class SmbMount:
+    """Enough to re-mount a dropped ``/Volumes/<share>`` SMB mount (WD MyCloud and
+    other guest shares drop the mount during sustained multi-GB copies)."""
+
+    host: str
+    share: str
+    username: str | None
+    password: str | None
+
+    @property
+    def url(self) -> str:
+        user = self.username or "guest"
+        auth = f"{user}:{quote(self.password, safe='')}" if self.password else user
+        return f"smb://{auth}@{self.host}/{self.share}"
+
+
+def ensure_mounted(base_dir: str, mount: SmbMount | None) -> None:
+    """Guard a ``/Volumes/<share>`` library path before writing to it.
+
+    A dropped SMB mount leaves the path either gone or a bare root-owned stub, so
+    a copy fails with a cryptic ``Permission denied: '/Volumes/…'``. For such paths
+    we verify the mount and, given credentials, try one ``mount volume`` re-mount so
+    a dropped share self-heals instead of failing the whole sync run. Plain local
+    dirs (not under ``/Volumes``) are left alone — ``makedirs`` handles those.
+    """
+
+    if not base_dir.startswith("/Volumes/"):
+        return
+    if os.path.ismount(base_dir):
+        return
+    if mount is None:
+        raise ImportError_(
+            f"NAS share not mounted at {base_dir!r} — remount it "
+            "(Finder → Go → Connect to Server) and retry."
+        )
+    log.warning("import.mount_dropped", base_dir=base_dir)
+    try:
+        # Never surface the raw command/exception: mount.url embeds the password.
+        proc = subprocess.run(
+            ["osascript", "-e", f'mount volume "{mount.url}"'],
+            capture_output=True,
+            timeout=30,
+        )
+    except Exception:
+        raise ImportError_(
+            f"NAS share not mounted at {base_dir!r}; auto-remount timed out. "
+            "Remount it manually and retry."
+        ) from None
+    if proc.returncode != 0 or not os.path.ismount(base_dir):
+        raise ImportError_(
+            f"NAS share not mounted at {base_dir!r}; auto-remount failed. "
+            "Remount it manually and retry."
+        )
+    log.info("import.remounted", base_dir=base_dir)
 
 
 class LibraryTarget(Protocol):
@@ -143,7 +203,19 @@ def build_library_target(config: AppConfig) -> LibraryTarget:
 
     base = config.torrent.library_base_dir
     if base:
-        return LocalLibraryTarget(base)
+        # For a /Volumes/<share> mount, carry the SMB creds so a dropped mount can
+        # self-heal mid-sync (guest shares drop during big copies).
+        mount: SmbMount | None = None
+        if base.startswith("/Volumes/") and config.secrets.smb_host:
+            mount = SmbMount(
+                host=config.secrets.smb_host,
+                share=os.path.basename(base.rstrip("/")),
+                username=config.secrets.smb_user,
+                password=(
+                    config.secrets.smb_pass.get_secret_value() if config.secrets.smb_pass else None
+                ),
+            )
+        return LocalLibraryTarget(base, mount)
     secrets = config.secrets
     if not secrets.smb_host or not config.nas.share:
         raise NotConfiguredError(
@@ -161,12 +233,14 @@ def build_library_target(config: AppConfig) -> LibraryTarget:
 class LocalLibraryTarget:
     """Copy into a local (or locally-mounted) directory."""
 
-    def __init__(self, base_dir: str) -> None:
+    def __init__(self, base_dir: str, mount: SmbMount | None = None) -> None:
         self.base_dir = base_dir
+        self.mount = mount
 
     def import_file(
         self, local_src: str, rel_dir: str, filename: str, on_progress: ProgressCb = None
     ) -> str:
+        ensure_mounted(self.base_dir, self.mount)  # self-heal a dropped NAS mount
         dest_dir = os.path.join(self.base_dir, *rel_dir.split("/"))
         os.makedirs(dest_dir, exist_ok=True)
         dest = os.path.join(dest_dir, filename)

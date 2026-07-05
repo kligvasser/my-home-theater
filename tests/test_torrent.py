@@ -4,6 +4,7 @@ dry-run/real/sync flows — all external calls mocked via respx."""
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -453,6 +454,53 @@ def test_import_completed_movie_local_target(
 
     assert dest.endswith("Movies/The Matrix (1999)/The Matrix (1999).mkv")
     assert Path(dest).read_bytes() == b"movie" * 100
+
+
+def test_smb_mount_url_encodes_password() -> None:
+    from homeTheater.acquisition.torrent.importer import SmbMount
+
+    m = SmbMount(host="nas.local", share="Media", username="me", password="p@ss w#rd")
+    assert m.url == "smb://me:p%40ss%20w%23rd@nas.local/Media"
+
+
+def test_ensure_mounted_ignores_plain_local_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Not under /Volumes -> makedirs handles it; never touch the mount machinery.
+    import homeTheater.acquisition.torrent.importer as imp
+
+    monkeypatch.setattr(
+        imp.subprocess, "run", lambda *a, **k: pytest.fail("should not remount local dir")
+    )
+    imp.ensure_mounted("/Users/x/library", None)  # returns without raising
+
+
+def test_ensure_mounted_dropped_without_creds_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    import homeTheater.acquisition.torrent.importer as imp
+
+    monkeypatch.setattr(imp.os.path, "ismount", lambda p: False)
+    with pytest.raises(imp.ImportError_, match="not mounted"):
+        imp.ensure_mounted("/Volumes/Elements", None)
+
+
+def test_ensure_mounted_auto_remounts(monkeypatch: pytest.MonkeyPatch) -> None:
+    import homeTheater.acquisition.torrent.importer as imp
+    from homeTheater.acquisition.torrent.importer import SmbMount
+
+    calls: list[list[str]] = []
+    mounted = {"v": False}  # flips to True after the remount runs
+
+    def fake_run(cmd: list[str], **kw: object) -> object:
+        calls.append(cmd)
+        mounted["v"] = True
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(imp.os.path, "ismount", lambda p: mounted["v"])
+    monkeypatch.setattr(imp.subprocess, "run", fake_run)
+
+    mount = SmbMount(host="nas.local", share="Elements", username="me", password="pw")
+    imp.ensure_mounted("/Volumes/Elements", mount)  # must not raise
+
+    assert len(calls) == 1
+    assert 'mount volume "smb://me:pw@nas.local/Elements"' in calls[0]
 
 
 @respx.mock
