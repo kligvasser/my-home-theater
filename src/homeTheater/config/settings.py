@@ -190,9 +190,7 @@ class Organizer(BaseModel):
     movie_file_format: str = "{Movie Title} ({Release Year}) {Quality Full}"
     series_folder_format: str = "{Series Title}"
     season_folder_format: str = "Season {season:00}"
-    episode_file_format: str = (
-        "{Series Title} - S{season:00}E{episode:00} - {Episode Title}"
-    )
+    episode_file_format: str = "{Series Title} - S{season:00}E{episode:00} - {Episode Title}"
     subs_folder: str = "Subs"
 
 

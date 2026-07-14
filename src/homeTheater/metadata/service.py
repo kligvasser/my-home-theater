@@ -176,17 +176,13 @@ def _merge_title(session: Session, dup: Title, canonical: Title) -> None:
     """Re-point a duplicate title's children to the canonical row and delete it."""
 
     for model in (OwnedFile, Candidate, Subtitle):
-        session.execute(
-            update(model).where(model.title_id == dup.id).values(title_id=canonical.id)
-        )
+        session.execute(update(model).where(model.title_id == dup.id).values(title_id=canonical.id))
     session.expire(dup)
     session.delete(dup)
 
 
 def _apply_ratings(title: Title, ratings: OmdbRatings | None, stats: EnrichStats) -> None:
-    if ratings is not None and (
-        ratings.imdb_rating is not None or ratings.imdb_votes is not None
-    ):
+    if ratings is not None and (ratings.imdb_rating is not None or ratings.imdb_votes is not None):
         title.imdb_rating = ratings.imdb_rating
         title.imdb_votes = ratings.imdb_votes
         stats.ratings_updated += 1

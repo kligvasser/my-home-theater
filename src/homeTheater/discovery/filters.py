@@ -63,9 +63,7 @@ def evaluate(
         return FilterOutcome(False, f"IMDb {imdb_rating:.1f} < {thresholds.min_imdb_rating}")
 
     if imdb_votes < thresholds.min_imdb_votes:
-        return FilterOutcome(
-            False, f"IMDb votes {imdb_votes:,} < {thresholds.min_imdb_votes:,}"
-        )
+        return FilterOutcome(False, f"IMDb votes {imdb_votes:,} < {thresholds.min_imdb_votes:,}")
 
     # Missing TMDb votes count as 0 — same policy as the IMDb checks above.
     if (tmdb_votes or 0) < thresholds.min_tmdb_votes:

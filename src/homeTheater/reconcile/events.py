@@ -83,9 +83,7 @@ def parse_sonarr(payload: dict[str, Any]) -> ImportEvent | None:
     episode_file = payload.get("episodeFile") or {}
     first = episodes[0] if episodes else {}
     # A multi-episode file (S01E01E02) arrives as one event listing all episodes.
-    numbers = sorted(
-        n for e in episodes if isinstance(n := e.get("episodeNumber"), int)
-    )
+    numbers = sorted(n for e in episodes if isinstance(n := e.get("episodeNumber"), int))
     return ImportEvent(
         kind=TitleKind.series,
         title=series.get("title", ""),

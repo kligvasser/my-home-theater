@@ -253,9 +253,7 @@ def main() -> None:
     sub.add_parser("reconcile", help="reconcile Radarr/Sonarr owned items into the catalog")
     sub.add_parser("insights", help="cluster the owned library and print the taste profile")
     sub.add_parser("trakt-auth", help="authorize Trakt (device flow) for the watchlist source")
-    sub.add_parser(
-        "apply-naming", help="push the folder-structure policy to Radarr/Sonarr/Bazarr"
-    )
+    sub.add_parser("apply-naming", help="push the folder-structure policy to Radarr/Sonarr/Bazarr")
     sub.add_parser("train", help="train the preference classifier from approve/reject labels")
     sub.add_parser("backup", help="write a timestamped SQLite backup")
     args = parser.parse_args()

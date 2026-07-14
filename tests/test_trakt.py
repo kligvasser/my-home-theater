@@ -135,9 +135,7 @@ async def test_watchlist_source_bypasses_thresholds(
             json=[{"movie": {"title": "Tiny Indie", "year": 2024, "ids": {"tmdb": 777}}}],
         )
     )
-    respx.get(f"{TRAKT}/sync/watchlist/shows").mock(
-        return_value=httpx.Response(200, json=[])
-    )
+    respx.get(f"{TRAKT}/sync/watchlist/shows").mock(return_value=httpx.Response(200, json=[]))
     # Low votes + no IMDb data: would fail every threshold if filtered.
     respx.get(f"{TMDB}/movie/777").mock(
         return_value=httpx.Response(

@@ -36,9 +36,7 @@ def extract_features(title: Title) -> dict[str, Any]:
         "genres": genres,
         "imdb_rating": title.imdb_rating,
         "imdb_votes": title.imdb_votes,
-        "imdb_votes_log10": (
-            round(math.log10(title.imdb_votes), 3) if title.imdb_votes else None
-        ),
+        "imdb_votes_log10": (round(math.log10(title.imdb_votes), 3) if title.imdb_votes else None),
         "tmdb_rating": title.tmdb_rating,
         "tmdb_votes": title.tmdb_votes,
         "popularity": title.popularity,

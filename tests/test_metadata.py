@@ -136,9 +136,7 @@ MATRIX_FEATURES = {
         ],
     },
     "release_dates": {
-        "results": [
-            {"iso_3166_1": "US", "release_dates": [{"certification": "R", "type": 3}]}
-        ]
+        "results": [{"iso_3166_1": "US", "release_dates": [{"certification": "R", "type": 3}]}]
     },
 }
 

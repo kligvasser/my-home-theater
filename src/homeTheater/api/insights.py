@@ -55,9 +55,7 @@ async def api_train() -> dict[str, Any]:
 
 
 @router.get("/similarity")
-async def api_similarity(
-    tmdb_id: int, kind: TitleKind = Query(TitleKind.movie)
-) -> dict[str, Any]:
+async def api_similarity(tmdb_id: int, kind: TitleKind = Query(TitleKind.movie)) -> dict[str, Any]:
     """How close a TMDb title is to the owned library (0..1 + nearest titles)."""
 
     from ..features import FEATURES_VERSION  # noqa: F401  (feature shape is canonical)

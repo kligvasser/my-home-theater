@@ -291,9 +291,7 @@ async def test_sync_marks_stale_download_failed(
     from homeTheater.db.models import Candidate, CandidateStatus, Download
 
     with session_scope() as s:
-        dl = Download(
-            candidate_id=cid, external_id="42", state="downloading", release="The Matrix"
-        )
+        dl = Download(candidate_id=cid, external_id="42", state="downloading", release="The Matrix")
         s.add(dl)
         s.flush()
         dl.created_at = datetime.now(UTC) - timedelta(hours=7)

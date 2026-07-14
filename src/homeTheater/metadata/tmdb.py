@@ -132,9 +132,7 @@ class TMDbClient:
                     return int(r["id"])
         return int(results[0]["id"])
 
-    async def search_results(
-        self, title: str, kind: TitleKind, limit: int = 8
-    ) -> list[TmdbTitle]:
+    async def search_results(self, title: str, kind: TitleKind, limit: int = 8) -> list[TmdbTitle]:
         """Top search matches as stubs (id/title/year/poster) — for the UI's
         search-and-add box, unlike :meth:`search` which picks one id."""
 

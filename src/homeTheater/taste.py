@@ -141,9 +141,7 @@ class LibraryIndex:
             centroid = best_model.cluster_centers_[c]
             top_idx = np.argsort(centroid)[::-1][:5]
             top_terms = [_pretty_token(t) for t in terms[top_idx] if centroid.max() > 0]
-            dists = np.linalg.norm(
-                self._matrix[members].toarray() - centroid, axis=1
-            )
+            dists = np.linalg.norm(self._matrix[members].toarray() - centroid, axis=1)
             exemplars = [self.names[members[i]] for i in np.argsort(dists)[:8]]
             out.append(
                 Cluster(label=", ".join(top_terms[:4]), size=int(members.size), titles=exemplars)

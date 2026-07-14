@@ -87,15 +87,11 @@ def _find_title(
     """
 
     if tmdb_id is not None:
-        title = session.scalar(
-            select(Title).where(Title.tmdb_id == tmdb_id, Title.kind == kind)
-        )
+        title = session.scalar(select(Title).where(Title.tmdb_id == tmdb_id, Title.kind == kind))
         if title is not None:
             return title
     if tvdb_id is not None:
-        title = session.scalar(
-            select(Title).where(Title.tvdb_id == tvdb_id, Title.kind == kind)
-        )
+        title = session.scalar(select(Title).where(Title.tvdb_id == tvdb_id, Title.kind == kind))
         if title is not None:
             return title
     if imdb_id:
@@ -243,18 +239,14 @@ async def reconcile_library(config: AppConfig) -> ReconcileStats:
                                 select(OwnedFile).where(OwnedFile.path == ref.path)
                             )
                             if owned is None:
-                                session.add(
-                                    OwnedFile(path=ref.path, title_id=title.id, kind=kind)
-                                )
+                                session.add(OwnedFile(path=ref.path, title_id=title.id, kind=kind))
                                 stats.files_created += 1
                         if _mark_candidate_imported(session, title.id):
                             stats.imported += 1
 
                 # Items deleted from the arr no longer count as arr-owned.
                 with session_scope() as session:
-                    stale_q = select(Title).where(
-                        Title.kind == kind, Title.arr_has_file.is_(True)
-                    )
+                    stale_q = select(Title).where(Title.kind == kind, Title.arr_has_file.is_(True))
                     if seen_title_ids:
                         stale_q = stale_q.where(Title.id.not_in(seen_title_ids))
                     for t in session.scalars(stale_q).all():
