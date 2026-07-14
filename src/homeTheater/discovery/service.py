@@ -256,6 +256,8 @@ def _persist(enriched: list[_Enriched], config: AppConfig, stats: DiscoveryStats
 
             if item.disc.season is not None:
                 feats["season"] = item.disc.season
+                if item.disc.season_episodes:
+                    feats["season_episodes"] = item.disc.season_episodes
 
             session.add(
                 Candidate(

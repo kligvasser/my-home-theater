@@ -32,6 +32,7 @@ class Discovered:
     origin: CandidateOrigin = CandidateOrigin.discovery
     skip_filter: bool = False  # watchlist/new season: the human already chose it
     season: int | None = None  # season-scoped (series you own): grab this season
+    season_episodes: int | None = None  # announced episode count of that season
     reason: str | None = None  # overrides the default skip_filter reason
 
 
@@ -197,6 +198,7 @@ class LibraryNewSeasonsSource:
                         self.name,
                         skip_filter=True,
                         season=season.number,
+                        season_episodes=season.episode_count,
                         reason=reason,
                     )
                 )

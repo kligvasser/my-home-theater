@@ -138,6 +138,16 @@ candidate "scheduled" (grabbed in the next window); "Grab now" is immediate.
 movie is removed from Transmission (and its local copy deleted) once it's copied
 to the NAS, so it no longer uploads.
 
+## Season grabs
+
+A season-scoped candidate (discovery's "new season of a series you own") grabs
+the season pack when one exists — releases are **season-verified** with guessit,
+so a `Title Season N` search can't grab another season's pack. While a season is
+still airing there is no pack, so the backend grabs the available episodes one
+release each and the candidate returns to `approved` when they finish; the next
+acquire run tops up newly-aired episodes (coverage tracked against the season's
+announced episode count, `features.season_episodes`) until the season completes.
+
 ## Limitations
 
 - **Series import is not done here.** A completed series torrent is marked

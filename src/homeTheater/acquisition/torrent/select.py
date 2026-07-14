@@ -3,6 +3,8 @@
 Given a title and a bag of search hits from all enabled sources, pick the one
 release to grab: drop under-seeded and wrong-resolution releases, then rank by
 resolution preference (the operator's ``allowed_resolutions`` order) and seeders.
+Season-scoped grabs additionally verify the release actually IS that season —
+a "Title Season 3" search happily returns other seasons' packs.
 """
 
 from __future__ import annotations
@@ -39,17 +41,43 @@ def detect_resolution(release_name: str) -> str | None:
     return "2160p" if res in {"4k", "uhd"} else res
 
 
+def parse_season_episode(release_name: str) -> tuple[list[int], list[int]]:
+    """(seasons, episodes) guessit reads from a release name.
+
+    Either list may be empty (a movie, or a season pack with no episode number);
+    multi-season packs ("S01-S03") and multi-episode files ("S03E01E02") yield
+    several values.
+    """
+
+    info = guessit(release_name)
+
+    def as_list(value: object) -> list[int]:
+        if value is None:
+            return []
+        items = value if isinstance(value, list) else [value]
+        return [int(str(v)) for v in items]
+
+    return as_list(info.get("season")), as_list(info.get("episode"))
+
+
 def select_release(
     releases: list[TorrentRelease],
     *,
     allowed_resolutions: list[str],
     min_seeders: int,
+    season: int | None = None,
+    episode: int | None = None,
 ) -> TorrentRelease | None:
     """Best downloadable release, or ``None`` if nothing qualifies.
 
     A release is dropped when it has no usable magnet, too few seeders, or a
     *detected* resolution outside ``allowed_resolutions``. Releases whose
     resolution can't be parsed are kept but ranked below explicit matches.
+
+    With ``season`` set, only releases that parse to exactly that season
+    qualify (multi-season packs are excluded — they'd re-download seasons you
+    own). ``episode=None`` then means "the season pack" (episode-numbered
+    releases are dropped); ``episode=e`` means a release containing episode e.
     """
 
     allowed = [r.lower() for r in allowed_resolutions] if allowed_resolutions else []
@@ -57,6 +85,15 @@ def select_release(
     for rel in releases:
         if rel.magnet_uri() is None or rel.seeders < min_seeders:
             continue
+        if season is not None:
+            seasons, episodes = parse_season_episode(rel.title)
+            if seasons != [season]:
+                continue
+            if episode is None:
+                if episodes:  # single episode, not the pack we want
+                    continue
+            elif episode not in episodes:
+                continue
         res = detect_resolution(rel.title)
         if allowed and res is not None and res not in allowed:
             continue

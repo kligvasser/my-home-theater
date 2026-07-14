@@ -5,9 +5,13 @@ path. It reuses the same ``Candidate``/``Download`` state machine and the
 ``QueueOutcome``/``SyncStats`` DTOs, so the CLI, scheduler, dashboard and
 ``dry_run`` gate behave identically — only the grab/poll mechanics differ.
 
-Series support is intentionally basic: we grab a single best-effort season/complete
-release as one download and don't track per-episode state (that's a larger
-follow-up). Movies are the fully-supported path.
+Series: a season-scoped candidate (``Candidate.season``) grabs that season's
+pack when one exists, and falls back to grabbing the available episodes one
+release each — a currently-airing season has no pack yet. Coverage is tracked
+against the season's announced episode count (``features.season_episodes``):
+when downloads finish with episodes still missing, the candidate returns to
+``approved`` so the next acquire run tops it up. Legacy title-level series
+candidates keep the old single best-effort grab. Movies are unchanged.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from typing import Any
 
 import httpx
 from sqlalchemy import select as sa_select
+from sqlalchemy.orm import Session
 
 from ...config import AppConfig
 from ...db.base import utcnow
@@ -37,7 +42,7 @@ from ...errors import InvalidTransitionError, NotConfiguredError, redact_exc
 from ...logging_setup import get_logger
 from ..service import QueueOutcome, SyncStats
 from .base import DownloadClient, TorrentRelease, TorrentSource, TorrentStatus
-from .select import build_query, select_release
+from .select import build_query, parse_season_episode, select_release
 from .sources import PirateBaySource, RarbgSource, X1337Source
 from .transmission import TransmissionClient
 
@@ -208,17 +213,19 @@ async def _search_all(
 async def queue_candidate_torrent(config: AppConfig, candidate_id: int) -> QueueOutcome:
     """Search + grab one candidate (or log intent in dry-run). State-guarded like
     the arr path: new/approved/failed are queueable; queued/downloading/imported
-    are no-ops; rejected is an error."""
+    are no-ops; rejected is an error. A season candidate that's ``approved``
+    with downloads already recorded is an episode top-up, not a duplicate."""
 
     snap = _load_snap(candidate_id)
     if snap is None:
         raise ValueError(f"candidate {candidate_id} not found")
 
+    top_up = snap.season is not None and snap.status is CandidateStatus.approved
     if snap.status in (
         CandidateStatus.queued,
         CandidateStatus.downloading,
         CandidateStatus.imported,
-    ) or (snap.has_download and snap.status is not CandidateStatus.failed):
+    ) or (snap.has_download and snap.status is not CandidateStatus.failed and not top_up):
         return QueueOutcome(
             candidate_id, False, config.features.dry_run, None, f"already {snap.status.value}"
         )
@@ -233,9 +240,13 @@ async def queue_candidate_torrent(config: AppConfig, candidate_id: int) -> Queue
             raise NotConfiguredError(
                 "No torrent sources enabled; set torrent.enabled_sources in config.yaml."
             )
-        query = build_query(snap.title, snap.year, snap.kind, season=snap.season)
-        releases = await _search_all(sources, query, snap.kind)
         allowed = config.torrent.resolutions or config.thresholds.allowed_resolutions
+
+        if snap.kind is TitleKind.series and snap.season is not None:
+            return await _queue_season(config, http, sources, snap, allowed)
+
+        query = build_query(snap.title, snap.year, snap.kind)
+        releases = await _search_all(sources, query, snap.kind)
         chosen = select_release(
             releases, allowed_resolutions=allowed, min_seeders=config.torrent.min_seeders
         )
@@ -265,35 +276,183 @@ async def queue_candidate_torrent(config: AppConfig, candidate_id: int) -> Queue
                 f"would grab '{chosen.title}' from {chosen.source} ({chosen.seeders} seeders)",
             )
 
-        magnet = chosen.magnet_uri()
-        assert magnet is not None  # select_release only returns releases with a magnet
         client = _download_client(config, http)
-        added = await client.add_magnet(magnet, download_dir=_download_dir(config, snap.kind))
+        grabbed = await _grab(client, config, snap.kind, [chosen])
+
+    _record_grabs(candidate_id, grabbed)
+    already = all(existed for _, _, existed in grabbed)
+    message = "grabbed (already in client)" if already else "grabbed"
+    return QueueOutcome(candidate_id, True, False, None, message)
+
+
+async def _grab(
+    client: DownloadClient, config: AppConfig, kind: TitleKind, chosen: list[TorrentRelease]
+) -> list[tuple[str, str, bool]]:
+    """Add each release's magnet to the client → (infohash, release, existed)."""
+
+    out: list[tuple[str, str, bool]] = []
+    for rel in chosen:
+        magnet = rel.magnet_uri()
+        assert magnet is not None  # select_release only returns releases with a magnet
+        added = await client.add_magnet(magnet, download_dir=_download_dir(config, kind))
+        out.append((added.infohash, rel.title, added.already_existed))
+    return out
+
+
+def _record_grabs(candidate_id: int, grabbed: list[tuple[str, str, bool]]) -> None:
+    """Record Download rows (idempotent on infohash) and mark the candidate queued."""
 
     with session_scope() as s:
-        existing = s.scalar(
-            sa_select(Download).where(
-                Download.candidate_id == candidate_id,
-                Download.external_id == added.infohash,
-            )
-        )
-        if existing is None:
-            s.add(
-                Download(
-                    candidate_id=candidate_id,
-                    external_id=added.infohash,
-                    release=chosen.title,
-                    state="downloading",
-                    progress=0.0,
+        for infohash, release, _existed in grabbed:
+            existing = s.scalar(
+                sa_select(Download).where(
+                    Download.candidate_id == candidate_id,
+                    Download.external_id == infohash,
                 )
             )
+            if existing is None:
+                s.add(
+                    Download(
+                        candidate_id=candidate_id,
+                        external_id=infohash,
+                        release=release,
+                        state="downloading",
+                        progress=0.0,
+                    )
+                )
         cand = s.get(Candidate, candidate_id)
         if cand is not None:
             cand.status = CandidateStatus.queued
             if cand.decided_at is None:
                 cand.decided_at = utcnow()
-    message = "grabbed (already in client)" if added.already_existed else "grabbed"
-    return QueueOutcome(candidate_id, True, False, None, message)
+
+
+# When a season's episode count isn't known, probe episodes until this many
+# consecutive numbers find no qualifying release; hard cap as a backstop.
+_EPISODE_PROBE_MISSES = 2
+_EPISODE_PROBE_CAP = 30
+
+
+def _grabbed_episodes(candidate_id: int) -> set[int] | None:
+    """Episodes already covered by live downloads; ``None`` means a season pack.
+
+    Failed/cancelled rows don't count — their episodes are up for re-grab.
+    """
+
+    with session_scope() as s:
+        releases = s.scalars(
+            sa_select(Download.release).where(
+                Download.candidate_id == candidate_id,
+                Download.state.in_(("queued", "downloading", "importing", "completed", "imported")),
+            )
+        ).all()
+    episodes: set[int] = set()
+    for name in releases:
+        if not name:
+            continue
+        _seasons, eps = parse_season_episode(name)
+        if not eps:  # no episode number on a live download: it's the season pack
+            return None
+        episodes.update(eps)
+    return episodes
+
+
+def _season_target(candidate_id: int) -> int | None:
+    """The season's announced episode count, snapshotted at discovery time."""
+
+    with session_scope() as s:
+        cand = s.get(Candidate, candidate_id)
+        if cand is None or not cand.features:
+            return None
+        target = cand.features.get("season_episodes")
+        return int(target) if target else None
+
+
+async def _queue_season(
+    config: AppConfig,
+    http: httpx.AsyncClient,
+    sources: list[TorrentSource],
+    snap: _Snap,
+    allowed: list[str],
+) -> QueueOutcome:
+    """Grab a season-scoped candidate: the season pack if one exists, else the
+    individual episodes that are out (an airing season has no pack yet)."""
+
+    cid, n = snap.candidate_id, snap.season
+    assert n is not None
+    min_seeders = config.torrent.min_seeders
+    have = _grabbed_episodes(cid)
+    if have is None:  # a pack download is live; nothing to add
+        return QueueOutcome(
+            cid, False, config.features.dry_run, None, "season pack already grabbed"
+        )
+
+    if not have:  # nothing live yet: a full season pack beats episode-by-episode
+        for query in (
+            build_query(snap.title, snap.year, snap.kind, season=n),
+            f"{snap.title} Season {n}",
+        ):
+            releases = await _search_all(sources, query, snap.kind)
+            chosen = select_release(
+                releases, allowed_resolutions=allowed, min_seeders=min_seeders, season=n
+            )
+            if chosen is not None:
+                if config.features.dry_run:
+                    would = (
+                        f"would grab '{chosen.title}' from {chosen.source} "
+                        f"({chosen.seeders} seeders)"
+                    )
+                    return QueueOutcome(cid, False, True, None, would)
+                client = _download_client(config, http)
+                grabbed = await _grab(client, config, snap.kind, [chosen])
+                _record_grabs(cid, grabbed)
+                return QueueOutcome(cid, True, False, None, f"grabbed season pack '{chosen.title}'")
+
+    # No pack (season still airing, most likely): grab available episodes.
+    target = _season_target(cid)
+    last = target or _EPISODE_PROBE_CAP
+    found: list[tuple[int, TorrentRelease]] = []
+    misses = 0
+    for e in range(1, last + 1):
+        if e in have:
+            continue
+        releases = await _search_all(sources, f"{snap.title} S{n:02d}E{e:02d}", snap.kind)
+        chosen = select_release(
+            releases, allowed_resolutions=allowed, min_seeders=min_seeders, season=n, episode=e
+        )
+        if chosen is None:
+            misses += 1
+            # Known target: later episodes may exist even after a gap. Unknown:
+            # consecutive misses mean we've walked past the season's end.
+            if target is None and misses >= _EPISODE_PROBE_MISSES:
+                break
+            continue
+        misses = 0
+        found.append((e, chosen))
+
+    if not found:
+        detail = "no season pack" + (f", {len(have)} episodes already grabbed" if have else "")
+        return QueueOutcome(
+            cid,
+            False,
+            config.features.dry_run,
+            None,
+            f"no suitable release for '{snap.title}' S{n:02d} ({detail})",
+        )
+
+    eps = ", ".join(f"E{e:02d}" for e, _ in found)
+    if config.features.dry_run:
+        return QueueOutcome(
+            cid, False, True, None, f"would grab {len(found)} episode releases (S{n:02d} {eps})"
+        )
+
+    client = _download_client(config, http)
+    grabbed = await _grab(client, config, snap.kind, [rel for _, rel in found])
+    _record_grabs(cid, grabbed)
+    suffix = "" if target and len(have) + len(found) >= target else "; will top up as more air"
+    return QueueOutcome(
+        cid, True, False, None, f"grabbed {len(found)} episode releases (S{n:02d} {eps}){suffix}"
+    )
 
 
 def _aware(dt: datetime) -> datetime:
@@ -374,10 +533,54 @@ async def sync_downloads_torrent(config: AppConfig) -> SyncStats:
                     # torrent as active forever, so time-box it here.
                     dl.state = "failed"
                     dl.error = "torrent not found in client, or stalled at 0% past the grace window"
-                    if cand is not None:
+                    # One dead episode must not fail a candidate whose siblings are
+                    # still transferring; with none left, failed makes it re-queueable
+                    # (the next grab skips episodes that already imported).
+                    if cand is not None and _live_sibling(s, cand.id, dl.id) is None:
                         cand.status = CandidateStatus.failed
                     stats.failed += 1
     return stats
+
+
+def _live_sibling(s: Session, candidate_id: int, download_id: int) -> int | None:
+    """Id of another still-in-flight download for this candidate, if any."""
+
+    return s.scalar(
+        sa_select(Download.id).where(
+            Download.candidate_id == candidate_id,
+            Download.id != download_id,
+            Download.state.in_(("queued", "downloading", "importing", "completed")),
+        )
+    )
+
+
+def _status_after_finished(s: Session, cand: Candidate, download_id: int) -> CandidateStatus:
+    """Candidate status once one of its downloads has imported.
+
+    Siblings still transferring keep it ``downloading``. A season candidate with
+    episodes still missing (vs. the season's announced count) returns to
+    ``approved`` so the next acquire run tops it up — an airing season arrives
+    week by week. Otherwise: ``imported``.
+    """
+
+    if _live_sibling(s, cand.id, download_id) is not None:
+        return CandidateStatus.downloading
+    target = (cand.features or {}).get("season_episodes") if cand.season is not None else None
+    if target:
+        covered: set[int] = set()
+        pack = False
+        for name in s.scalars(
+            sa_select(Download.release).where(
+                Download.candidate_id == cand.id, Download.state == "imported"
+            )
+        ).all():
+            _seasons, eps = parse_season_episode(name or "")
+            if not eps:
+                pack = True
+            covered.update(eps)
+        if not pack and len(covered) < int(target):
+            return CandidateStatus.approved
+    return CandidateStatus.imported
 
 
 def _set_download(download_id: int, **fields: Any) -> None:
@@ -481,7 +684,7 @@ async def _finish_completed(
             dl.completed_at = utcnow()
             cand = s.get(Candidate, dl.candidate_id)
             if cand is not None and cand.status is not CandidateStatus.rejected:
-                cand.status = CandidateStatus.imported
+                cand.status = _status_after_finished(s, cand, dl.id)
     stats.completed += 1
 
     # Complete the pipeline: catalog the file (so it's "owned") and fetch its
