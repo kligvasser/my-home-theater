@@ -49,6 +49,7 @@ discovery:
   trending: true        # pull TMDb trending
   top_rated: false      # also pull TMDb top-rated
   watchlist: true       # Trakt watchlist (needs keys + `home-theater trakt-auth`)
+  new_seasons: true     # suggest new seasons of series you already own
   include_movies: true
   include_series: true
   trending_window: week # day | week

@@ -57,7 +57,9 @@
       {% if c.poster_url %}<img src="{{ c.poster_url }}" alt="" loading="lazy" />{% endif %}
     </div>
     <div class="cbody">
-      <h3>{{ c.title }} {% if c.year %}<span class="muted">({{ c.year }})</span>{% endif %}</h3>
+      <h3>{{ c.title }}
+        {% if c.season is not none %}<span class="pill">S{{ "%02d"|format(c.season) }}</span>{% endif %}
+        {% if c.year %}<span class="muted">({{ c.year }})</span>{% endif %}</h3>
       <div class="cmeta">
         <span class="pill">{{ c.kind }}</span>
         {% if c.imdb_rating is not none %}<span>⭐ {{ "%.1f"|format(c.imdb_rating) }}</span>{% endif %}

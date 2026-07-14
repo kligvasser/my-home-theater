@@ -1,7 +1,8 @@
 # my-home-theater
 
 Automate a personal movie & TV library end-to-end: scan the NAS, enrich metadata,
-discover what's worth adding (rating/vote filtered + learned taste), grab it,
+discover what's worth adding (rating/vote filtered + learned taste, plus new
+seasons of series you own), grab it,
 import it, fetch subtitles, and drive the whole thing from an HTML dashboard.
 Python-first, SQLite-backed, no Docker required.
 
@@ -46,7 +47,7 @@ Then per backend: `TRANSMISSION_URL/USER/PASS` (torrent) and/or
 home-theater            # serve the dashboard/API (default)
 home-theater scan       # NAS -> owned catalog
 home-theater enrich     # backfill TMDb/IMDb ratings/votes/genres
-home-theater discover   # find candidates above your thresholds
+home-theater discover   # find candidates above your thresholds + new seasons of owned series
 home-theater acquire    # grab approved candidates (arr or torrent backend)
 home-theater sync       # advance in-flight downloads (poll -> import)
 home-theater subtitles  # fetch missing subtitles (bazarr or native backend)
@@ -73,7 +74,7 @@ on until you trust the pipeline.
 ## Develop
 
 ```bash
-.venv/bin/pytest        # 214 tests, no external services hit
+.venv/bin/pytest        # 222 tests, no external services hit
 .venv/bin/ruff check .
 .venv/bin/black .
 .venv/bin/mypy src/homeTheater

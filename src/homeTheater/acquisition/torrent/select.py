@@ -13,16 +13,19 @@ from ...db.models import TitleKind
 from .base import TorrentRelease
 
 
-def build_query(title: str, year: int | None, kind: TitleKind) -> str:
+def build_query(title: str, year: int | None, kind: TitleKind, season: int | None = None) -> str:
     """A search string broad enough to get hits but specific enough to be relevant.
 
     Movies add the year (cheap disambiguation); series don't, since a season/pack
-    release rarely carries the first-air year in its name.
+    release rarely carries the first-air year in its name. Season-scoped
+    candidates target that season's pack ("Title S03").
     """
 
     title = title.strip()
     if kind is TitleKind.movie and year:
         return f"{title} {year}"
+    if kind is TitleKind.series and season is not None:
+        return f"{title} S{season:02d}"
     return title
 
 

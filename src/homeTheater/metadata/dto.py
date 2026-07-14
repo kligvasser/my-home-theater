@@ -6,6 +6,15 @@ from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True, slots=True)
+class TmdbSeason:
+    """One season of a TV series (from the ``seasons`` array of tv details)."""
+
+    number: int
+    episode_count: int | None = None
+    air_date: str | None = None  # ISO yyyy-mm-dd of the first episode
+
+
+@dataclass(frozen=True, slots=True)
 class TmdbTitle:
     """TMDb details normalized to our catalog's shape."""
 
@@ -35,6 +44,7 @@ class TmdbTitle:
     seasons_count: int | None = None
     episodes_count: int | None = None
     series_status: str | None = None
+    seasons: list[TmdbSeason] = field(default_factory=list)  # series details only
 
 
 @dataclass(frozen=True, slots=True)

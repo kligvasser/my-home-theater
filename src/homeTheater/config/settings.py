@@ -115,6 +115,7 @@ class Discovery(BaseModel):
     trending: bool = True
     top_rated: bool = False
     watchlist: bool = True  # Trakt watchlist (needs keys + `home-theater trakt-auth`)
+    new_seasons: bool = True  # new seasons of series you already own
     include_movies: bool = True
     include_series: bool = True
     trending_window: str = Field("week", pattern="^(day|week)$")

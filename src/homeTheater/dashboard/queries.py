@@ -108,6 +108,7 @@ class CandidateRow:
     release_date: str | None = None  # ISO yyyy-mm-dd (finer than year)
     tmdb_id: int | None = None
     imdb_id: str | None = None  # e.g. "tt0133093"
+    season: int | None = None  # season-scoped candidate (new season of an owned series)
 
     @property
     def tmdb_url(self) -> str | None:
@@ -443,6 +444,7 @@ def list_candidates(
                     release_date=title.release_date,
                     tmdb_id=title.tmdb_id,
                     imdb_id=title.imdb_id,
+                    season=cand.season,
                 )
             )
 

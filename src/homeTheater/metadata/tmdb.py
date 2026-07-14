@@ -16,7 +16,7 @@ import httpx
 from ..db.base import utcnow
 from ..db.models import TitleKind
 from .cache import cache_get, cache_set
-from .dto import TmdbTitle
+from .dto import TmdbSeason, TmdbTitle
 from .http import get_json
 
 BASE_URL = "https://api.themoviedb.org/3"
@@ -246,6 +246,7 @@ class TMDbClient:
             ]
             seasons = episodes = None
             series_status = None
+            season_list = []
         else:
             name = data.get("name") or data.get("original_name") or ""
             release_date = data.get("first_air_date") or None
@@ -258,6 +259,15 @@ class TMDbClient:
             seasons = _int_or_none(data.get("number_of_seasons"))
             episodes = _int_or_none(data.get("number_of_episodes"))
             series_status = data.get("status") or None
+            season_list = [
+                TmdbSeason(
+                    number=n,
+                    episode_count=_int_or_none(s.get("episode_count")),
+                    air_date=s.get("air_date") or None,
+                )
+                for s in (data.get("seasons") or [])
+                if (n := _int_or_none(s.get("season_number"))) is not None
+            ]
 
         collection = data.get("belongs_to_collection") or {}
         genres = [g["name"] for g in (data.get("genres") or []) if g.get("name")]
@@ -287,4 +297,5 @@ class TMDbClient:
             seasons_count=seasons,
             episodes_count=episodes,
             series_status=series_status,
+            seasons=season_list,
         )

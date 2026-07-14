@@ -47,6 +47,7 @@ Saving requires the dashboard token (🔒 top-right).</p>
       <h2>Discovery</h2>
       <label>Trending source {{ boolsel("discovery.trending", file.discovery.trending, ov.get("discovery", {}).get("trending")) }}</label>
       <label>Top-rated source {{ boolsel("discovery.top_rated", file.discovery.top_rated, ov.get("discovery", {}).get("top_rated")) }}</label>
+      <label>New seasons of owned series {{ boolsel("discovery.new_seasons", file.discovery.new_seasons, ov.get("discovery", {}).get("new_seasons")) }}</label>
       <label>Max per source {{ num("discovery.max_per_source", file.discovery.max_per_source, ov.get("discovery", {}).get("max_per_source"), minv="1") }}</label>
       <label class="warn">Auto-approve new candidates {{ boolsel("features.auto_approve", file.features.auto_approve, ov.get("features", {}).get("auto_approve")) }}</label>
       <p class="muted small">dry_run is <b>{{ "ON" if read_only.dry_run else "OFF" }}</b> —

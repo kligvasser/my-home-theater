@@ -164,6 +164,10 @@ class Candidate(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     title_id: Mapped[int] = mapped_column(ForeignKey("title.id"), index=True)
+    # Season-scoped candidate (series only): "grab season N of a series you own".
+    # NULL means the whole title (movies, new series). Dedup/rejection invariants
+    # apply per (title, season) so rejecting S3 doesn't bury next year's S4.
+    season: Mapped[int | None] = mapped_column(Integer)
     source: Mapped[CandidateSource] = mapped_column(_enum(CandidateSource))
     status: Mapped[CandidateStatus] = mapped_column(
         _enum(CandidateStatus), default=CandidateStatus.new

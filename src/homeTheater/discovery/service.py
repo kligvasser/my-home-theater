@@ -145,19 +145,26 @@ def _upsert_title(session: Session, kind: TitleKind, t: TmdbTitle) -> Title:
     return title
 
 
-def _blocked_in_db(session: Session, title_id: int) -> str | None:
-    """Re-check owned/live/rejected inside the write transaction (TOCTOU guard)."""
+def _blocked_in_db(session: Session, title_id: int, season: int | None = None) -> str | None:
+    """Re-check owned/live/rejected inside the write transaction (TOCTOU guard).
 
-    status = session.scalar(
-        select(Candidate.status).where(
-            Candidate.title_id == title_id, Candidate.status.in_(BLOCKING_STATUSES)
-        )
-    )
+    Season-scoped candidates check per (title, season): the title itself is
+    owned by definition, and rejecting S3 must not block a future S4 (each
+    season decision is its own training label).
+    """
+
+    cand_where = [Candidate.title_id == title_id, Candidate.status.in_(BLOCKING_STATUSES)]
+    if season is not None:
+        cand_where.append(Candidate.season == season)
+    status = session.scalar(select(Candidate.status).where(*cand_where))
     if status is not None:
         return f"candidate already {status.value}"
-    owned = session.scalar(select(OwnedFile.id).where(OwnedFile.title_id == title_id))
+    owned_where = [OwnedFile.title_id == title_id]
+    if season is not None:
+        owned_where.append(OwnedFile.season == season)
+    owned = session.scalar(select(OwnedFile.id).where(*owned_where))
     if owned is not None:
-        return "already owned"
+        return "season already owned" if season is not None else "already owned"
     return None
 
 
@@ -197,14 +204,14 @@ def _persist(enriched: list[_Enriched], config: AppConfig, stats: DiscoveryStats
             if imdb_votes is not None:
                 title.imdb_votes = imdb_votes
 
-            blocked = _blocked_in_db(session, title.id)
+            blocked = _blocked_in_db(session, title.id, item.disc.season)
             if blocked is not None:
                 stats.live_skipped += 1
                 continue
 
             if item.disc.skip_filter:
-                # Watchlist: the human already chose it — no threshold gate.
-                base_reason = "on your watchlist"
+                # Watchlist / new season: the human already chose it — no threshold gate.
+                base_reason = item.disc.reason or "on your watchlist"
             else:
                 outcome = evaluate(
                     imdb_rating=imdb_rating,
@@ -247,9 +254,13 @@ def _persist(enriched: list[_Enriched], config: AppConfig, stats: DiscoveryStats
                 quality = round(quality + taste_cfg.model_weight * 10 * p_like, 3)
                 reason += f"; model {p_like:.0%}"
 
+            if item.disc.season is not None:
+                feats["season"] = item.disc.season
+
             session.add(
                 Candidate(
                     title_id=title.id,
+                    season=item.disc.season,
                     source=item.disc.origin,
                     status=CandidateStatus.approved if auto else CandidateStatus.new,
                     reason=reason,
@@ -312,16 +323,22 @@ async def run_discovery(config: AppConfig) -> DiscoveryStats:
                 discovered = [d for lst in fetched_lists for d in lst]
                 stats.fetched = len(discovered)
 
-                # Dedup by (kind, tmdb_id), keeping the first source that surfaced it.
-                seen: dict[_Key, Discovered] = {}
+                # Dedup by (kind, tmdb_id, season), keeping the first source that
+                # surfaced it. Season-scoped items dedup independently of the
+                # title-level hit for the same show.
+                seen: dict[tuple[TitleKind, int, int | None], Discovered] = {}
                 for d in discovered:
-                    seen.setdefault((d.kind, d.tmdb.tmdb_id), d)
+                    seen.setdefault((d.kind, d.tmdb.tmdb_id, d.season), d)
                 stats.deduped = len(seen)
 
                 owned, live, rejected = _owned_live_rejected()
                 to_consider: list[Discovered] = []
-                for (kind, tid), d in seen.items():
-                    if (kind, tid) in owned:
+                for (kind, tid, season), d in seen.items():
+                    if season is not None:
+                        # New-season items are owned titles by definition; their
+                        # per-season live/rejected check happens in _blocked_in_db.
+                        to_consider.append(d)
+                    elif (kind, tid) in owned:
                         stats.owned_skipped += 1
                     elif (kind, tid) in live:
                         stats.live_skipped += 1

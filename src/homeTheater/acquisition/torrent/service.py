@@ -55,6 +55,7 @@ class _Snap:
     year: int | None
     status: CandidateStatus
     has_download: bool
+    season: int | None = None  # season-scoped grab (new season of an owned series)
 
 
 def _load_snap(candidate_id: int) -> _Snap | None:
@@ -76,6 +77,7 @@ def _load_snap(candidate_id: int) -> _Snap | None:
             title.year,
             cand.status,
             has_download,
+            cand.season,
         )
 
 
@@ -231,7 +233,7 @@ async def queue_candidate_torrent(config: AppConfig, candidate_id: int) -> Queue
             raise NotConfiguredError(
                 "No torrent sources enabled; set torrent.enabled_sources in config.yaml."
             )
-        query = build_query(snap.title, snap.year, snap.kind)
+        query = build_query(snap.title, snap.year, snap.kind, season=snap.season)
         releases = await _search_all(sources, query, snap.kind)
         allowed = config.torrent.resolutions or config.thresholds.allowed_resolutions
         chosen = select_release(
