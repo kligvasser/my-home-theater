@@ -27,17 +27,26 @@ def _reset() -> None:
     db_session._SessionFactory = None
 
 
-def _write_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dry_run: bool = False) -> None:
+def _write_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dry_run: bool = False,
+    library: bool = False,
+) -> None:
     cfg = tmp_path / "torrent.yaml"
-    cfg.write_text(
-        "nas: {share: T, movies_root: Movies, tv_root: TV Shows}\n"
-        f"database: {{url: 'sqlite:///{tmp_path / 'torrent.db'}'}}\n"
-        f"features: {{dry_run: {str(dry_run).lower()}, auto_approve: false}}\n"
-        "acquisition: {backend: torrent}\n"
+    torrent = (
         "torrent:\n"
         "  enabled_sources: [piratebay]\n"
         "  min_seeders: 1\n"
         f"  piratebay_api_url: {APIBAY}\n"
+    )
+    if library:
+        torrent += f"  library_base_dir: {tmp_path / 'lib'}\n"
+    cfg.write_text(
+        "nas: {share: T, movies_root: Movies, tv_root: TV Shows}\n"
+        f"database: {{url: 'sqlite:///{tmp_path / 'torrent.db'}'}}\n"
+        f"features: {{dry_run: {str(dry_run).lower()}, auto_approve: false}}\n"
+        "acquisition: {backend: torrent}\n" + torrent
     )
     monkeypatch.setenv("HOME_THEATER_CONFIG", str(cfg))
     monkeypatch.setenv("TRANSMISSION_URL", TRANSMISSION)
@@ -291,19 +300,19 @@ async def test_queue_no_new_episodes_reports_without_grabbing(
 # --- sync: multi-download lifecycle ------------------------------------------
 
 
-def _torrent_status(infohash: str, done: bool) -> dict:
+def _torrent_status(infohash: str, done: bool, name: str, dl_dir: str) -> dict:
     return {
         "hashString": infohash,
-        "name": "x",
+        "name": name,
         "percentDone": 1.0 if done else 0.5,
         "status": 6 if done else 4,
-        "downloadDir": "/dl",
+        "downloadDir": dl_dir,
         "error": 0,
         "errorString": "",
     }
 
 
-def _transmission_statuses(by_hash: dict[str, bool]) -> None:
+def _transmission_statuses(by_hash: dict[str, tuple[bool, str]], dl_dir: str = "/dl") -> None:
     session_negotiated = {"done": False}
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -312,7 +321,11 @@ def _transmission_statuses(by_hash: dict[str, bool]) -> None:
             return httpx.Response(409, headers={"X-Transmission-Session-Id": "sid"})
         body = json.loads(request.content)
         wanted = body["arguments"]["ids"][0]
-        torrents = [_torrent_status(h, d) for h, d in by_hash.items() if h == wanted]
+        torrents = [
+            _torrent_status(h, done, name, dl_dir)
+            for h, (done, name) in by_hash.items()
+            if h == wanted
+        ]
         return httpx.Response(200, json={"result": "success", "arguments": {"torrents": torrents}})
 
     respx.post(TRANSMISSION).mock(side_effect=respond)
@@ -334,28 +347,40 @@ def _seed_episode_download(cid: int, episode: int, infohash: str, state: str) ->
 
 
 @respx.mock
-async def test_sync_partial_season_returns_to_approved_for_topup(
+async def test_sync_partial_season_imports_episode_and_returns_to_approved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Last in-flight episode finishes but the season isn't complete: candidate
-    goes back to approved so the next acquire run looks for the rest."""
+    """Last in-flight episode finishes but the season isn't complete: the file is
+    imported into the TV layout + cataloged, and the candidate goes back to
+    approved so the next acquire run looks for the rest."""
 
-    _write_config(tmp_path, monkeypatch)
+    _write_config(tmp_path, monkeypatch, library=True)
     _reset()
     cid = _seed_season_candidate(season_episodes=3)
     _seed_episode_download(cid, 1, "c" * 40, "downloading")
-    _transmission_statuses({"c" * 40: True})
+
+    dl_dir = tmp_path / "dl"
+    dl_dir.mkdir()
+    name = "Silo.S03E01.1080p.WEB.h264-ETHEL.mkv"
+    (dl_dir / name).write_bytes(b"episode-one" * 100)
+    _transmission_statuses({"c" * 40: (True, name)}, dl_dir=str(dl_dir))
 
     from homeTheater.acquisition import sync_downloads
     from homeTheater.config import get_config
     from homeTheater.db import session_scope
-    from homeTheater.db.models import Candidate, CandidateStatus, Download
+    from homeTheater.db.models import Candidate, CandidateStatus, Download, OwnedFile
 
     stats = await sync_downloads(get_config())
 
     assert stats.completed == 1
+    dest = tmp_path / "lib" / "TV Shows" / "Silo" / "Season 03" / name
+    assert dest.exists() and dest.read_bytes() == b"episode-one" * 100
     with session_scope() as s:
         assert s.query(Download).one().state == "imported"
+        owned = s.query(OwnedFile).one()
+        assert owned.kind == TitleKind.series
+        assert owned.season == 3 and owned.episode == 1
+        assert owned.resolution == "1080p"
         assert s.get(Candidate, cid).status == CandidateStatus.approved  # 1 of 3
 
 
@@ -363,23 +388,81 @@ async def test_sync_partial_season_returns_to_approved_for_topup(
 async def test_sync_full_season_flips_imported_only_when_all_done(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _write_config(tmp_path, monkeypatch)
+    _write_config(tmp_path, monkeypatch, library=True)
     _reset()
     cid = _seed_season_candidate(season_episodes=2)
     _seed_episode_download(cid, 1, "c" * 40, "downloading")
     _seed_episode_download(cid, 2, "e" * 40, "downloading")
-    _transmission_statuses({"c" * 40: True, "e" * 40: True})
+
+    dl_dir = tmp_path / "dl"
+    dl_dir.mkdir()
+    names = {1: "Silo.S03E01.1080p.WEB.mkv", 2: "Silo.S03E02.1080p.WEB.mkv"}
+    for name in names.values():
+        (dl_dir / name).write_bytes(b"ep" * 10)
+    _transmission_statuses(
+        {"c" * 40: (True, names[1]), "e" * 40: (True, names[2])}, dl_dir=str(dl_dir)
+    )
 
     from homeTheater.acquisition import sync_downloads
     from homeTheater.config import get_config
     from homeTheater.db import session_scope
-    from homeTheater.db.models import Candidate, CandidateStatus
+    from homeTheater.db.models import Candidate, CandidateStatus, OwnedFile
 
     stats = await sync_downloads(get_config())
 
     assert stats.completed == 2
+    season_dir = tmp_path / "lib" / "TV Shows" / "Silo" / "Season 03"
+    assert sorted(p.name for p in season_dir.iterdir()) == sorted(names.values())
     with session_scope() as s:
+        assert s.query(OwnedFile).count() == 2
         assert s.get(Candidate, cid).status == CandidateStatus.imported  # 2 of 2
+
+
+@respx.mock
+async def test_sync_imports_season_pack_into_existing_series_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pack fans out per-episode into the library, reusing a differently-styled
+    existing series folder, and completes the candidate (pack == full season)."""
+
+    _write_config(tmp_path, monkeypatch, library=True)
+    _reset()
+    cid = _seed_season_candidate(season_episodes=10)
+
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate, CandidateStatus, Download, OwnedFile
+
+    pack = "Silo.S03.COMPLETE.1080p.WEB.H264-GROUP"
+    with session_scope() as s:
+        s.add(Download(candidate_id=cid, external_id="d" * 40, state="downloading", release=pack))
+
+    # The show already lives in a dotted folder — import must reuse it.
+    existing = tmp_path / "lib" / "TV Shows" / "S.i.l.o"
+    existing.mkdir(parents=True)
+
+    dl_dir = tmp_path / "dl"
+    (dl_dir / pack).mkdir(parents=True)
+    (dl_dir / pack / "Silo.S03E01.1080p.WEB.mkv").write_bytes(b"e1" * 20)
+    (dl_dir / pack / "Silo.S03E02.1080p.WEB.mkv").write_bytes(b"e2" * 20)
+    (dl_dir / pack / "sample.mkv").write_bytes(b"s")  # junk: skipped
+    _transmission_statuses({"d" * 40: (True, pack)}, dl_dir=str(dl_dir))
+
+    from homeTheater.acquisition import sync_downloads
+    from homeTheater.config import get_config
+
+    stats = await sync_downloads(get_config())
+
+    assert stats.completed == 1
+    season_dir = existing / "Season 03"
+    assert sorted(p.name for p in season_dir.iterdir()) == [
+        "Silo.S03E01.1080p.WEB.mkv",
+        "Silo.S03E02.1080p.WEB.mkv",
+    ]
+    with session_scope() as s:
+        episodes = {o.episode for o in s.query(OwnedFile).all()}
+        assert episodes == {1, 2}
+        # a pack counts as the whole season regardless of announced count
+        assert s.get(Candidate, cid).status == CandidateStatus.imported
 
 
 @respx.mock
@@ -402,7 +485,7 @@ async def test_sync_one_stalled_episode_does_not_fail_active_candidate(
         stale.created_at = datetime.now(UTC) - timedelta(hours=10)  # past the 6h grace
 
     # E01 gone from the client entirely; E02 still transferring at 50%.
-    _transmission_statuses({"e" * 40: False})
+    _transmission_statuses({"e" * 40: (False, "x")})
 
     from homeTheater.acquisition import sync_downloads
     from homeTheater.config import get_config

@@ -12,8 +12,14 @@ Two targets implement the same :class:`LibraryTarget` seam:
 
 Copies land at a ``.part`` sidecar and are atomically renamed into place, so a
 half-written file is never mistaken for a real one (mirrors the scanner's
-verify-after-move rule, plan §12). Series import is intentionally not handled
-here — a season pack is many files with per-episode placement we don't model yet.
+verify-after-move rule, plan §12).
+
+Series go to ``TV Shows/<Series>/Season NN/<release filename>`` — the layout the
+scanner already reads. Episode files keep their release names (that's what the
+library's existing episodes look like, and the scanner parses S/E from them);
+an existing series folder is reused even when its name is styled differently
+("Colin.From.Accounts" vs "Colin From Accounts"), so one show never splits
+across two folders.
 """
 
 from __future__ import annotations
@@ -128,15 +134,19 @@ class LibraryTarget(Protocol):
         Calls ``on_progress(copied, total)`` during the copy when provided."""
         ...
 
+    def list_dir(self, rel_dir: str) -> list[str]:
+        """Entry names under ``rel_dir`` (empty when it doesn't exist) — used to
+        reuse an existing series folder whose name is styled differently."""
+        ...
+
 
 def _sanitize(name: str) -> str:
     cleaned = _ILLEGAL.sub("", name).strip().rstrip(". ")
     return cleaned or "Untitled"
 
 
-def find_primary_video(content_path: str) -> str | None:
-    """The main video file for a completed torrent: the file itself if the torrent
-    is a single file, else the largest non-sample media file in its folder.
+def _walk_videos(content_path: str) -> list[tuple[str, int]]:
+    """All non-sample media files under a completed torrent, with sizes.
 
     Raises :class:`ImportError_` if the folder can't be read — on macOS,
     ``~/Downloads``/``~/Desktop``/``~/Documents`` are privacy-protected (TCC) and
@@ -145,10 +155,14 @@ def find_primary_video(content_path: str) -> str | None:
     """
 
     if os.path.isfile(content_path):
-        return content_path if is_media_file(os.path.basename(content_path)) else None
+        if not is_media_file(os.path.basename(content_path)):
+            return []
+        try:
+            return [(content_path, os.path.getsize(content_path))]
+        except OSError:
+            return []
     walk_errors: list[OSError] = []
-    best: str | None = None
-    best_size = -1
+    found: list[tuple[str, int]] = []
     for dirpath, _dirnames, filenames in os.walk(content_path, onerror=walk_errors.append):
         for name in filenames:
             if not is_media_file(name):
@@ -160,15 +174,24 @@ def find_primary_video(content_path: str) -> str | None:
                 continue
             if "sample" in name.lower() and size < _SAMPLE_MAX_BYTES:
                 continue
-            if size > best_size:
-                best, best_size = full, size
-    if best is None and any(isinstance(e, PermissionError) for e in walk_errors):
+            found.append((full, size))
+    if not found and any(isinstance(e, PermissionError) for e in walk_errors):
         raise ImportError_(
             f"permission denied reading {content_path!r} — on macOS, grant the app "
             "Full Disk Access, or set torrent.movie_download_dir to a folder outside "
             "~/Downloads, ~/Desktop and ~/Documents (which are privacy-protected)."
         )
-    return best
+    return found
+
+
+def find_primary_video(content_path: str) -> str | None:
+    """The main video file for a completed torrent: the file itself if the torrent
+    is a single file, else the largest non-sample media file in its folder."""
+
+    videos = _walk_videos(content_path)
+    if not videos:
+        return None
+    return max(videos, key=lambda v: v[1])[0]
 
 
 def _movie_dir_and_file(title: str, year: int | None, ext: str) -> tuple[str, str]:
@@ -196,6 +219,82 @@ def import_completed_movie(
     dest = target.import_file(video, rel_dir, filename, on_progress)
     log.info("import.done", title=title, source=video, dest=dest)
     return dest
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeImport:
+    """One episode file placed into the library."""
+
+    dest: str
+    filename: str  # the release-style basename (kept: the scanner parses it)
+    season: int | None
+    episode: int | None
+    episode_end: int | None  # multi-episode files (S03E01E02)
+
+
+def _norm_folder(name: str) -> str:
+    """Case/punctuation-insensitive key: 'Colin.From.Accounts' == 'Colin From Accounts'."""
+
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def _series_folder(target: LibraryTarget, tv_root: str, title: str) -> str:
+    wanted = _sanitize(title)
+    key = _norm_folder(wanted)
+    try:
+        for existing in target.list_dir(tv_root.rstrip("/")):
+            if _norm_folder(existing) == key:
+                return existing
+    except Exception:  # listing is an optimisation; never fail the import over it
+        log.warning("import.list_series_failed", tv_root=tv_root)
+    return wanted
+
+
+def import_completed_episodes(
+    config: AppConfig,
+    target: LibraryTarget,
+    *,
+    content_path: str,
+    series_title: str,
+    season: int | None,
+    on_progress: ProgressCb = None,
+) -> list[EpisodeImport]:
+    """Copy a finished episode/season-pack torrent into the library.
+
+    Each media file lands in ``TV Shows/<Series>/Season NN/<its own name>`` —
+    NN parsed from the filename, falling back to the candidate's ``season``.
+    Progress is reported across the whole batch. Returns one record per file.
+    """
+
+    from .select import parse_season_episode
+
+    videos = sorted(_walk_videos(content_path))
+    if not videos:
+        raise ImportError_(f"no media file found under {content_path!r}")
+    tv_root = config.nas.tv_root.rstrip("/")
+    folder = _series_folder(target, tv_root, series_title)
+
+    total = sum(size for _path, size in videos)
+    copied_before = 0
+    out: list[EpisodeImport] = []
+    for video, size in videos:
+        name = os.path.basename(video)
+        seasons, episodes = parse_season_episode(name)
+        file_season = (seasons[0] if len(seasons) == 1 else None) or season
+        file_episode = episodes[0] if episodes else None
+        episode_end = episodes[-1] if len(episodes) > 1 else None
+        season_dir = f"Season {file_season:02d}" if file_season is not None else "Season 00"
+        rel_dir = f"{tv_root}/{folder}/{season_dir}"
+
+        def batch_progress(done: int, _file_total: int, *, offset: int = copied_before) -> None:
+            if on_progress is not None:
+                on_progress(offset + done, total)
+
+        dest = target.import_file(video, rel_dir, _sanitize(name), batch_progress)
+        copied_before += size
+        out.append(EpisodeImport(dest, name, file_season, file_episode, episode_end))
+        log.info("import.episode_done", series=series_title, source=video, dest=dest)
+    return out
 
 
 def build_library_target(config: AppConfig) -> LibraryTarget:
@@ -236,6 +335,13 @@ class LocalLibraryTarget:
     def __init__(self, base_dir: str, mount: SmbMount | None = None) -> None:
         self.base_dir = base_dir
         self.mount = mount
+
+    def list_dir(self, rel_dir: str) -> list[str]:
+        path = os.path.join(self.base_dir, *rel_dir.split("/"))
+        try:
+            return os.listdir(path)
+        except OSError:
+            return []
 
     def import_file(
         self, local_src: str, rel_dir: str, filename: str, on_progress: ProgressCb = None
@@ -288,6 +394,15 @@ class SMBLibraryTarget:
     def _unc(self, rel: str) -> str:
         parts = [p for p in rel.replace("/", "\\").split("\\") if p]
         return "\\\\" + "\\".join([self.host, self.share, *parts])
+
+    def list_dir(self, rel_dir: str) -> list[str]:
+        import smbclient
+
+        self._ensure_session()
+        try:
+            return list(smbclient.listdir(self._unc(rel_dir)))
+        except OSError:
+            return []
 
     def import_file(
         self, local_src: str, rel_dir: str, filename: str, on_progress: ProgressCb = None

@@ -21,7 +21,10 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .importer import EpisodeImport
 
 import httpx
 from sqlalchemy import select as sa_select
@@ -169,6 +172,37 @@ def register_owned_movie(config: AppConfig, title_id: int, dest: str, release_na
             s.add(owned)
         owned.title_id = title_id  # keep the enriched candidate Title, don't re-resolve
         owned.kind = TitleKind.movie
+        if parsed is not None:
+            owned.resolution = parsed.resolution
+            owned.codec = parsed.codec
+            owned.container = parsed.container
+        owned.size_bytes = size
+        s.flush()
+        return owned.id
+
+
+def register_owned_episode(config: AppConfig, title_id: int, ep: EpisodeImport) -> int:
+    """Catalog a just-imported episode as an ``OwnedFile``, keyed by the UNC path
+    the scanner uses. Idempotent."""
+
+    from ...scanner.parse import parse_media
+
+    parsed = parse_media(ep.filename, kind_hint=TitleKind.series)
+    unc = _mount_to_unc(ep.dest, config)
+    try:
+        size = os.path.getsize(ep.dest)
+    except OSError:
+        size = None
+    with session_scope() as s:
+        owned = s.scalar(sa_select(OwnedFile).where(OwnedFile.path == unc))
+        if owned is None:
+            owned = OwnedFile(path=unc, title_id=title_id, kind=TitleKind.series)
+            s.add(owned)
+        owned.title_id = title_id  # keep the enriched candidate Title, don't re-resolve
+        owned.kind = TitleKind.series
+        owned.season = ep.season
+        owned.episode = ep.episode
+        owned.episode_end = ep.episode_end
         if parsed is not None:
             owned.resolution = parsed.resolution
             owned.codec = parsed.codec
@@ -474,9 +508,9 @@ async def sync_downloads_torrent(config: AppConfig) -> SyncStats:
         # Include "completed": a torrent that finished but whose import failed sits
         # there awaiting a retry.
         rows: list[tuple[int, str]] = []
-        meta: dict[int, tuple[int, TitleKind, str, int | None]] = {}
-        for dl, title in s.execute(
-            sa_select(Download, Title)
+        meta: dict[int, tuple[int, TitleKind, str, int | None, int | None]] = {}
+        for dl, title, season in s.execute(
+            sa_select(Download, Title, Candidate.season)
             .join(Candidate, Candidate.id == Download.candidate_id)
             .join(Title, Title.id == Candidate.title_id)
             .where(Download.state.in_(("queued", "downloading", "importing", "completed")))
@@ -484,7 +518,7 @@ async def sync_downloads_torrent(config: AppConfig) -> SyncStats:
             if not dl.external_id:
                 continue
             rows.append((dl.id, dl.external_id))
-            meta[dl.id] = (title.id, title.kind, title.title, title.year)
+            meta[dl.id] = (title.id, title.kind, title.title, title.year, season)
 
     stats = SyncStats()
     # A large NAS copy that fails (e.g. the SMB mount drops mid-transfer) tends to
@@ -504,9 +538,19 @@ async def sync_downloads_torrent(config: AppConfig) -> SyncStats:
             if st is not None and st.complete:
                 if imports_blocked:
                     continue  # deferred to the next sweep after an earlier failure
-                title_id, kind, title, year = meta[download_id]
+                title_id, kind, title, year, season = meta[download_id]
                 err = await _finish_completed(
-                    config, client, stats, download_id, infohash, st, title_id, kind, title, year
+                    config,
+                    client,
+                    stats,
+                    download_id,
+                    infohash,
+                    st,
+                    title_id,
+                    kind,
+                    title,
+                    year,
+                    season,
                 )
                 if err is not None:
                     imports_blocked = True
@@ -616,46 +660,66 @@ async def _finish_completed(
     kind: TitleKind,
     title: str,
     year: int | None,
+    season: int | None,
 ) -> str | None:
     """Import a finished torrent into the library and mark it imported.
 
-    Movies are copied into the NAS layout; series are left in the download dir
-    (per-episode placement isn't modelled yet) but still marked imported. A
-    failed movie import records the error and leaves state ``completed`` so the
-    next sync retries — the candidate is not advanced until the file is in place.
-    Returns the error string on a failed import (else ``None``).
+    Movies are copied into the NAS movie layout; series torrents (an episode or
+    a whole season pack) place each media file into ``TV Shows/<Series>/Season
+    NN/``. A failed import records the error and leaves state ``completed`` so
+    the next sync retries — the candidate is not advanced until the files are
+    in place. Returns the error string on a failed import (else ``None``).
     """
 
     dest: str | None = None
+    episodes: list[EpisodeImport] = []
     error: str | None = None
 
-    if kind is TitleKind.movie and config.torrent.import_to_library:
-        content = st.content_path()
-        if content is None:
-            error = "client reported no content path"
-        else:
-            try:
-                from .importer import build_library_target, import_completed_movie
+    content = st.content_path()
+    if not config.torrent.import_to_library:
+        log.info("import.skipped_disabled", download=download_id, title=title)
+    elif content is None:
+        error = "client reported no content path"
+    elif kind is TitleKind.movie:
+        try:
+            from .importer import build_library_target, import_completed_movie
 
-                target = build_library_target(config)
-                # Mark 'importing' + copy in a worker thread so the big NAS copy
-                # neither blocks the event loop nor hides its progress: the copy
-                # updates Download.progress, which the Activity view polls live.
-                _set_download(download_id, state="importing", progress=0.0)
-                dest = await asyncio.to_thread(
-                    import_completed_movie,
-                    config,
-                    target,
-                    content_path=content,
-                    title=title,
-                    year=year,
-                    on_progress=_import_progress_cb(download_id),
-                )
-            except Exception as exc:
-                error = f"import failed: {redact_exc(exc)}"
-                log.warning("import.failed", download=download_id, title=title, detail=error)
-    elif kind is TitleKind.series:
-        log.info("import.series_skipped", download=download_id, title=title)
+            target = build_library_target(config)
+            # Mark 'importing' + copy in a worker thread so the big NAS copy
+            # neither blocks the event loop nor hides its progress: the copy
+            # updates Download.progress, which the Activity view polls live.
+            _set_download(download_id, state="importing", progress=0.0)
+            dest = await asyncio.to_thread(
+                import_completed_movie,
+                config,
+                target,
+                content_path=content,
+                title=title,
+                year=year,
+                on_progress=_import_progress_cb(download_id),
+            )
+        except Exception as exc:
+            error = f"import failed: {redact_exc(exc)}"
+            log.warning("import.failed", download=download_id, title=title, detail=error)
+    else:
+        try:
+            from .importer import build_library_target, import_completed_episodes
+
+            target = build_library_target(config)
+            _set_download(download_id, state="importing", progress=0.0)
+            episodes = await asyncio.to_thread(
+                import_completed_episodes,
+                config,
+                target,
+                content_path=content,
+                series_title=title,
+                season=season,
+                on_progress=_import_progress_cb(download_id),
+            )
+            dest = os.path.dirname(episodes[-1].dest) if episodes else None
+        except Exception as exc:
+            error = f"import failed: {redact_exc(exc)}"
+            log.warning("import.failed", download=download_id, title=title, detail=error)
 
     if error is not None:
         with session_scope() as s:
@@ -687,17 +751,27 @@ async def _finish_completed(
                 cand.status = _status_after_finished(s, cand, dl.id)
     stats.completed += 1
 
-    # Complete the pipeline: catalog the file (so it's "owned") and fetch its
+    # Complete the pipeline: catalog the file(s) (so they're "owned") and fetch
     # subtitles now, instead of waiting for a NAS rescan + a full sweep. Best-effort
-    # — a failure here never un-imports the movie.
-    if kind is TitleKind.movie and dest is not None:
-        try:
-            owned_id = register_owned_movie(config, title_id, dest, st.name or title)
-            if config.subtitles.backend == "native":
-                from ...subtitles.native.service import fetch_for_owned_file
+    # — a failure here never un-imports the media.
+    try:
+        owned_ids: list[int] = []
+        if kind is TitleKind.movie and dest is not None:
+            owned_ids.append(register_owned_movie(config, title_id, dest, st.name or title))
+        else:
+            owned_ids.extend(register_owned_episode(config, title_id, ep) for ep in episodes)
+        if config.subtitles.backend == "native":
+            from ...subtitles.native.service import fetch_for_owned_file
 
+            for owned_id in owned_ids:
                 got = await fetch_for_owned_file(config, owned_id)
-                log.info("import.subtitles", download=download_id, title=title, fetched=len(got))
-        except Exception as exc:
-            log.warning("import.catalog_failed", download=download_id, detail=redact_exc(exc))
+                log.info(
+                    "import.subtitles",
+                    download=download_id,
+                    title=title,
+                    owned_file=owned_id,
+                    fetched=len(got),
+                )
+    except Exception as exc:
+        log.warning("import.catalog_failed", download=download_id, detail=redact_exc(exc))
     return None

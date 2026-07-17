@@ -148,12 +148,15 @@ release each and the candidate returns to `approved` when they finish; the next
 acquire run tops up newly-aired episodes (coverage tracked against the season's
 announced episode count, `features.season_episodes`) until the season completes.
 
+A completed series torrent (single episode or a whole pack) is imported the same
+way movies are: each media file is copied into `TV Shows/<Series>/Season NN/`
+(keeping its release filename — that's what the scanner parses), cataloged as an
+owned file with season/episode, and its subtitles fetched (native backend). An
+existing series folder is reused even when its name is styled differently
+(`Colin.From.Accounts` vs `Colin From Accounts`), so a show never splits across
+two folders.
+
 ## Limitations
 
-- **Series import is not done here.** A completed series torrent is marked
-  imported but its files are **left in the download dir** — per-episode placement
-  into `TV Shows/<Series>/Season NN/` isn't modelled. Only movies are copied into
-  the library. For per-episode management, use the arr backend.
-- Import is a straight copy with the target name; it does not fetch subtitles or
-  push naming templates (that's Bazarr/the arr stack). Run the existing subtitle
-  sweep afterwards if you want subs.
+- Import is a straight copy with the target name; it does not push naming
+  templates (that's Bazarr/the arr stack).
