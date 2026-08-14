@@ -83,6 +83,9 @@ class TorrentStatus:
     down_rate: int | None = None  # bytes/sec
     seeders: int | None = None  # peers sending to us
     eta_seconds: int | None = None  # client estimate; negative/None = unknown
+    # File names inside the torrent, once magnet metadata resolves. None while
+    # unknown — the safety scan (executables / no media) waits for a real list.
+    files: list[str] | None = None
 
     def content_path(self) -> str | None:
         """Local path to the downloaded file/folder (``save_path`` joined to

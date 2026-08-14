@@ -9,10 +9,18 @@ a "Title Season 3" search happily returns other seasons' packs.
 
 from __future__ import annotations
 
+import re
+
 from guessit import guessit
 
 from ...db.models import TitleKind
 from .base import TorrentRelease
+
+# Release names that are executables in disguise ("Movie 2026 1080p ... .exe",
+# often with padding spaces before the extension). Never grab these.
+_EXECUTABLE_NAME = re.compile(
+    r"\.\s*(exe|scr|bat|cmd|com|msi|pif|vbs|jar|apk|dmg|lnk)\s*$", re.IGNORECASE
+)
 
 
 def build_query(title: str, year: int | None, kind: TitleKind, season: int | None = None) -> str:
@@ -70,9 +78,10 @@ def select_release(
 ) -> TorrentRelease | None:
     """Best downloadable release, or ``None`` if nothing qualifies.
 
-    A release is dropped when it has no usable magnet, too few seeders, or a
-    *detected* resolution outside ``allowed_resolutions``. Releases whose
-    resolution can't be parsed are kept but ranked below explicit matches.
+    A release is dropped when it has no usable magnet, too few seeders, an
+    executable-styled name, or a *detected* resolution outside
+    ``allowed_resolutions``. Releases whose resolution can't be parsed are kept
+    but ranked below explicit matches.
 
     With ``season`` set, only releases that parse to exactly that season
     qualify (multi-season packs are excluded — they'd re-download seasons you
@@ -85,6 +94,8 @@ def select_release(
     for rel in releases:
         if rel.magnet_uri() is None or rel.seeders < min_seeders:
             continue
+        if _EXECUTABLE_NAME.search(rel.title):
+            continue  # malware bait, whatever its seeders say
         if season is not None:
             seasons, episodes = parse_season_episode(rel.title)
             if seasons != [season]:

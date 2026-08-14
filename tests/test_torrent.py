@@ -690,3 +690,88 @@ async def test_stalled_torrent_fails_after_grace(
     with session_scope() as s:
         assert s.get(Candidate, cid).status == CandidateStatus.failed
         assert s.query(Download).one().state == "failed"
+
+
+# --- malware guard -----------------------------------------------------------
+
+
+def test_select_rejects_executable_styled_names() -> None:
+    """A '... .exe' release never wins, whatever its seeders say."""
+    releases = [
+        TorrentRelease(
+            "piratebay",
+            "Movie 2026 1080p WEB-DL DDP5 1 H 264-FLUX .exe",
+            900,
+            1,
+            1,
+            infohash="a" * 40,
+        ),
+        TorrentRelease("piratebay", "Movie 2026 1080p WEB", 10, 1, 1, infohash="b" * 40),
+    ]
+    picked = select_release(releases, allowed_resolutions=["1080p"], min_seeders=1)
+    assert picked is not None and picked.infohash == "b" * 40
+
+
+def test_unsafe_content_verdicts() -> None:
+    from homeTheater.acquisition.torrent.service import _unsafe_content
+
+    assert _unsafe_content(None) is None  # magnet metadata not resolved yet
+    assert _unsafe_content([]) is None
+    verdict = _unsafe_content(["Movie 2026 1080p H 264-FLUX .exe"])  # padded extension
+    assert verdict is not None and "executable" in verdict
+    verdict = _unsafe_content(["movie.rar", "movie.nfo"])
+    assert verdict is not None and "no media" in verdict
+    assert _unsafe_content(["Release/movie.mkv", "Release/info.nfo"]) is None
+
+
+@respx.mock
+async def test_sync_quarantines_executable_torrent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A torrent whose file list turns out to be an exe is removed (with data)
+    mid-download and the candidate fails — it must never reach import."""
+
+    _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch)
+    _reset()
+    cid = _seed_approved()
+    _seed_downloading(cid)
+
+    torrents = {
+        "result": "success",
+        "arguments": {
+            "torrents": [
+                {
+                    "hashString": HASH,
+                    "name": "The Matrix 1999 1080p FLUX .exe",
+                    "percentDone": 0.05,
+                    "status": 4,
+                    "downloadDir": "/d",
+                    "error": 0,
+                    "errorString": "",
+                    "files": [{"name": "The Matrix 1999 1080p FLUX .exe", "length": 1258778624}],
+                }
+            ]
+        },
+    }
+    route = respx.post(TRANSMISSION).mock(
+        side_effect=[
+            httpx.Response(409, headers={"X-Transmission-Session-Id": "s"}),
+            httpx.Response(200, json=torrents),
+            httpx.Response(200, json={"result": "success", "arguments": {}}),  # torrent-remove
+        ]
+    )
+
+    from homeTheater.acquisition import sync_downloads
+    from homeTheater.config import get_config
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate, CandidateStatus, Download
+
+    stats = await sync_downloads(get_config())
+
+    assert stats.failed == 1 and any("executable" in e for e in stats.errors)
+    removes = [c for c in route.calls if b'"torrent-remove"' in c.request.content]
+    assert removes and b'"delete-local-data":true' in removes[0].request.content
+    with session_scope() as s:
+        dl = s.query(Download).one()
+        assert dl.state == "failed" and "malware" in dl.error
+        assert s.get(Candidate, cid).status == CandidateStatus.failed

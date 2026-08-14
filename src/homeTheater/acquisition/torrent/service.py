@@ -535,6 +535,12 @@ async def sync_downloads_torrent(config: AppConfig) -> SyncStats:
                 stats.errors.append(f"{infohash}: {redact_exc(exc)}")
                 continue
 
+            # Safety scan before anything else (including import): a torrent whose
+            # metadata reveals executables or no media at all is removed on sight.
+            if st is not None and (unsafe := _unsafe_content(st.files)) is not None:
+                await _quarantine(client, download_id, infohash, unsafe, stats)
+                continue
+
             if st is not None and st.complete:
                 if imports_blocked:
                     continue  # deferred to the next sweep after an earlier failure
@@ -584,6 +590,62 @@ async def sync_downloads_torrent(config: AppConfig) -> SyncStats:
                         cand.status = CandidateStatus.failed
                     stats.failed += 1
     return stats
+
+
+# File extensions that mean "this torrent is malware bait, not media". A movie
+# release has no business containing any of these.
+_EXECUTABLE_EXTS = frozenset(
+    {".exe", ".scr", ".bat", ".cmd", ".com", ".msi", ".pif", ".vbs", ".jar", ".apk", ".dmg", ".lnk"}
+)
+
+
+def _unsafe_content(files: list[str] | None) -> str | None:
+    """Why this torrent's file list must not be downloaded, or ``None`` if fine.
+
+    ``None``/empty input means magnet metadata hasn't resolved yet — not a
+    verdict. Filenames are stripped: fakes pad spaces before the extension
+    ("Movie 1080p .exe") to hide it in UIs.
+    """
+
+    from ...scanner.parse import is_media_file
+
+    if not files:
+        return None
+    for name in files:
+        clean = name.strip()
+        ext = os.path.splitext(clean)[1].strip().lower()
+        if ext in _EXECUTABLE_EXTS:
+            return f"contains an executable ({os.path.basename(clean)!r}) — likely malware"
+    if not any(is_media_file(name.strip()) for name in files):
+        return "contains no media file"
+    return None
+
+
+async def _quarantine(
+    client: DownloadClient, download_id: int, infohash: str, reason: str, stats: SyncStats
+) -> None:
+    """Remove a malicious/junk torrent (with its data) and fail its download."""
+
+    log.warning("sync.unsafe_torrent", download=download_id, infohash=infohash, reason=reason)
+    try:
+        await client.remove(infohash, delete_data=True)
+    except Exception as exc:  # keep the DB verdict even if the client call fails
+        log.warning("sync.unsafe_remove_failed", infohash=infohash, detail=redact_exc(exc))
+    with session_scope() as s:
+        dl = s.get(Download, download_id)
+        if dl is None:
+            return
+        dl.state = "failed"
+        dl.error = f"removed: torrent {reason}"
+        cand = s.get(Candidate, dl.candidate_id)
+        if (
+            cand is not None
+            and cand.status is not CandidateStatus.rejected
+            and _live_sibling(s, cand.id, dl.id) is None
+        ):
+            cand.status = CandidateStatus.failed
+    stats.failed += 1
+    stats.errors.append(f"{infohash}: {reason}")
 
 
 def _live_sibling(s: Session, candidate_id: int, download_id: int) -> int | None:

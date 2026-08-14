@@ -35,6 +35,7 @@ _FIELDS = [
     "rateDownload",
     "peersSendingToUs",
     "eta",
+    "files",
 ]
 
 # torrent id lookups accept the hash string directly (rpc-spec §3.1).
@@ -111,6 +112,9 @@ class TransmissionClient:
         )
         error = t.get("errorString") or None if t.get("error") else None
         eta = t.get("eta")
+        # Empty until magnet metadata resolves — report None so callers treat the
+        # file list as unknown rather than "no files".
+        file_names = [str(f["name"]) for f in (t.get("files") or []) if f.get("name")] or None
         return TorrentStatus(
             infohash=str(t.get("hashString", infohash)).lower(),
             progress=progress,
@@ -122,6 +126,7 @@ class TransmissionClient:
             down_rate=int(t.get("rateDownload", 0) or 0),
             seeders=int(t.get("peersSendingToUs", 0) or 0),
             eta_seconds=int(eta) if isinstance(eta, int | float) and eta >= 0 else None,
+            files=file_names,
         )
 
     async def remove(self, infohash: str, *, delete_data: bool) -> None:
