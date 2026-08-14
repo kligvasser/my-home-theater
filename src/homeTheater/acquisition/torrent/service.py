@@ -282,7 +282,10 @@ async def queue_candidate_torrent(config: AppConfig, candidate_id: int) -> Queue
         query = build_query(snap.title, snap.year, snap.kind)
         releases = await _search_all(sources, query, snap.kind)
         chosen = select_release(
-            releases, allowed_resolutions=allowed, min_seeders=config.torrent.min_seeders
+            releases,
+            allowed_resolutions=allowed,
+            min_seeders=config.torrent.min_seeders,
+            banned=_quarantined_hashes(),
         )
         if chosen is None:
             return QueueOutcome(
@@ -367,6 +370,23 @@ _EPISODE_PROBE_MISSES = 2
 _EPISODE_PROBE_CAP = 30
 
 
+def _quarantined_hashes() -> frozenset[str]:
+    """Infohashes previously removed as malware/junk — never grab these again.
+
+    The quarantine keeps the failed ``Download`` row (error ``removed: …``) as
+    the ban record; the same fake keeps resurfacing in searches under a
+    clean-looking name.
+    """
+
+    with session_scope() as s:
+        rows = s.scalars(
+            sa_select(Download.external_id).where(
+                Download.state == "failed", Download.error.like("removed:%")
+            )
+        ).all()
+    return frozenset(h.lower() for h in rows if h)
+
+
 def _grabbed_episodes(candidate_id: int) -> set[int] | None:
     """Episodes already covered by live downloads; ``None`` means a season pack.
 
@@ -415,6 +435,7 @@ async def _queue_season(
     cid, n = snap.candidate_id, snap.season
     assert n is not None
     min_seeders = config.torrent.min_seeders
+    banned = _quarantined_hashes()
     have = _grabbed_episodes(cid)
     if have is None:  # a pack download is live; nothing to add
         return QueueOutcome(
@@ -428,7 +449,11 @@ async def _queue_season(
         ):
             releases = await _search_all(sources, query, snap.kind)
             chosen = select_release(
-                releases, allowed_resolutions=allowed, min_seeders=min_seeders, season=n
+                releases,
+                allowed_resolutions=allowed,
+                min_seeders=min_seeders,
+                season=n,
+                banned=banned,
             )
             if chosen is not None:
                 if config.features.dry_run:
@@ -452,7 +477,12 @@ async def _queue_season(
             continue
         releases = await _search_all(sources, f"{snap.title} S{n:02d}E{e:02d}", snap.kind)
         chosen = select_release(
-            releases, allowed_resolutions=allowed, min_seeders=min_seeders, season=n, episode=e
+            releases,
+            allowed_resolutions=allowed,
+            min_seeders=min_seeders,
+            season=n,
+            episode=e,
+            banned=banned,
         )
         if chosen is None:
             misses += 1

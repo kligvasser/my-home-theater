@@ -75,6 +75,7 @@ def select_release(
     min_seeders: int,
     season: int | None = None,
     episode: int | None = None,
+    banned: frozenset[str] | None = None,
 ) -> TorrentRelease | None:
     """Best downloadable release, or ``None`` if nothing qualifies.
 
@@ -87,6 +88,9 @@ def select_release(
     qualify (multi-season packs are excluded — they'd re-download seasons you
     own). ``episode=None`` then means "the season pack" (episode-numbered
     releases are dropped); ``episode=e`` means a release containing episode e.
+
+    ``banned`` infohashes (previously quarantined as malware/junk) are never
+    picked again — their listing names look clean, only their content told.
     """
 
     allowed = [r.lower() for r in allowed_resolutions] if allowed_resolutions else []
@@ -96,6 +100,8 @@ def select_release(
             continue
         if _EXECUTABLE_NAME.search(rel.title):
             continue  # malware bait, whatever its seeders say
+        if banned and rel.infohash and rel.infohash.lower() in banned:
+            continue  # quarantined before; the same fake resurfaces in searches
         if season is not None:
             seasons, episodes = parse_season_episode(rel.title)
             if seasons != [season]:

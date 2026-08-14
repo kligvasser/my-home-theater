@@ -775,3 +775,68 @@ async def test_sync_quarantines_executable_torrent(
         dl = s.query(Download).one()
         assert dl.state == "failed" and "malware" in dl.error
         assert s.get(Candidate, cid).status == CandidateStatus.failed
+
+
+@respx.mock
+async def test_requeue_after_quarantine_skips_banned_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a torrent is quarantined, re-queueing the candidate must pick a
+    different release — the fake's listing name looks clean, so only the
+    infohash ban prevents an endless grab/quarantine loop."""
+
+    _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch)
+    _reset()
+    cid = _seed_approved()
+
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate, CandidateStatus, Download
+
+    bad_hash = "f" * 40
+    with session_scope() as s:
+        s.add(
+            Download(
+                candidate_id=cid,
+                external_id=bad_hash,
+                state="failed",
+                release="The Matrix 1999 2160p WEB",
+                error="removed: torrent contains an executable — likely malware",
+            )
+        )
+        s.get(Candidate, cid).status = CandidateStatus.failed
+
+    rows = [
+        {  # the quarantined fake, still the top listing by seeders
+            "id": "9",
+            "name": "The Matrix 1999 2160p WEB",
+            "info_hash": bad_hash,
+            "seeders": "999",
+            "leechers": "1",
+            "size": "1258778624",
+        },
+        *_apibay_rows(),
+    ]
+    respx.get(f"{APIBAY}/q.php").mock(return_value=httpx.Response(200, json=rows))
+    respx.post(TRANSMISSION).mock(
+        side_effect=[
+            httpx.Response(409, headers={"X-Transmission-Session-Id": "s"}),
+            httpx.Response(
+                200,
+                json={
+                    "result": "success",
+                    "arguments": {"torrent-added": {"hashString": HASH, "name": "ok"}},
+                },
+            ),
+        ]
+    )
+
+    from homeTheater.acquisition import queue_candidate
+    from homeTheater.config import get_config
+
+    outcome = await queue_candidate(get_config(), cid)
+
+    assert outcome.queued
+    with session_scope() as s:
+        hashes = {d.external_id for d in s.query(Download).all()}
+        assert bad_hash in hashes  # the ban record stays
+        assert HASH in hashes  # the clean 1080p release was grabbed instead
