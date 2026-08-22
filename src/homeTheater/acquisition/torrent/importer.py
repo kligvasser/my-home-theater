@@ -157,6 +157,32 @@ def _size_or_none(path: str) -> int | None:
         return None
 
 
+def _finalize_local(tmp: str, dest: str) -> None:
+    """Atomically move a verified ``tmp`` onto ``dest``.
+
+    ``os.replace`` overwrites atomically on POSIX, but some NAS firmware (WD
+    MyCloud) returns EBUSY/EINVAL when ``dest`` is an existing file it still
+    holds a stale SMB handle on. Fall back to remove-then-rename; if the NAS
+    still won't release it, raise a clear, retryable error (the handle clears
+    on its own, and the next sweep resumes from the intact ``tmp``).
+    """
+
+    try:
+        os.replace(tmp, dest)
+        return
+    except OSError:
+        pass
+    try:
+        if os.path.exists(dest):
+            os.remove(dest)
+        os.rename(tmp, dest)
+    except OSError as exc:
+        raise ImportError_(
+            f"NAS is holding {dest!r} busy ({exc.strerror}); leaving {os.path.basename(tmp)} "
+            "in place to finish on a later sweep — if it persists, remount the share."
+        ) from None
+
+
 def _sanitize(name: str) -> str:
     cleaned = _ILLEGAL.sub("", name).strip().rstrip(". ")
     return cleaned or "Untitled"
@@ -380,7 +406,7 @@ class LocalLibraryTarget:
         stale = _size_or_none(tmp)
         if stale == src_size:
             # A previous run finished the copy but died before the rename.
-            os.replace(tmp, dest)
+            _finalize_local(tmp, dest)
             return dest
         if stale is not None:
             # Some NAS firmware (WD MyCloud) refuses to re-open an existing file
@@ -396,7 +422,7 @@ class LocalLibraryTarget:
         if os.path.getsize(tmp) != src_size:
             os.remove(tmp)
             raise ImportError_(f"size mismatch copying to {dest!r}")
-        os.replace(tmp, dest)
+        _finalize_local(tmp, dest)
         return dest
 
 

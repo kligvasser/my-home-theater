@@ -980,3 +980,51 @@ async def test_sync_one_failed_import_does_not_block_others(
         }
         assert by_title["Broken"] == CandidateStatus.downloading  # retried next sweep
         assert by_title["Fine"] == CandidateStatus.imported  # not held hostage
+
+
+def test_finalize_overwrites_busy_zero_byte_dest(tmp_path: Path) -> None:
+    """A leftover wrong-size dest (the raced 0-byte file) is replaced, not
+    treated as done — the case that wedged Lioness S02E02."""
+    from homeTheater.acquisition.torrent.importer import LocalLibraryTarget
+
+    src = tmp_path / "src.mkv"
+    src.write_bytes(b"v" * 2000)
+    lib = tmp_path / "lib"
+    dest = lib / "TV Shows" / "S" / "Season 02" / "ep.mkv"
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"")  # 0-byte leftover from an interrupted/raced import
+
+    out = LocalLibraryTarget(str(lib)).import_file(str(src), "TV Shows/S/Season 02", "ep.mkv")
+
+    assert Path(out).read_bytes() == b"v" * 2000
+    assert not Path(str(dest) + ".part").exists()
+
+
+def test_finalize_raises_retryable_when_nas_holds_dest_busy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the NAS won't release the dest (EBUSY on both replace and remove), the
+    error is clear and the completed .part is left for the next sweep."""
+    import errno as _errno
+
+    from homeTheater.acquisition.torrent import importer
+    from homeTheater.acquisition.torrent.importer import ImportError_, LocalLibraryTarget
+
+    src = tmp_path / "src.mkv"
+    src.write_bytes(b"w" * 1500)
+    lib = tmp_path / "lib"
+    dest = lib / "Movies" / "M" / "M.mkv"
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"")
+
+    def busy(*_a: object, **_k: object) -> None:
+        raise OSError(_errno.EBUSY, "Resource busy")
+
+    monkeypatch.setattr(importer.os, "replace", busy)
+    monkeypatch.setattr(importer.os, "remove", busy)
+
+    target = LocalLibraryTarget(str(lib))
+    with pytest.raises(ImportError_, match="busy"):
+        target.import_file(str(src), "Movies/M", "M.mkv")
+    # the freshly-copied .part survives for the retry
+    assert (dest.parent / "M.mkv.part").read_bytes() == b"w" * 1500
