@@ -8,10 +8,12 @@ path. It reuses the same ``Candidate``/``Download`` state machine and the
 Series: a season-scoped candidate (``Candidate.season``) grabs that season's
 pack when one exists, and falls back to grabbing the available episodes one
 release each — a currently-airing season has no pack yet. Coverage is tracked
-against the season's announced episode count (``features.season_episodes``):
-when downloads finish with episodes still missing, the candidate returns to
-``approved`` so the next acquire run tops it up. Legacy title-level series
-candidates keep the old single best-effort grab. Movies are unchanged.
+against the season's announced episode count (``features.season_episodes``)
+plus whatever episodes are already on the NAS: when downloads finish with
+episodes still missing, the candidate returns to ``approved`` so the next
+acquire run tops it up. A title-level series candidate (approved from
+trending/search) means "the whole series": it is expanded into one candidate
+per aired season at grab time, each with that lifecycle. Movies are unchanged.
 """
 
 from __future__ import annotations
@@ -268,6 +270,12 @@ async def queue_candidate_torrent(config: AppConfig, candidate_id: int) -> Queue
             f"candidate {candidate_id} was rejected; approve it again before queueing"
         )
 
+    if snap.kind is TitleKind.series and snap.season is None:
+        # Approving a series means the whole series: one season candidate each.
+        outcome = await _queue_series(config, snap)
+        if outcome is not None:
+            return outcome
+
     async with httpx.AsyncClient(timeout=config.torrent.request_timeout) as http:
         sources = _build_sources(config, http)
         if not sources:
@@ -387,8 +395,27 @@ def _quarantined_hashes() -> frozenset[str]:
     return frozenset(h.lower() for h in rows if h)
 
 
-def _grabbed_episodes(candidate_id: int) -> set[int] | None:
-    """Episodes already covered by live downloads; ``None`` means a season pack.
+def _owned_episodes(title_id: int, season: int) -> set[int]:
+    """Episode numbers already on the NAS for this season (multi-episode files
+    expand to their range) — never re-download what the library has."""
+
+    with session_scope() as s:
+        rows = s.execute(
+            sa_select(OwnedFile.episode, OwnedFile.episode_end).where(
+                OwnedFile.title_id == title_id,
+                OwnedFile.season == season,
+                OwnedFile.episode.is_not(None),
+            )
+        ).all()
+    episodes: set[int] = set()
+    for episode, end in rows:
+        episodes.update(range(episode, (end or episode) + 1))
+    return episodes
+
+
+def _grabbed_episodes(candidate_id: int, title_id: int, season: int) -> set[int] | None:
+    """Episodes already covered by live downloads or owned files; ``None`` means
+    a season pack is in flight.
 
     Failed/cancelled rows don't count — their episodes are up for re-grab.
     """
@@ -400,7 +427,7 @@ def _grabbed_episodes(candidate_id: int) -> set[int] | None:
                 Download.state.in_(("queued", "downloading", "importing", "completed", "imported")),
             )
         ).all()
-    episodes: set[int] = set()
+    episodes = _owned_episodes(title_id, season)
     for name in releases:
         if not name:
             continue
@@ -422,6 +449,117 @@ def _season_target(candidate_id: int) -> int | None:
         return int(target) if target else None
 
 
+async def _aired_seasons(config: AppConfig, title_id: int) -> list[Any]:
+    """Aired seasons (number >= 1, first episode already out) of a series, from
+    TMDb details (cached). Empty when the title has no TMDb id / no data."""
+
+    from ...metadata.tmdb import TMDbClient
+
+    with session_scope() as s:
+        title = s.get(Title, title_id)
+        tmdb_id = title.tmdb_id if title is not None else None
+    if tmdb_id is None or config.secrets.tmdb_api_key is None:
+        return []
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        tmdb = TMDbClient(
+            config.secrets.tmdb_api_key.get_secret_value(),
+            http,
+            language=config.metadata.language,
+            cache_days=config.metadata.cache_days,
+        )
+        details = await tmdb.details(tmdb_id, TitleKind.series)
+    today = utcnow().date().isoformat()
+    return sorted(
+        (sn for sn in details.seasons if sn.number >= 1 and sn.air_date and sn.air_date <= today),
+        key=lambda sn: sn.number,
+    )
+
+
+async def _expand_series(config: AppConfig, snap: _Snap) -> list[int]:
+    """Turn a title-level series candidate into per-season candidates.
+
+    The candidate itself becomes the first aired season; every other aired
+    season gets an ``approved`` sibling (unless one already exists). Returns the
+    candidate ids to grab, first one first. Empty when TMDb has no season data
+    (caller falls back to the plain title grab).
+    """
+
+    from ...discovery.service import BLOCKING_STATUSES
+
+    seasons = await _aired_seasons(config, snap.title_id)
+    if not seasons:
+        return []
+
+    def season_feats(base: dict[str, Any] | None, sn: Any) -> dict[str, Any]:
+        feats = dict(base or {})
+        feats["season"] = sn.number
+        if sn.episode_count:
+            feats["season_episodes"] = sn.episode_count
+        return feats
+
+    ids: list[int] = []
+    with session_scope() as s:
+        cand = s.get(Candidate, snap.candidate_id)
+        if cand is None:
+            return []
+        first = seasons[0]
+        cand.season = first.number
+        cand.features = season_feats(cand.features, first)
+        ids.append(cand.id)
+        for sn in seasons[1:]:
+            exists = s.scalar(
+                sa_select(Candidate.id).where(
+                    Candidate.title_id == cand.title_id,
+                    Candidate.season == sn.number,
+                    Candidate.status.in_(BLOCKING_STATUSES),
+                )
+            )
+            if exists is not None:
+                continue
+            sibling = Candidate(
+                title_id=cand.title_id,
+                season=sn.number,
+                source=cand.source,
+                status=CandidateStatus.approved,
+                reason=f"season S{sn.number:02d} of {snap.title} (series approved)",
+                score=cand.score,
+                features=season_feats(cand.features, sn),
+                decided_at=utcnow(),
+            )
+            s.add(sibling)
+            s.flush()
+            ids.append(sibling.id)
+    log.info("acquire.series_expanded", candidate=snap.candidate_id, seasons=len(ids))
+    return ids
+
+
+async def _queue_series(config: AppConfig, snap: _Snap) -> QueueOutcome | None:
+    """Grab a whole series: expand into seasons and queue each. ``None`` means
+    no season data — use the plain title grab instead."""
+
+    if config.features.dry_run:
+        seasons = await _aired_seasons(config, snap.title_id)
+        if not seasons:
+            return None
+        listed = ", ".join(f"S{sn.number:02d}" for sn in seasons)
+        return QueueOutcome(
+            snap.candidate_id, False, True, None, f"would grab {len(seasons)} seasons ({listed})"
+        )
+
+    ids = await _expand_series(config, snap)
+    if not ids:
+        return None
+    parts: list[str] = []
+    queued = False
+    for cid in ids:
+        outcome = await queue_candidate_torrent(config, cid)
+        queued = queued or outcome.queued
+        season = _load_snap(cid)
+        label = f"S{season.season:02d}" if season and season.season is not None else str(cid)
+        parts.append(f"{label}: {outcome.message}")
+    return QueueOutcome(snap.candidate_id, queued, False, None, "; ".join(parts))
+
+
 async def _queue_season(
     config: AppConfig,
     http: httpx.AsyncClient,
@@ -436,7 +574,7 @@ async def _queue_season(
     assert n is not None
     min_seeders = config.torrent.min_seeders
     banned = _quarantined_hashes()
-    have = _grabbed_episodes(cid)
+    have = _grabbed_episodes(cid, snap.title_id, n)
     if have is None:  # a pack download is live; nothing to add
         return QueueOutcome(
             cid, False, config.features.dry_run, None, "season pack already grabbed"
@@ -714,6 +852,8 @@ def _status_after_finished(s: Session, cand: Candidate, download_id: int) -> Can
             if not eps:
                 pack = True
             covered.update(eps)
+        if cand.season is not None:
+            covered |= _owned_episodes(cand.title_id, cand.season)
         if not pack and len(covered) < int(target):
             return CandidateStatus.approved
     return CandidateStatus.imported

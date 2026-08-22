@@ -498,3 +498,162 @@ async def test_sync_one_stalled_episode_does_not_fail_active_candidate(
         assert states["c" * 40] == "failed" and states["e" * 40] == "downloading"
         # the candidate keeps riding the live download instead of failing
         assert s.get(Candidate, cid).status == CandidateStatus.downloading
+
+
+# --- whole-series approval → per-season candidates -----------------------------
+
+TMDB = "https://api.themoviedb.org/3"
+
+
+def _seed_series_candidate() -> int:
+    """A title-level series candidate, as trending/search produce (season=None)."""
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate, CandidateSource, CandidateStatus, Title
+
+    init_db()
+    with session_scope() as s:
+        t = Title(tmdb_id=125988, title="Silo", year=2023, kind=TitleKind.series)
+        s.add(t)
+        s.flush()
+        c = Candidate(
+            title_id=t.id, source=CandidateSource.discovery, status=CandidateStatus.approved
+        )
+        s.add(c)
+        s.flush()
+        return c.id
+
+
+def _mock_tmdb_seasons(seasons: list[dict]) -> None:
+    respx.get(f"{TMDB}/tv/125988").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 125988,
+                "name": "Silo",
+                "first_air_date": "2023-05-05",
+                "genres": [],
+                "external_ids": {},
+                "number_of_seasons": len(seasons),
+                "status": "Returning Series",
+                "seasons": seasons,
+            },
+        )
+    )
+
+
+@respx.mock
+async def test_series_candidate_expands_into_aired_seasons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Approving a series (no season) grabs every aired season — one candidate
+    each — instead of a single best-seeded episode; unaired seasons wait."""
+
+    _write_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("TMDB_API_KEY", "k")
+    _reset()
+    cid = _seed_series_candidate()
+    _mock_tmdb_seasons(
+        [
+            {"season_number": 0, "episode_count": 2, "air_date": "2023-01-01"},  # specials
+            {"season_number": 1, "episode_count": 10, "air_date": "2023-05-05"},
+            {"season_number": 2, "episode_count": 10, "air_date": "2024-11-15"},
+            {"season_number": 3, "episode_count": 10, "air_date": "2031-01-01"},  # unaired
+        ]
+    )
+    _apibay_by_query(
+        {
+            # the trap the old path fell into: newest single episode tops the list
+            "Silo": [_row("Silo S02E10 1080p WEB h264", "9" * 40, seeders=5000)],
+            "Silo S01": [_row("Silo S01 COMPLETE 1080p WEB H264", "a" * 40)],
+            "Silo S02": [_row("Silo S02 COMPLETE 1080p WEB H264", "b" * 40)],
+        }
+    )
+    _transmission_accepts_adds()
+
+    from homeTheater.acquisition import queue_candidate
+    from homeTheater.config import get_config
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate, CandidateStatus, Download
+
+    outcome = await queue_candidate(get_config(), cid)
+
+    assert outcome.queued
+    assert "S01: grabbed season pack" in outcome.message
+    assert "S02: grabbed season pack" in outcome.message
+    with session_scope() as s:
+        cands = {c.season: c for c in s.query(Candidate).all()}
+        assert set(cands) == {1, 2}  # original became S1; S2 sibling; no S3 yet
+        assert cands[1].id == cid and cands[1].features["season_episodes"] == 10
+        assert all(c.status == CandidateStatus.queued for c in cands.values())
+        assert {d.external_id for d in s.query(Download).all()} == {"a" * 40, "b" * 40}
+
+
+@respx.mock
+async def test_series_candidate_dry_run_reports_seasons_without_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(tmp_path, monkeypatch, dry_run=True)
+    monkeypatch.setenv("TMDB_API_KEY", "k")
+    _reset()
+    cid = _seed_series_candidate()
+    _mock_tmdb_seasons(
+        [
+            {"season_number": 1, "episode_count": 10, "air_date": "2023-05-05"},
+            {"season_number": 2, "episode_count": 10, "air_date": "2024-11-15"},
+        ]
+    )
+
+    from homeTheater.acquisition import queue_candidate
+    from homeTheater.config import get_config
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate
+
+    outcome = await queue_candidate(get_config(), cid)
+
+    assert outcome.dry_run and "2 seasons (S01, S02)" in outcome.message
+    with session_scope() as s:
+        assert s.query(Candidate).count() == 1  # nothing expanded
+        assert s.get(Candidate, cid).season is None
+
+
+@respx.mock
+async def test_topup_skips_episodes_already_owned_on_nas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Episodes already in the library (from any source) are never re-grabbed."""
+
+    _write_config(tmp_path, monkeypatch)
+    _reset()
+    cid = _seed_season_candidate(season_episodes=3)
+
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate, Download, OwnedFile
+
+    with session_scope() as s:
+        title_id = s.get(Candidate, cid).title_id
+        s.add(
+            OwnedFile(
+                path=r"\\nas\T\TV Shows\Silo\Season 03\Silo.S03E01.mkv",
+                title_id=title_id,
+                kind=TitleKind.series,
+                season=3,
+                episode=1,
+            )
+        )
+
+    _apibay_by_query(
+        {
+            "Silo S03E01": [_row("Silo S03E01 1080p WEB h264", "c" * 40)],
+            "Silo S03E02": [_row("Silo S03E02 1080p WEB h264", "e" * 40)],
+        }
+    )
+    _transmission_accepts_adds()
+
+    from homeTheater.acquisition import queue_candidate
+    from homeTheater.config import get_config
+
+    outcome = await queue_candidate(get_config(), cid)
+
+    assert outcome.queued and "E02" in outcome.message and "E01" not in outcome.message
+    with session_scope() as s:
+        assert {d.external_id for d in s.query(Download).all()} == {"e" * 40}

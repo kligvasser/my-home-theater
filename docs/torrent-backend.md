@@ -140,13 +140,20 @@ to the NAS, so it no longer uploads.
 
 ## Season grabs
 
+Approving a **series** (from trending, the watchlist, or the search box) means the
+whole series: at grab time it is expanded into one candidate per aired season,
+so a show never arrives as a single stray episode. Each season candidate then
+follows the rules below; seasons that haven't started airing wait for the
+"new season" discovery source to surface them later.
+
 A season-scoped candidate (discovery's "new season of a series you own") grabs
 the season pack when one exists — releases are **season-verified** with guessit,
 so a `Title Season N` search can't grab another season's pack. While a season is
 still airing there is no pack, so the backend grabs the available episodes one
 release each and the candidate returns to `approved` when they finish; the next
 acquire run tops up newly-aired episodes (coverage tracked against the season's
-announced episode count, `features.season_episodes`) until the season completes.
+announced episode count, `features.season_episodes`, and episodes already on the
+NAS are never re-downloaded) until the season completes.
 
 A completed series torrent (single episode or a whole pack) is imported the same
 way movies are: each media file is copied into `TV Shows/<Series>/Season NN/`
