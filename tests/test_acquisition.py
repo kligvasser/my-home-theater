@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -319,3 +320,25 @@ def test_sonarr_series_complete_semantics() -> None:
     assert _series_complete({"percentOfEpisodes": 100.0, "episodeFileCount": 1})
     assert not _series_complete({"percentOfEpisodes": 10.0, "episodeFileCount": 1})
     assert not _series_complete({})
+
+
+def test_job_lock_is_exclusive_across_holders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second sync while one holds the lock must be refused, not interleaved."""
+    import os
+
+    from homeTheater.errors import JobBusyError
+    from homeTheater.locks import job_lock
+
+    cfg = SimpleNamespace(database=SimpleNamespace(url=f"sqlite:///{tmp_path / 'x.db'}"))
+    (tmp_path / "x.db").write_bytes(b"")
+    with job_lock(cfg, "sync"):  # type: ignore[arg-type]
+        assert (tmp_path / "sync.lock").exists()
+        # flock is per open-file-description: a fresh open (what another process
+        # would do) must be refused while this one is held.
+        with pytest.raises(JobBusyError), job_lock(cfg, "sync"):  # type: ignore[arg-type]
+            pass
+    with job_lock(cfg, "sync"):  # type: ignore[arg-type]
+        pass  # released cleanly
+    assert os.path.exists(tmp_path / "sync.lock")

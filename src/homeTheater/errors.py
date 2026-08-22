@@ -20,6 +20,10 @@ class NotConfiguredError(ValueError):
     """A required provider/credential is not configured; the operation is skipped."""
 
 
+class JobBusyError(RuntimeError):
+    """Another process already holds this job's lock (see :mod:`homeTheater.locks`)."""
+
+
 class InvalidTransitionError(ValueError):
     """The requested candidate status change is not allowed from its current state."""
 

@@ -367,9 +367,13 @@ async def sync_downloads(config: AppConfig) -> SyncStats:
     """
 
     if config.acquisition.backend == "torrent":
+        from ..locks import job_lock
         from .torrent.service import sync_downloads_torrent
 
-        return await sync_downloads_torrent(config)
+        # Imports write multi-GB files to the NAS; two sweeps at once (scheduler +
+        # CLI/dashboard) trample each other's .part copies.
+        with job_lock(config, "sync"):
+            return await sync_downloads_torrent(config)
 
     with session_scope() as s:
         rows: list[tuple[int, str, TitleKind]] = []

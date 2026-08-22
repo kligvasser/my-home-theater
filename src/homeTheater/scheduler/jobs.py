@@ -12,7 +12,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 
 from ..config import AppConfig, ConfigError
-from ..errors import NotConfiguredError, redact_exc
+from ..errors import JobBusyError, NotConfiguredError, redact_exc
 from ..logging_setup import bind_run, clear_run, get_logger
 from ..notifications import notify
 
@@ -37,8 +37,9 @@ async def _guarded(name: str, config: AppConfig, body: Callable[[], Awaitable[st
             summary = await body()
             log.info("job.done", job=name, summary=summary)
             message = summary
-        except (ConfigError, NotConfiguredError) as exc:
-            # Expected when a provider isn't configured yet — skip quietly.
+        except (ConfigError, NotConfiguredError, JobBusyError) as exc:
+            # Expected when a provider isn't configured yet, or the same job is
+            # running from the CLI/dashboard — skip quietly.
             log.info("job.skipped", job=name, reason=str(exc))
         except Exception as exc:
             error = redact_exc(exc)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 
+from .errors import JobBusyError
 from .logging_setup import configure_logging, get_logger
 
 log = get_logger(__name__)
@@ -120,7 +121,11 @@ def sync() -> None:
     _configure()
     config = get_config()
     init_db()  # dev convenience; production uses Alembic
-    stats = asyncio.run(sync_downloads(config))
+    try:
+        stats = asyncio.run(sync_downloads(config))
+    except JobBusyError as exc:
+        log.warning("sync.cli_skipped", reason=str(exc))
+        raise SystemExit(2) from None
     log.info("sync.cli_done", **stats.as_dict())
 
 
