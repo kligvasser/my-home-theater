@@ -47,6 +47,7 @@ from ...errors import InvalidTransitionError, NotConfiguredError, redact_exc
 from ...logging_setup import get_logger
 from ..service import QueueOutcome, SyncStats
 from .base import DownloadClient, TorrentRelease, TorrentSource, TorrentStatus
+from .importer import mount_lost
 from .select import build_query, parse_season_episode, select_release
 from .sources import PirateBaySource, RarbgSource, X1337Source
 from .transmission import TransmissionClient
@@ -689,9 +690,9 @@ async def sync_downloads_torrent(config: AppConfig) -> SyncStats:
             meta[dl.id] = (title.id, title.kind, title.title, title.year, season)
 
     stats = SyncStats()
-    # A large NAS copy that fails (e.g. the SMB mount drops mid-transfer) tends to
-    # break the mount for the rest of the run; don't cascade — stop importing after
-    # the first failure and let the others retry next sweep.
+    # A large NAS copy that drops the SMB mount breaks every later import in the
+    # run; don't cascade — once the mount is gone, defer the rest to the next
+    # sweep. A per-file failure (bad name, stuck .part) must NOT block the others.
     imports_blocked = False
     async with httpx.AsyncClient(timeout=config.torrent.request_timeout) as http:
         client = _download_client(config, http)
@@ -726,7 +727,7 @@ async def sync_downloads_torrent(config: AppConfig) -> SyncStats:
                     year,
                     season,
                 )
-                if err is not None:
+                if err is not None and mount_lost(config):
                     imports_blocked = True
                 continue
 

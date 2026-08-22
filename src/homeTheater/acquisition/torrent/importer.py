@@ -125,6 +125,16 @@ def ensure_mounted(base_dir: str, mount: SmbMount | None) -> None:
     log.info("import.remounted", base_dir=base_dir)
 
 
+def mount_lost(config: AppConfig) -> bool:
+    """True when the configured ``/Volumes/<share>`` library mount is gone — the
+    one failure mode where continuing to import would only cascade."""
+
+    base = config.torrent.library_base_dir
+    if not base or not base.startswith("/Volumes/"):
+        return False
+    return not os.path.ismount(base)
+
+
 class LibraryTarget(Protocol):
     def import_file(
         self, local_src: str, rel_dir: str, filename: str, on_progress: ProgressCb = None
@@ -138,6 +148,13 @@ class LibraryTarget(Protocol):
         """Entry names under ``rel_dir`` (empty when it doesn't exist) — used to
         reuse an existing series folder whose name is styled differently."""
         ...
+
+
+def _size_or_none(path: str) -> int | None:
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return None
 
 
 def _sanitize(name: str) -> str:
@@ -350,8 +367,30 @@ class LocalLibraryTarget:
         dest_dir = os.path.join(self.base_dir, *rel_dir.split("/"))
         os.makedirs(dest_dir, exist_ok=True)
         dest = os.path.join(dest_dir, filename)
-        tmp = dest + ".part"
         src_size = os.path.getsize(local_src)
+
+        # Idempotent: a file already in place at the right size is done (a season
+        # pack retried after one bad episode must not re-copy the good ones).
+        if _size_or_none(dest) == src_size:
+            if on_progress is not None:
+                on_progress(src_size, src_size)
+            return dest
+
+        tmp = dest + ".part"
+        stale = _size_or_none(tmp)
+        if stale == src_size:
+            # A previous run finished the copy but died before the rename.
+            os.replace(tmp, dest)
+            return dest
+        if stale is not None:
+            # Some NAS firmware (WD MyCloud) refuses to re-open an existing file
+            # for writing (EINVAL) — clear it, or fall back to a fresh temp name.
+            try:
+                os.remove(tmp)
+            except OSError:
+                tmp = f"{dest}.{os.getpid()}.part"
+                log.warning("import.stale_part", path=dest + ".part", using=tmp)
+
         with open(local_src, "rb") as fsrc, open(tmp, "wb") as fdst:
             _copy_stream(fsrc, fdst, src_size, on_progress)
         if os.path.getsize(tmp) != src_size:

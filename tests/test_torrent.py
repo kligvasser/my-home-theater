@@ -840,3 +840,143 @@ async def test_requeue_after_quarantine_skips_banned_hash(
         hashes = {d.external_id for d in s.query(Download).all()}
         assert bad_hash in hashes  # the ban record stays
         assert HASH in hashes  # the clean 1080p release was grabbed instead
+
+
+# --- import resume / no-cascade ---------------------------------------------
+
+
+def test_import_skips_file_already_in_place(tmp_path: Path) -> None:
+    """Retrying a pack must not re-copy episodes that already landed."""
+    from homeTheater.acquisition.torrent.importer import LocalLibraryTarget
+
+    src = tmp_path / "src.mkv"
+    src.write_bytes(b"x" * 1000)
+    lib = tmp_path / "lib"
+    dest = lib / "TV Shows" / "S" / "Season 01" / "ep.mkv"
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"x" * 1000)  # same size → already imported
+    before = dest.stat().st_mtime_ns
+    progress: list[tuple[int, int]] = []
+
+    out = LocalLibraryTarget(str(lib)).import_file(
+        str(src), "TV Shows/S/Season 01", "ep.mkv", lambda c, t: progress.append((c, t))
+    )
+
+    assert out == str(dest) and dest.stat().st_mtime_ns == before  # untouched
+    assert progress == [(1000, 1000)]  # reported as complete
+
+
+def test_import_finishes_stale_complete_part(tmp_path: Path) -> None:
+    """A full-size .part left by a run that died before the rename is just
+    renamed into place — no second copy (the NAS may refuse to re-open it)."""
+    from homeTheater.acquisition.torrent.importer import LocalLibraryTarget
+
+    src = tmp_path / "src.mkv"
+    src.write_bytes(b"y" * 500)
+    lib = tmp_path / "lib"
+    part = lib / "Movies" / "M" / "M.mkv.part"
+    part.parent.mkdir(parents=True)
+    part.write_bytes(b"y" * 500)
+
+    out = LocalLibraryTarget(str(lib)).import_file(str(src), "Movies/M", "M.mkv")
+
+    assert Path(out).read_bytes() == b"y" * 500
+    assert not part.exists()
+
+
+def test_import_replaces_partial_stale_part(tmp_path: Path) -> None:
+    from homeTheater.acquisition.torrent.importer import LocalLibraryTarget
+
+    src = tmp_path / "src.mkv"
+    src.write_bytes(b"z" * 800)
+    lib = tmp_path / "lib"
+    part = lib / "Movies" / "M" / "M.mkv.part"
+    part.parent.mkdir(parents=True)
+    part.write_bytes(b"z" * 10)  # truncated leftover
+
+    out = LocalLibraryTarget(str(lib)).import_file(str(src), "Movies/M", "M.mkv")
+
+    assert Path(out).read_bytes() == b"z" * 800
+    assert not part.exists()
+
+
+@respx.mock
+async def test_sync_one_failed_import_does_not_block_others(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A per-file import failure (not a lost mount) must let the other completed
+    downloads import in the same sweep."""
+    _write_config(
+        tmp_path, dry_run=False, monkeypatch=monkeypatch, library_base_dir=str(tmp_path / "lib")
+    )
+    _reset()
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate, CandidateSource, CandidateStatus, Download, Title
+
+    init_db()
+    with session_scope() as s:
+        ids = []
+        for i, name in enumerate(["Broken", "Fine"]):
+            t = Title(tmdb_id=100 + i, title=name, year=2000, kind=TitleKind.movie)
+            s.add(t)
+            s.flush()
+            c = Candidate(
+                title_id=t.id, source=CandidateSource.manual, status=CandidateStatus.downloading
+            )
+            s.add(c)
+            s.flush()
+            s.add(
+                Download(
+                    candidate_id=c.id, external_id=str(i) * 40, state="downloading", release=name
+                )
+            )
+            ids.append(c.id)
+
+    dl_dir = tmp_path / "dl"
+    dl_dir.mkdir()
+    (dl_dir / "fine.mkv").write_bytes(b"ok" * 100)  # "broken.mkv" does not exist
+
+    def status_for(name: str, h: str) -> dict:
+        return {
+            "hashString": h,
+            "name": name,
+            "percentDone": 1.0,
+            "status": 6,
+            "downloadDir": str(dl_dir),
+            "error": 0,
+            "errorString": "",
+        }
+
+    respx.post(TRANSMISSION).mock(
+        side_effect=[
+            httpx.Response(409, headers={"X-Transmission-Session-Id": "s"}),
+            httpx.Response(
+                200,
+                json={
+                    "result": "success",
+                    "arguments": {"torrents": [status_for("broken.mkv", "0" * 40)]},
+                },
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "result": "success",
+                    "arguments": {"torrents": [status_for("fine.mkv", "1" * 40)]},
+                },
+            ),
+        ]
+    )
+
+    from homeTheater.acquisition import sync_downloads
+    from homeTheater.config import get_config
+
+    stats = await sync_downloads(get_config())
+
+    assert stats.completed == 1 and len(stats.errors) == 1
+    with session_scope() as s:
+        by_title = {
+            s.get(Title, s.get(Candidate, c.id).title_id).title: c.status
+            for c in s.query(Candidate)
+        }
+        assert by_title["Broken"] == CandidateStatus.downloading  # retried next sweep
+        assert by_title["Fine"] == CandidateStatus.imported  # not held hostage
