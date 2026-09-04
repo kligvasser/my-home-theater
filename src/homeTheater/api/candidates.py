@@ -80,6 +80,41 @@ async def api_manual(body: ManualAdd) -> dict[str, int | str]:
     return {"id": candidate_id, "status": "new"}
 
 
+class ManualGrab(BaseModel):
+    tmdb_id: int
+    kind: TitleKind = TitleKind.movie
+
+
+@router.post("/grab", dependencies=[Depends(require_token)])
+async def api_grab(body: ManualGrab) -> dict[str, Any]:
+    """Add a title by TMDb id and immediately queue it — the one-click path from
+    the search box (no separate add -> approve -> grab). Idempotent: an existing
+    live candidate for the title is grabbed rather than duplicated."""
+
+    cfg = get_config()
+    try:
+        candidate_id = await add_manual(cfg, body.tmdb_id, body.kind, reuse_existing=True)
+    except NotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        outcome = await queue_candidate(cfg, candidate_id)
+    except NotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except InvalidTransitionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        code = 404 if "not found" in str(exc) else 400
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
+    return {
+        "id": candidate_id,
+        "queued": outcome.queued,
+        "dry_run": outcome.dry_run,
+        "message": outcome.message,
+    }
+
+
 @router.get("/search", dependencies=[Depends(require_token)])
 async def api_search(
     q: str = Query(min_length=2, max_length=200),

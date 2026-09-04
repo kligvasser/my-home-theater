@@ -181,7 +181,9 @@ details.overview p { color: var(--muted); font-size: .85rem; margin: 6px 0 0; ma
 .sresults { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .sresult { display: flex; align-items: center; gap: 10px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 6px 10px; }
 .sresult img { width: 32px; height: 48px; object-fit: cover; border-radius: 4px; }
-.sresult button { margin-left: auto; cursor: pointer; background: var(--accent); border: none; color: #fff; border-radius: 8px; padding: 5px 12px; }
+.sresult span { flex: 1; min-width: 0; }
+.sresult button { cursor: pointer; background: var(--accent); border: none; color: #fff; border-radius: 8px; padding: 5px 12px; }
+.sresult button.secondary { background: transparent; color: var(--muted); border: 1px solid var(--border); }
 
 .settings-card { display: flex; flex-direction: column; gap: 8px; }
 .settings-card h2 { margin: 0 0 4px; }

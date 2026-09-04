@@ -55,11 +55,15 @@ def reject(candidate_id: int) -> bool:
     return _set_status(candidate_id, CandidateStatus.rejected)
 
 
-async def add_manual(config: AppConfig, tmdb_id: int, kind: TitleKind) -> int:
+async def add_manual(
+    config: AppConfig, tmdb_id: int, kind: TitleKind, *, reuse_existing: bool = False
+) -> int:
     """Manually add a candidate by TMDb id: fetch details, upsert title, queue it.
 
-    Returns the new candidate id. Raises if the title already has a live candidate
-    or the TMDb id doesn't exist for that kind.
+    Returns the new candidate id. Raises if the TMDb id doesn't exist for that
+    kind, or (unless ``reuse_existing``) if the title already has a live
+    candidate — with ``reuse_existing`` the existing candidate's id is returned
+    instead, so a one-click "grab from search" is idempotent.
     """
 
     secrets = config.secrets
@@ -108,6 +112,8 @@ async def add_manual(config: AppConfig, tmdb_id: int, kind: TitleKind) -> int:
             )
         )
         if existing is not None:
+            if reuse_existing:
+                return existing.id
             raise ValueError(f"'{title.title}' already has a live candidate.")
 
         cand = Candidate(

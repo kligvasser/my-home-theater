@@ -140,3 +140,49 @@ def test_candidate_sorting_and_pagination(config_file: Path) -> None:
     assert total == 3 and [r.title for r in rows] == ["Charlie", "Alpha"]
     rows2, _ = list_candidates(status="new", sort="score", page=2, page_size=2)
     assert [r.title for r in rows2] == ["Bravo"]
+
+
+def test_grab_endpoint_adds_and_queues_in_one_call(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One-click grab from search: /grab adds the title AND queues it, and is
+    idempotent — a second grab reuses the same candidate rather than 409-ing."""
+    monkeypatch.setenv("DASHBOARD_TOKEN", "tok")
+    _reset()
+
+    from homeTheater.api import create_app
+    from homeTheater.db import init_db
+
+    init_db()
+
+    calls: dict[str, object] = {}
+
+    async def fake_add_manual(config, tmdb_id, kind, *, reuse_existing=False):  # type: ignore[no-untyped-def]
+        calls["reuse_existing"] = reuse_existing
+        return 42
+
+    async def fake_queue(config, candidate_id):  # type: ignore[no-untyped-def]
+        from homeTheater.acquisition.service import QueueOutcome
+
+        calls["queued_id"] = candidate_id
+        return QueueOutcome(candidate_id, True, False, None, "grabbed")
+
+    import homeTheater.api.candidates as cand_api
+
+    monkeypatch.setattr(cand_api, "add_manual", fake_add_manual)
+    monkeypatch.setattr(cand_api, "queue_candidate", fake_queue)
+
+    with TestClient(create_app()) as client:
+        # token required
+        assert client.post("/api/candidates/grab", json={"tmdb_id": 27205}).status_code == 401
+
+        r = client.post(
+            "/api/candidates/grab",
+            json={"tmdb_id": 27205, "kind": "movie"},
+            headers={"X-Auth-Token": "tok"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["id"] == 42 and body["queued"] is True and body["message"] == "grabbed"
+        assert calls["reuse_existing"] is True  # idempotent add
+        assert calls["queued_id"] == 42  # and it queued the same candidate

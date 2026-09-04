@@ -137,6 +137,23 @@
         const body = max && max.value ? { max_per_source: Number(max.value) } : {};
         const out = await api("POST", "/api/candidates/discover", body);
         flash(`Discovery started (up to ${out.max_per_source}/source) — see Runs.`);
+      } else if (act === "grab-candidate") {
+        btn.disabled = true;
+        btn.textContent = "grabbing…";
+        try {
+          const out = await api("POST", "/api/candidates/grab", {
+            tmdb_id: Number(btn.dataset.tmdbId),
+            kind: btn.dataset.kind,
+          });
+          btn.textContent = out.dry_run ? "dry-run ✓" : out.queued ? "grabbed ✓" : "queued";
+          flash(out.message || `Grabbing candidate #${out.id}.`);
+          const sib = btn.parentElement?.querySelector('[data-action="add-candidate"]');
+          if (sib) sib.remove();
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = "⬇ Grab";
+          throw err;
+        }
       } else if (act === "add-candidate") {
         const out = await api("POST", "/api/candidates/manual", {
           tmdb_id: Number(btn.dataset.tmdbId),
@@ -247,8 +264,17 @@
           label.textContent = `${it.title}${it.year ? " (" + it.year + ")" : ""}` +
             (it.tmdb_rating ? ` · TMDb ${it.tmdb_rating.toFixed(1)}` : "");
           row.appendChild(label);
+          const grab = document.createElement("button");
+          grab.textContent = "⬇ Grab";
+          grab.title = "Add and grab now — straight to download";
+          grab.dataset.action = "grab-candidate";
+          grab.dataset.tmdbId = it.tmdb_id;
+          grab.dataset.kind = it.kind;
+          row.appendChild(grab);
           const add = document.createElement("button");
           add.textContent = "add";
+          add.className = "secondary";
+          add.title = "Add to the queue without grabbing";
           add.dataset.action = "add-candidate";
           add.dataset.tmdbId = it.tmdb_id;
           add.dataset.kind = it.kind;
