@@ -408,3 +408,54 @@ def test_rescan_keeps_enriched_title_link(config_file: Path, tmp_path: Path) -> 
         assert s.query(Title).count() == 1
         owned = s.query(OwnedFile).one()
         assert owned.title_id == title_id  # link preserved
+
+
+def test_series_extras_are_skipped(config_file: Path, tmp_path: Path) -> None:
+    """A featurette in a season folder (no SxxExx) is skipped, not cataloged as a
+    junk title; real episodes in the same folder still import."""
+    _reset_singletons()
+    from homeTheater.db import init_db, session_scope
+
+    init_db()
+    media = tmp_path / "media"
+    ep_dir = media / "TV Shows" / "Ted Lasso" / "Season 02"
+    ep_dir.mkdir(parents=True)
+    (ep_dir / "Ted Lasso (2020) - S02E01 - Goodbye Earl.mkv").write_bytes(b"e" * 5)
+    (ep_dir / "Season 2 - The Cast Ask Each Other Anything - IMDB.mkv").write_bytes(b"x" * 5)
+
+    stats = scan_library(LocalFileSystem(base_dir=str(media)), {TitleKind.series: "TV Shows"})
+    assert stats.files_added == 1 and stats.files_skipped == 1
+
+    with session_scope() as s:
+        titles = [t.title for t in s.scalars(select(Title))]
+        assert titles == ["Ted Lasso"]  # no junk "The Cast Ask..." title
+        owned = s.scalars(select(OwnedFile)).all()
+        assert len(owned) == 1 and owned[0].episode == 1
+
+
+def test_extra_pruned_on_rescan_after_skip(config_file: Path, tmp_path: Path) -> None:
+    """An extra cataloged by an older build is pruned on the next scan (skipped →
+    not seen → pruned), cleaning up junk without touching the NAS file."""
+    _reset_singletons()
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import CandidateStatus  # noqa: F401
+
+    init_db()
+    media = tmp_path / "media"
+    ep_dir = media / "TV Shows" / "Ted Lasso" / "Season 02"
+    ep_dir.mkdir(parents=True)
+    extra = ep_dir / "Season 2 - Meet the Cast.mkv"
+    extra.write_bytes(b"x" * 5)
+
+    # Pre-seed the extra as an owned file (as an older importer/scanner would have).
+    with session_scope() as s:
+        t = Title(title="Meet the Cast", kind=TitleKind.series)
+        s.add(t)
+        s.flush()
+        s.add(OwnedFile(path=str(extra), title_id=t.id, kind=TitleKind.series))
+
+    stats = scan_library(LocalFileSystem(base_dir=str(media)), {TitleKind.series: "TV Shows"})
+    assert stats.files_pruned == 1  # the extra owned_file is removed
+
+    with session_scope() as s:
+        assert s.scalar(select(func.count()).select_from(OwnedFile)) == 0

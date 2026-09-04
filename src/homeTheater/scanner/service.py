@@ -245,6 +245,13 @@ def _scan_root(
                 stats.files_skipped += 1
                 log.warning("scan.unparsable", path=entry.path)
                 continue
+            # A TV file with no episode number is an extra/featurette shipped in a
+            # season pack ("The Cast Ask Each Other Anything"). Cataloging it makes
+            # a junk, poster-less title — skip it (mirrors the importer).
+            if kind is TitleKind.series and parsed.episode is None:
+                stats.files_skipped += 1
+                log.info("scan.extra_skipped", path=entry.path)
+                continue
             langs = _langs_for(entry.name, entry.parent)
             with session_scope() as session:  # short per-file transaction
                 added, created = _upsert_owned_file(
