@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from homeTheater.dashboard import human_size
@@ -179,3 +180,46 @@ def test_library_excludes_unowned_candidate_titles(config_file: Path) -> None:
     assert total == 1 and [r.title for r in rows] == ["Owned Movie"]
     # stats count owned only, matching the library
     assert get_stats().movies == 1 and get_stats().total_titles == 1
+
+
+def test_require_auth_locks_whole_site(config_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With DASHBOARD_REQUIRE_AUTH, even read pages need the token; static and
+    health stay open, and the token (header or Basic) grants access."""
+    import base64
+
+    monkeypatch.setenv("DASHBOARD_TOKEN", "tok")
+    monkeypatch.setenv("DASHBOARD_REQUIRE_AUTH", "true")
+    _reset()
+
+    from homeTheater.api import create_app
+    from homeTheater.db import init_db
+
+    init_db()
+    with TestClient(create_app()) as client:
+        # A read page is now gated.
+        r = client.get("/library")
+        assert r.status_code == 401 and "Basic" in r.headers.get("www-authenticate", "")
+        # Health + static remain reachable for probes/assets.
+        assert client.get("/health").status_code == 200
+        # Header token works (dashboard JS path).
+        assert client.get("/library", headers={"X-Auth-Token": "tok"}).status_code == 200
+        # HTTP Basic (password = token) works (browser navigation).
+        basic = base64.b64encode(b"x:tok").decode()
+        assert (
+            client.get("/library", headers={"Authorization": f"Basic {basic}"}).status_code == 200
+        )
+        # Wrong token rejected.
+        assert client.get("/library", headers={"X-Auth-Token": "nope"}).status_code == 401
+
+
+def test_reads_open_by_default(config_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without the flag, read pages stay open (default LAN behavior)."""
+    monkeypatch.setenv("DASHBOARD_TOKEN", "tok")
+    monkeypatch.delenv("DASHBOARD_REQUIRE_AUTH", raising=False)
+    _reset()
+    from homeTheater.api import create_app
+    from homeTheater.db import init_db
+
+    init_db()
+    with TestClient(create_app()) as client:
+        assert client.get("/library").status_code == 200

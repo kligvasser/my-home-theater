@@ -24,7 +24,7 @@ from ..config import AppConfig
 from ..db.base import utcnow
 from ..db.models import Candidate, Genre, JobRun, OwnedFile, RunStatus, Subtitle, Title, TitleKind
 from ..db.session import session_scope
-from ..errors import NotConfiguredError, redact, redact_exc
+from ..errors import NotConfiguredError, TransientProviderError, redact, redact_exc
 from ..logging_setup import bind_run, clear_run, get_logger
 from .dto import OmdbRatings, TmdbTitle
 from .omdb import OMDbClient
@@ -63,6 +63,7 @@ class _Result:
     tmdb: TmdbTitle | None = None
     ratings: OmdbRatings | None = None
     error: str | None = None
+    ratings_deferred: bool = False  # OMDb failed transiently; retry next run
 
 
 def _load_pending(retry_days: int, force: bool = False) -> list[_Snapshot]:
@@ -96,14 +97,20 @@ async def _enrich_one(
             imdb_id = (details.imdb_id if details else None) or snap.imdb_id
 
             ratings: OmdbRatings | None = None
+            deferred = False
             if omdb is not None and imdb_id:
-                # A ratings failure (bad key, quota, outage) must not discard the
-                # TMDb details + features we just fetched — ratings stay None.
+                # A ratings failure must not discard the TMDb details we fetched.
+                # A *transient* one (quota/outage) also must not advance
+                # last_enriched_at, or this title's rating won't be retried for
+                # cache_days — so flag it for a retry next run.
                 try:
                     ratings = await omdb.by_imdb_id(imdb_id)
+                except TransientProviderError as exc:
+                    deferred = True
+                    log.warning("enrich.omdb_transient", title=snap.title, error=redact_exc(exc))
                 except Exception as exc:
                     log.warning("enrich.omdb_failed", title=snap.title, error=redact_exc(exc))
-            return _Result(snapshot=snap, tmdb=details, ratings=ratings)
+            return _Result(snapshot=snap, tmdb=details, ratings=ratings, ratings_deferred=deferred)
         except Exception as exc:  # keep enriching the rest
             log.warning("enrich.title_failed", title=snap.title, error=redact_exc(exc))
             return _Result(snapshot=snap, error=redact_exc(exc))
@@ -198,7 +205,11 @@ def _persist_one(res: _Result, stats: EnrichStats) -> None:
         if res.error:
             stats.errors.append(f"{res.snapshot.title}: {redact(res.error)}")
             return
-        title.last_enriched_at = utcnow()
+        # A transient OMDb failure leaves ratings pending; don't mark the title
+        # "enriched" or its retry is suppressed until the cutoff. TMDb details
+        # below are still applied — they resolved fine.
+        if not res.ratings_deferred:
+            title.last_enriched_at = utcnow()
 
         if res.tmdb is None:
             stats.unmatched += 1

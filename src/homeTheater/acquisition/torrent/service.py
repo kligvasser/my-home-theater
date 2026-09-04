@@ -389,10 +389,13 @@ async def _screen_grabs(
     reveals an executable/no-media, removing them from the client before they
     download real content. Dropped items are (infohash, release, reason)."""
 
+    # Screen all grabs concurrently: each waits up to ~30s for metadata, so a
+    # season top-up of 8-10 episodes must not block the acquire for minutes.
+    reasons = await asyncio.gather(*(_await_unsafe(client, ih) for ih, _r, _e in grabbed))
+
     safe: list[tuple[str, str, bool]] = []
     dropped: list[tuple[str, str, str]] = []
-    for infohash, release, existed in grabbed:
-        reason = await _await_unsafe(client, infohash)
+    for (infohash, release, existed), reason in zip(grabbed, reasons, strict=True):
         if reason is None:
             safe.append((infohash, release, existed))
             continue
@@ -465,6 +468,10 @@ def _record_grabs(
 # consecutive numbers find no qualifying release; hard cap as a backstop.
 _EPISODE_PROBE_MISSES = 2
 _EPISODE_PROBE_CAP = 30
+
+# TMDb series statuses that mean "no more episodes are coming" — a season short
+# of its announced count is complete, not still topping up.
+_ENDED_STATUSES = frozenset({"ended", "canceled", "cancelled"})
 
 
 def _quarantined_hashes() -> frozenset[str]:
@@ -725,9 +732,13 @@ async def _queue_season(
         )
         if chosen is None:
             misses += 1
-            # Known target: later episodes may exist even after a gap. Unknown:
-            # consecutive misses mean we've walked past the season's end.
-            if target is None and misses >= _EPISODE_PROBE_MISSES:
+            # Stop once we're past the last episode we actually have/found and
+            # have missed a few in a row. Without this, a TMDb episode overcount
+            # (target says 13 but only 10 aired) re-searches the phantom tail
+            # every acquire cycle. The "past known" guard still tolerates a mid-
+            # season gap when a known target implies more real episodes follow.
+            known_max = max({*have, *(f for f, _ in found), 0})
+            if misses >= _EPISODE_PROBE_MISSES and e > known_max:
                 break
             continue
         misses = 0
@@ -977,7 +988,16 @@ def _status_after_finished(s: Session, cand: Candidate, download_id: int) -> Can
         if cand.season is not None:
             covered |= _owned_episodes(cand.title_id, cand.season)
         if not pack and len(covered) < int(target):
-            return CandidateStatus.approved
+            # Keep topping up only while the show is still airing. If it has
+            # ended, the announced count can exceed what actually exists (TMDb
+            # overcount / shortened season) — completing avoids a candidate that
+            # re-searches a phantom tail every acquire cycle forever.
+            title = s.get(Title, cand.title_id)
+            ended = bool(
+                title and title.series_status and title.series_status.lower() in _ENDED_STATUSES
+            )
+            if not ended:
+                return CandidateStatus.approved
     return CandidateStatus.imported
 
 

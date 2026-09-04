@@ -20,6 +20,12 @@ class NotConfiguredError(ValueError):
     """A required provider/credential is not configured; the operation is skipped."""
 
 
+class TransientProviderError(RuntimeError):
+    """A metadata provider failed transiently (quota/outage), not definitively.
+    Callers must NOT treat the title as "enrichment attempted" — so its retry
+    isn't suppressed for ``cache_days`` — and should retry it next run."""
+
+
 class JobBusyError(RuntimeError):
     """Another process already holds this job's lock (see :mod:`homeTheater.locks`)."""
 

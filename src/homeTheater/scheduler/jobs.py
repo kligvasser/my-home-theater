@@ -34,9 +34,20 @@ async def _guarded(name: str, config: AppConfig, body: Callable[[], Awaitable[st
         bind_run(job=name, scheduled=True)
         try:
             log.info("job.start", job=name)
-            summary = await body()
+            timeout = config.schedule.job_timeout_minutes * 60
+            if timeout:
+                summary = await asyncio.wait_for(body(), timeout)
+            else:
+                summary = await body()
             log.info("job.done", job=name, summary=summary)
             message = summary
+        except TimeoutError:
+            # A hung job (stuck NAS mount, wedged HTTP) is cancelled so it releases
+            # the global lock — otherwise every other scheduled job, backups
+            # included, stops firing.
+            mins = config.schedule.job_timeout_minutes
+            log.error("job.timeout", job=name, minutes=mins)
+            message = f"⚠️ {name} job timed out after {mins} min and was cancelled"
         except (ConfigError, NotConfiguredError, JobBusyError) as exc:
             # Expected when a provider isn't configured yet, or the same job is
             # running from the CLI/dashboard — skip quietly.

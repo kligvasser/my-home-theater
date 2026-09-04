@@ -11,6 +11,7 @@ from typing import Any
 
 import httpx
 
+from ..errors import TransientProviderError
 from .cache import cache_get, cache_set
 from .dto import OmdbRatings
 from .http import get_json
@@ -63,9 +64,13 @@ class OMDbClient:
             definitive = cached.get("Response") != "False" or "not found" in error.lower()
             if definitive:
                 cache_set(PROVIDER, key, cached)
+            elif cached.get("Response") == "False":
+                # Transient (quota "Request limit reached!", outage): signal the
+                # caller so the title's retry isn't suppressed for cache_days.
+                raise TransientProviderError(f"OMDb: {error or 'transient failure'}")
 
         if cached.get("Response") == "False":
-            return OmdbRatings()
+            return OmdbRatings()  # definitive not-found (served from cache)
         return OmdbRatings(
             imdb_rating=parse_rating(cached.get("imdbRating")),
             imdb_votes=parse_votes(cached.get("imdbVotes")),

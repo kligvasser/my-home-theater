@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import hmac
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
@@ -59,6 +62,56 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("app.shutdown")
 
 
+# Paths reachable without auth even when the whole site is locked down: static
+# assets and the health probe (for uptime monitors / container healthchecks).
+_GATE_EXEMPT = ("/static/", "/health", "/ready", "/favicon.ico")
+
+
+def _install_site_gate(app: FastAPI) -> None:
+    """Optionally lock the ENTIRE site behind the dashboard token.
+
+    Enabled by ``DASHBOARD_REQUIRE_AUTH=true``: every request (read pages + APIs)
+    must present the token via the ``X-Auth-Token`` header (the dashboard JS) or
+    HTTP Basic password (so a browser navigating to a page is prompted once).
+    Off by default — LAN reads stay open, and per-endpoint ``require_token`` still
+    guards mutations. Webhooks keep their own ``?token=`` auth and are exempt here.
+    """
+
+    @app.middleware("http")
+    async def _gate(request: Request, call_next):  # type: ignore[no-untyped-def]
+        cfg = get_config()
+        token = cfg.secrets.dashboard_token
+        path = request.url.path
+        if (
+            not cfg.secrets.dashboard_require_auth
+            or token is None
+            or path.startswith(_GATE_EXEMPT)
+            or path.startswith("/api/webhooks")
+        ):
+            return await call_next(request)
+
+        secret = token.get_secret_value()
+        provided = request.headers.get("x-auth-token")
+        if provided is None:
+            auth = request.headers.get("authorization", "")
+            if auth.startswith("Basic "):
+                try:
+                    decoded = base64.b64decode(auth[6:]).decode("utf-8", "replace")
+                    provided = decoded.split(":", 1)[1] if ":" in decoded else decoded
+                except Exception:
+                    provided = None
+        if provided is not None and hmac.compare_digest(
+            provided.encode("utf-8"), secret.encode("utf-8")
+        ):
+            return await call_next(request)
+        # Prompt browsers (Basic) while still allowing header-based API clients.
+        return JSONResponse(
+            {"detail": "Authentication required."},
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="my-home-theater"'},
+        )
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="my-home-theater",
@@ -66,6 +119,7 @@ def create_app() -> FastAPI:
         summary="Personal movie & TV library automation.",
         lifespan=lifespan,
     )
+    _install_site_gate(app)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     app.include_router(health.router)
     app.include_router(catalog.router)

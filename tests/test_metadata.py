@@ -232,11 +232,16 @@ async def test_omdb_rate_limit_response_not_cached(
             200, json={"Response": "False", "Error": "Request limit reached!"}
         )
     )
+    from homeTheater.errors import TransientProviderError
+
     async with httpx.AsyncClient() as http:
         client = OMDbClient("k", http, cache_days=14)
-        await client.by_imdb_id("tt0133093")
-        await client.by_imdb_id("tt0133093")
-    assert route.call_count == 2  # transient error was not cached
+        # A transient failure (quota) raises so the caller can defer, and is not
+        # cached — the next attempt hits the network again.
+        for _ in range(2):
+            with pytest.raises(TransientProviderError):
+                await client.by_imdb_id("tt0133093")
+    assert route.call_count == 2
 
     # ...but a definitive not-found IS cached.
     route.mock(
@@ -317,3 +322,51 @@ async def test_force_reenriches_recently_attempted_titles(
         from sqlalchemy import select
 
         assert s.scalar(select(Title.imdb_rating).where(Title.title == "The Matrix")) == 8.7
+
+
+@respx.mock
+async def test_transient_omdb_defers_last_enriched_at(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A quota/outage OMDb failure must NOT stamp last_enriched_at, or the title's
+    rating won't be retried for cache_days."""
+    _setup_env(monkeypatch)
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Title, TitleKind
+    from homeTheater.metadata.service import enrich_catalog
+
+    init_db()
+    with session_scope() as s:
+        s.add(Title(tmdb_id=603, title="The Matrix", year=1999, kind=TitleKind.movie))
+
+    respx.get(f"{TMDB}/movie/603").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 603,
+                "title": "The Matrix",
+                "release_date": "1999-03-30",
+                "vote_average": 8.2,
+                "vote_count": 24000,
+                "genres": [{"id": 1, "name": "Action"}],
+                "external_ids": {"imdb_id": "tt0133093"},
+                "imdb_id": "tt0133093",
+            },
+        )
+    )
+    respx.get(OMDB).mock(
+        return_value=httpx.Response(
+            200, json={"Response": "False", "Error": "Request limit reached!"}
+        )
+    )
+
+    await enrich_catalog(get_config())
+
+    from sqlalchemy import select
+
+    with session_scope() as s:
+        t = s.scalar(select(Title).where(Title.tmdb_id == 603))
+        assert t.tmdb_rating == 8.2  # TMDb details still applied
+        assert t.imdb_rating is None  # ratings deferred
+        assert t.last_enriched_at is None  # NOT stamped → retried next run

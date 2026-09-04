@@ -94,6 +94,10 @@ class Schedule(BaseModel):
     acquire_interval_minutes: int = Field(30, ge=0)  # queue approved candidates
     import_reconcile_interval_minutes: int = Field(60, ge=0)
     backup_interval_minutes: int = Field(1440, ge=0)  # daily DB backup
+    # Cancel a scheduled job that runs longer than this so a hung NAS/network
+    # job can't hold the global lock forever and starve the others (e.g. backup).
+    # 0 disables the timeout. Generous by default — legit big copies are slow.
+    job_timeout_minutes: int = Field(180, ge=0)
 
 
 class Database(BaseModel):
@@ -348,6 +352,10 @@ class Secrets(BaseSettings):
 
     # Dashboard auth (required before any mutating endpoint is exposed)
     dashboard_token: SecretStr | None = None
+    # Lock the ENTIRE dashboard (read pages + APIs) behind the token, for when it
+    # is exposed beyond a trusted LAN. Off by default (LAN reads stay open); when
+    # on, browsers get an HTTP Basic prompt (password = DASHBOARD_TOKEN).
+    dashboard_require_auth: bool = False
     # Separate secret for Radarr/Sonarr webhook URLs (?token=...). Falls back to
     # dashboard_token, but a distinct value keeps the dashboard token out of arr
     # configs and access logs.
