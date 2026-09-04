@@ -1171,3 +1171,151 @@ async def test_sync_defers_remaining_imports_on_nas_fault(
     # only the first completed import was attempted; the second was deferred
     assert calls["n"] == 1
     assert any("NAS unavailable" in e for e in stats.errors)
+
+
+@respx.mock
+async def test_grab_screens_out_executable_before_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A release with a clean listing name but an .exe inside is removed right
+    after the magnet is added (metadata phase) — never left downloading — and
+    banned so the same hash isn't re-grabbed."""
+    _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch)
+    _reset()
+    cid = _seed_approved()
+
+    respx.get(f"{APIBAY}/q.php").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "id": "1",
+                    "name": "The Matrix 1999 1080p BluRay x264",  # clean listing
+                    "info_hash": HASH,
+                    "seeders": "500",
+                    "leechers": "1",
+                    "size": "1500000000",
+                }
+            ],
+        )
+    )
+    add_ok = {
+        "result": "success",
+        "arguments": {"torrent-added": {"hashString": HASH, "name": "The Matrix 1999"}},
+    }
+    # metadata resolves to a single .exe → torrent-get returns that file list
+    meta = {
+        "result": "success",
+        "arguments": {
+            "torrents": [
+                {
+                    "hashString": HASH,
+                    "name": "The Matrix 1999",
+                    "percentDone": 0.0,
+                    "status": 4,
+                    "downloadDir": "/d",
+                    "error": 0,
+                    "errorString": "",
+                    "files": [{"name": "The Matrix 1999 1080p .exe", "length": 1500000000}],
+                }
+            ]
+        },
+    }
+    route = respx.post(TRANSMISSION).mock(
+        side_effect=[
+            httpx.Response(409, headers={"X-Transmission-Session-Id": "s"}),
+            httpx.Response(200, json=add_ok),  # torrent-add
+            httpx.Response(200, json=meta),  # torrent-get (screen)
+            httpx.Response(200, json={"result": "success", "arguments": {}}),  # torrent-remove
+        ]
+    )
+
+    from homeTheater.acquisition import queue_candidate
+    from homeTheater.config import get_config
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate, CandidateStatus, Download
+
+    outcome = await queue_candidate(get_config(), cid)
+
+    assert not outcome.queued and "dropped" in outcome.message
+    removes = [c for c in route.calls if b'"torrent-remove"' in c.request.content]
+    assert removes and b'"delete-local-data":true' in removes[0].request.content
+    with session_scope() as s:
+        dl = s.query(Download).one()  # a ban record, not an active download
+        assert dl.state == "failed" and "removed:" in dl.error
+        # candidate stays approvable so the next cycle tries a different release
+        assert s.get(Candidate, cid).status == CandidateStatus.approved
+
+
+@respx.mock
+async def test_grab_keeps_clean_release(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A release whose metadata is a real media file downloads normally."""
+    _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch)
+    _reset()
+    cid = _seed_approved()
+
+    respx.get(f"{APIBAY}/q.php").mock(return_value=httpx.Response(200, json=_apibay_rows()))
+    add_ok = {
+        "result": "success",
+        "arguments": {"torrent-added": {"hashString": HASH, "name": "The Matrix 1999 1080p"}},
+    }
+    meta = {
+        "result": "success",
+        "arguments": {
+            "torrents": [
+                {
+                    "hashString": HASH,
+                    "name": "The Matrix 1999 1080p",
+                    "percentDone": 0.0,
+                    "status": 4,
+                    "downloadDir": "/d",
+                    "error": 0,
+                    "errorString": "",
+                    "files": [
+                        {"name": "The.Matrix.1999.1080p.BluRay.x264.mkv", "length": 1500000000}
+                    ],
+                }
+            ]
+        },
+    }
+    respx.post(TRANSMISSION).mock(
+        side_effect=[
+            httpx.Response(409, headers={"X-Transmission-Session-Id": "s"}),
+            httpx.Response(200, json=add_ok),
+            httpx.Response(200, json=meta),
+        ]
+    )
+
+    from homeTheater.acquisition import queue_candidate
+    from homeTheater.config import get_config
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate, CandidateStatus, Download
+
+    outcome = await queue_candidate(get_config(), cid)
+
+    assert outcome.queued
+    with session_scope() as s:
+        dl = s.query(Download).one()
+        assert dl.state == "downloading" and dl.external_id == HASH
+        assert s.get(Candidate, cid).status == CandidateStatus.queued
+
+
+def test_resume_appends_from_partial_part(tmp_path: Path) -> None:
+    """A partial .part is resumed (append), not re-copied from zero."""
+    from homeTheater.acquisition.torrent.importer import LocalLibraryTarget
+
+    src = tmp_path / "src.mkv"
+    src.write_bytes(bytes(range(256)) * 40)  # 10240 bytes, deterministic
+    lib = tmp_path / "lib"
+    dest_dir = lib / "Movies" / "M"
+    dest_dir.mkdir(parents=True)
+    part = dest_dir / "M.mkv.part"
+    part.write_bytes(src.read_bytes()[:6000])  # a prior faulted copy left 6000 bytes
+
+    seen: list[int] = []
+    out = LocalLibraryTarget(str(lib)).import_file(
+        str(src), "Movies/M", "M.mkv", lambda c, t: seen.append(c)
+    )
+
+    assert Path(out).read_bytes() == src.read_bytes()  # correct, no corruption
+    assert seen and seen[0] == 6000  # progress started from the resume point

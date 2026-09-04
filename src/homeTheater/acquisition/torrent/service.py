@@ -323,12 +323,24 @@ async def queue_candidate_torrent(config: AppConfig, candidate_id: int) -> Queue
             )
 
         client = _download_client(config, http)
-        grabbed = await _grab(client, config, snap.kind, [chosen])
+        grabbed, dropped = await _grab_screened(client, config, snap.kind, [chosen])
 
-    _record_grabs(candidate_id, grabbed)
+    _record_grabs(candidate_id, grabbed, dropped)
+    if not grabbed:
+        reason = dropped[0][2] if dropped else "no release grabbed"
+        return QueueOutcome(candidate_id, False, False, None, f"dropped: {reason}; will retry")
     already = all(existed for _, _, existed in grabbed)
     message = "grabbed (already in client)" if already else "grabbed"
     return QueueOutcome(candidate_id, True, False, None, message)
+
+
+# Right after a magnet is added, Transmission fetches the torrent's *metadata*
+# (the file list) before any file content. We poll for that, then screen the
+# names — so an executable ("clean listing, .exe inside") is removed while only
+# metadata, not payload, has been transferred. Bounded; sync is the backstop if
+# metadata hasn't resolved inside the window.
+_METADATA_PROBE_ATTEMPTS = 15
+_METADATA_PROBE_DELAY = 2.0
 
 
 async def _grab(
@@ -345,11 +357,72 @@ async def _grab(
     return out
 
 
-def _record_grabs(candidate_id: int, grabbed: list[tuple[str, str, bool]]) -> None:
-    """Record Download rows (idempotent on infohash) and mark the candidate queued."""
+async def _await_unsafe(client: DownloadClient, infohash: str) -> str | None:
+    """Wait briefly for metadata, then judge the file list: reason if unsafe,
+    None if clean or metadata didn't resolve in the window (sync backstops)."""
+
+    for attempt in range(_METADATA_PROBE_ATTEMPTS):
+        try:
+            st = await client.status(infohash)
+        except Exception as exc:
+            # Screening is best-effort; sync re-scans the file list every sweep
+            # and quarantines there too. A probe error must not abort the grab.
+            log.warning("grab.screen_probe_failed", infohash=infohash, detail=redact_exc(exc))
+            return None
+        if st is None:
+            return None  # gone from the client already
+        if st.files is not None:
+            return _unsafe_content(st.files)
+        if attempt + 1 < _METADATA_PROBE_ATTEMPTS:
+            await asyncio.sleep(_METADATA_PROBE_DELAY)
+    return None
+
+
+async def _screen_grabs(
+    client: DownloadClient, grabbed: list[tuple[str, str, bool]]
+) -> tuple[list[tuple[str, str, bool]], list[tuple[str, str, str]]]:
+    """Split fresh grabs into (safe, dropped) — dropping ones whose metadata
+    reveals an executable/no-media, removing them from the client before they
+    download real content. Dropped items are (infohash, release, reason)."""
+
+    safe: list[tuple[str, str, bool]] = []
+    dropped: list[tuple[str, str, str]] = []
+    for infohash, release, existed in grabbed:
+        reason = await _await_unsafe(client, infohash)
+        if reason is None:
+            safe.append((infohash, release, existed))
+            continue
+        log.warning("grab.unsafe_removed", infohash=infohash, release=release, reason=reason)
+        try:
+            await client.remove(infohash, delete_data=True)
+        except Exception as exc:
+            log.warning("grab.unsafe_remove_failed", infohash=infohash, detail=redact_exc(exc))
+        dropped.append((infohash, release, reason))
+    return safe, dropped
+
+
+async def _grab_screened(
+    client: DownloadClient, config: AppConfig, kind: TitleKind, chosen: list[TorrentRelease]
+) -> tuple[list[tuple[str, str, bool]], list[tuple[str, str, str]]]:
+    """Add magnets then screen them for malware metadata before they download."""
+
+    return await _screen_grabs(client, await _grab(client, config, kind, chosen))
+
+
+def _record_grabs(
+    candidate_id: int,
+    grabbed: list[tuple[str, str, bool]],
+    dropped: list[tuple[str, str, str]] | None = None,
+) -> None:
+    """Record Download rows (idempotent on infohash). Safe grabs become active
+    downloads and move the candidate to ``queued``; ``dropped`` malware grabs are
+    recorded as failed ban rows (``removed: ...``) so the infohash is never
+    re-selected. A candidate with only dropped grabs is left as-is to retry the
+    next-best release on the following cycle."""
 
     with session_scope() as s:
-        for infohash, release, _existed in grabbed:
+
+        def _row(infohash: str, release: str, state: str, error: str | None) -> None:
             existing = s.scalar(
                 sa_select(Download).where(
                     Download.candidate_id == candidate_id,
@@ -362,15 +435,26 @@ def _record_grabs(candidate_id: int, grabbed: list[tuple[str, str, bool]]) -> No
                         candidate_id=candidate_id,
                         external_id=infohash,
                         release=release,
-                        state="downloading",
+                        state=state,
                         progress=0.0,
+                        error=error,
                     )
                 )
-        cand = s.get(Candidate, candidate_id)
-        if cand is not None:
-            cand.status = CandidateStatus.queued
-            if cand.decided_at is None:
-                cand.decided_at = utcnow()
+            elif error is not None:
+                existing.state = state
+                existing.error = error
+
+        for infohash, release, _existed in grabbed:
+            _row(infohash, release, "downloading", None)
+        for infohash, release, reason in dropped or []:
+            _row(infohash, release, "failed", f"removed: {reason}")
+
+        if grabbed:
+            cand = s.get(Candidate, candidate_id)
+            if cand is not None:
+                cand.status = CandidateStatus.queued
+                if cand.decided_at is None:
+                    cand.decided_at = utcnow()
 
 
 # When a season's episode count isn't known, probe episodes until this many
@@ -602,8 +686,13 @@ async def _queue_season(
                     )
                     return QueueOutcome(cid, False, True, None, would)
                 client = _download_client(config, http)
-                grabbed = await _grab(client, config, snap.kind, [chosen])
-                _record_grabs(cid, grabbed)
+                grabbed, dropped = await _grab_screened(client, config, snap.kind, [chosen])
+                _record_grabs(cid, grabbed, dropped)
+                if not grabbed:
+                    reason = dropped[0][2] if dropped else "no release grabbed"
+                    return QueueOutcome(
+                        cid, False, False, None, f"dropped pack: {reason}; will retry"
+                    )
                 return QueueOutcome(cid, True, False, None, f"grabbed season pack '{chosen.title}'")
 
     # No pack (season still airing, most likely): grab available episodes.
@@ -650,11 +739,20 @@ async def _queue_season(
         )
 
     client = _download_client(config, http)
-    grabbed = await _grab(client, config, snap.kind, [rel for _, rel in found])
-    _record_grabs(cid, grabbed)
-    suffix = "" if target and len(have) + len(found) >= target else "; will top up as more air"
+    grabbed, dropped = await _grab_screened(client, config, snap.kind, [rel for _, rel in found])
+    _record_grabs(cid, grabbed, dropped)
+    if not grabbed:
+        reason = dropped[0][2] if dropped else "no release grabbed"
+        return QueueOutcome(cid, False, False, None, f"dropped episodes: {reason}; will retry")
+    n_ok = len(grabbed)
+    drop_note = f"; dropped {len(dropped)} as malware" if dropped else ""
+    suffix = "" if target and len(have) + n_ok >= target else "; will top up as more air"
     return QueueOutcome(
-        cid, True, False, None, f"grabbed {len(found)} episode releases (S{n:02d} {eps}){suffix}"
+        cid,
+        True,
+        False,
+        None,
+        f"grabbed {n_ok} episode releases (S{n:02d} {eps}){drop_note}{suffix}",
     )
 
 

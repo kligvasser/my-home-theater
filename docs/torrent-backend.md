@@ -41,6 +41,14 @@ imported. Writes go to a `.part` sidecar and are atomically renamed into place.
 | `delete_local_after_import` | `false` | `true` → remove the torrent + its local files after a successful import (a true "move"). `false` keeps the local copy **seeding**. |
 
 **This is the app's only write path to the NAS** (the scanner is read-only).
+
+Copies **resume**: if the SMB link drops mid-transfer (WD MyCloud does this on
+sustained multi-GB writes, surfacing as `[Errno 5] Input/output error`), the
+partial `.part` is kept and the next sweep appends from where it stopped rather
+than re-copying from zero, so a large file completes across several sweeps. A
+transport fault also backs the whole sweep off so a faulting share isn't
+hammered file-by-file.
+
 Guest/password-less shares are often read-only for writes — if imports fail with
 a permission error, set `SMB_USER`/`SMB_PASS` in `.env` to an account that can
 write, or point `library_base_dir` at a locally-mounted copy of the share.
@@ -75,6 +83,20 @@ for whichever backend is selected.
 | `rarbg`     | HTML scrape of a clone            | Low / experimental | Original RARBG is defunct; clones are unstable. |
 
 Keep `piratebay` enabled even when you add the others.
+
+### Malware / fake-file guard
+
+Some "releases" are executables with a clean-looking listing name (e.g.
+`Movie 2026 1080p WEB-DL .exe`, or an `.exe` inside an otherwise normal folder).
+Three layers block them:
+
+1. **Selection** drops releases whose *name* is executable-styled.
+2. **Grab screening** — right after a magnet is added, the backend waits for the
+   torrent's metadata (the file list, which transfers before any content) and
+   removes it immediately if it contains an executable or no media at all, so
+   the payload is never downloaded. The infohash is banned from re-selection.
+3. **Sync** re-scans every in-flight torrent's file list as a backstop and
+   quarantines anything the screen missed before it can be imported.
 
 ### Cloudflare / FlareSolverr
 

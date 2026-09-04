@@ -91,10 +91,16 @@ def _classify_oserror(exc: OSError, dest: str) -> ImportError_:
     return ImportError_(f"copy to {dest!r} failed: {exc.strerror}")
 
 
-def _copy_stream(fsrc: Any, fdst: Any, total: int, on_progress: ProgressCb) -> int:
-    """Copy fsrc -> fdst in chunks, reporting progress. Returns bytes written."""
+def _copy_stream(
+    fsrc: Any, fdst: Any, total: int, on_progress: ProgressCb, *, base: int = 0
+) -> int:
+    """Copy fsrc -> fdst in chunks, reporting progress. Returns bytes written.
 
-    written = 0
+    ``base`` is bytes already present from a resumed copy, so progress is
+    reported against the whole file, not just this run's remainder.
+    """
+
+    written = base
     while chunk := fsrc.read(_COPY_CHUNK):
         fdst.write(chunk)
         written += len(chunk)
@@ -440,14 +446,21 @@ class LocalLibraryTarget:
             return dest
 
         tmp = dest + ".part"
-        stale = _size_or_none(tmp)
-        if stale == src_size:
+        have = _size_or_none(tmp)
+        if have == src_size:
             # A previous run finished the copy but died before the rename.
             _finalize_local(tmp, dest)
             return dest
-        if stale is not None:
-            # Some NAS firmware (WD MyCloud) refuses to re-open an existing file
-            # for writing (EINVAL) — clear it, or fall back to a fresh temp name.
+
+        # Resume a partial .part left by a faulted copy (WD MyCloud drops the SMB
+        # link mid-transfer): append the remainder instead of re-copying multi-GB
+        # files from zero, so a big file completes across sweeps. An oversized or
+        # unwritable leftover is cleared, falling back to a fresh temp name.
+        mode, base = "wb", 0
+        if have is not None and 0 < have < src_size:
+            mode, base = "ab", have
+            log.info("import.resume", dest=dest, at=have, size=src_size)
+        elif have is not None:
             try:
                 os.remove(tmp)
             except OSError:
@@ -455,13 +468,16 @@ class LocalLibraryTarget:
                 log.warning("import.stale_part", path=dest + ".part", using=tmp)
 
         try:
-            with open(local_src, "rb") as fsrc, open(tmp, "wb") as fdst:
-                _copy_stream(fsrc, fdst, src_size, on_progress)
+            with open(local_src, "rb") as fsrc, open(tmp, mode) as fdst:
+                fsrc.seek(base)
+                if on_progress is not None and base:
+                    on_progress(base, src_size)
+                _copy_stream(fsrc, fdst, src_size, on_progress, base=base)
             if os.path.getsize(tmp) != src_size:
                 raise ImportError_(f"size mismatch copying to {dest!r}")
             _finalize_local(tmp, dest)
         except OSError as exc:
-            # Leave a partial .part for the resumable retry; a transport fault
+            # Leave the partial .part for the resumable retry; a transport fault
             # backs the whole sweep off rather than thrashing the faulting NAS.
             raise _classify_oserror(exc, dest) from exc
         return dest
