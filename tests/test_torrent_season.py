@@ -657,3 +657,49 @@ async def test_topup_skips_episodes_already_owned_on_nas(
     assert outcome.queued and "E02" in outcome.message and "E01" not in outcome.message
     with session_scope() as s:
         assert {d.external_id for d in s.query(Download).all()} == {"e" * 40}
+
+
+@respx.mock
+async def test_sync_pack_skips_extras_no_junk_titles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A season pack's featurettes/extras (no SxxExx) are not imported or
+    cataloged — only real episodes become owned files."""
+    _write_config(tmp_path, monkeypatch, library=True)
+    _reset()
+    cid = _seed_season_candidate(season_episodes=2)
+
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate, CandidateStatus, Download, OwnedFile
+
+    pack = "Silo.S02.COMPLETE.1080p.WEB.H264-GROUP"
+    with session_scope() as s:
+        # season candidate is S3 by default; use S2 pack -> set candidate season 2
+        c = s.get(Candidate, cid)
+        c.season = 2
+        c.features = {"season": 2, "season_episodes": 2}
+        s.add(Download(candidate_id=cid, external_id="d" * 40, state="downloading", release=pack))
+
+    dl_dir = tmp_path / "dl"
+    (dl_dir / pack).mkdir(parents=True)
+    (dl_dir / pack / "Silo.S02E01.1080p.WEB.mkv").write_bytes(b"e1" * 50)
+    (dl_dir / pack / "Silo.S02E02.1080p.WEB.mkv").write_bytes(b"e2" * 50)
+    (dl_dir / pack / "The Cast Ask Each Other Anything - IMDB.mkv").write_bytes(b"x" * 50)
+    (dl_dir / pack / "Rebecca Ferguson on Silo.mkv").write_bytes(b"y" * 50)
+    _transmission_statuses({"d" * 40: (True, pack)}, dl_dir=str(dl_dir))
+
+    from homeTheater.acquisition import sync_downloads
+    from homeTheater.config import get_config
+
+    stats = await sync_downloads(get_config())
+
+    assert stats.completed == 1
+    season_dir = tmp_path / "lib" / "TV Shows" / "Silo" / "Season 02"
+    assert sorted(p.name for p in season_dir.iterdir()) == [
+        "Silo.S02E01.1080p.WEB.mkv",
+        "Silo.S02E02.1080p.WEB.mkv",
+    ]  # extras not copied
+    with session_scope() as s:
+        owned = s.query(OwnedFile).all()
+        assert {o.episode for o in owned} == {1, 2}
+        assert s.get(Candidate, cid).status == CandidateStatus.imported

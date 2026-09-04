@@ -40,6 +40,7 @@ def dashboard(request: Request) -> HTMLResponse:
         {
             "stats": get_stats(sub_langs=effective_config().subtitles.languages),
             "recent": recent_titles(12),
+            "followed": list_followed(),
             "runs": recent_runs(10),
             "active": "dashboard",
             "version": __version__,

@@ -354,21 +354,34 @@ def import_completed_episodes(
 
     from .select import parse_season_episode
 
-    videos = sorted(_walk_videos(content_path))
-    if not videos:
+    all_videos = sorted(_walk_videos(content_path))
+    if not all_videos:
         raise ImportError_(f"no media file found under {content_path!r}")
+
+    # Keep only real episodes: a season pack ships featurettes/extras ("The Cast
+    # Ask Each Other Anything", "<Actor> on <Show>") that guessit parses with no
+    # episode number. Importing those spawns junk, poster-less catalog titles, so
+    # they're skipped (the video still seeds/lives in the download dir).
+    episodes_only: list[tuple[str, int, int, int | None]] = []  # path, size, episode, end
+    for video, size in all_videos:
+        _seasons, eps = parse_season_episode(os.path.basename(video))
+        if not eps:
+            log.info("import.extra_skipped", series=series_title, file=os.path.basename(video))
+            continue
+        episodes_only.append((video, size, eps[0], eps[-1] if len(eps) > 1 else None))
+    if not episodes_only:
+        raise ImportError_(f"no season/episode-numbered file under {content_path!r} (extras only?)")
+
     tv_root = config.nas.tv_root.rstrip("/")
     folder = _series_folder(target, tv_root, series_title)
 
-    total = sum(size for _path, size in videos)
+    total = sum(size for _p, size, _e, _end in episodes_only)
     copied_before = 0
     out: list[EpisodeImport] = []
-    for video, size in videos:
+    for video, size, file_episode, episode_end in episodes_only:
         name = os.path.basename(video)
-        seasons, episodes = parse_season_episode(name)
+        seasons, _episodes = parse_season_episode(name)
         file_season = (seasons[0] if len(seasons) == 1 else None) or season
-        file_episode = episodes[0] if episodes else None
-        episode_end = episodes[-1] if len(episodes) > 1 else None
         season_dir = f"Season {file_season:02d}" if file_season is not None else "Season 00"
         rel_dir = f"{tv_root}/{folder}/{season_dir}"
 
