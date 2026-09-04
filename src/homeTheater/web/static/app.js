@@ -158,6 +158,50 @@
         await api("DELETE", `/api/titles/${id}`);
         btn.closest("tr, article")?.remove();
         flash(`Deleted "${name}" from the catalog.`);
+      } else if (act === "cleanup-scan") {
+        const box = document.getElementById("cleanup-report");
+        btn.disabled = true;
+        if (box) box.textContent = "Scanning NAS + download client…";
+        try {
+          const p = await api("GET", "/api/cleanup");
+          const gb = (p.extras_bytes / 1e9).toFixed(2);
+          const lines = [];
+          lines.push(`Extras: ${p.extras_count} file(s), ${gb} GB`);
+          for (const e of (p.extras_sample || []).slice(0, 15)) {
+            lines.push(`  ${(e.size / 1e6).toFixed(1)} MB  ${e.path}`);
+          }
+          if (p.extras_count > 15) lines.push(`  … and ${p.extras_count - 15} more`);
+          lines.push(`Stuck torrents: ${p.stuck_count}`);
+          for (const t of p.stuck || []) lines.push(`  [${t.reason}] ${t.name}`);
+          for (const n of p.notes || []) lines.push(`note: ${n}`);
+          if (box) box.textContent = lines.join("\n");
+          const apply = document.querySelector('[data-action="cleanup-apply"]');
+          const total = (p.extras_count || 0) + (p.stuck_count || 0);
+          if (apply) apply.hidden = total === 0;
+          if (total === 0) flash("Nothing to clean up — you're tidy. ✨");
+        } finally {
+          btn.disabled = false;
+        }
+      } else if (act === "cleanup-apply") {
+        if (!window.confirm(
+          "Delete the found extra files from the NAS and remove the stuck torrents?\n\n" +
+          "Only non-episode extras and already-imported/orphaned torrents are touched. " +
+          "This cannot be undone (files are deleted)."
+        )) return;
+        btn.disabled = true;
+        try {
+          const r = await api("POST", "/api/cleanup");
+          flash(
+            `Deleted ${r.extras_deleted || 0} extra file(s), removed ` +
+            `${r.torrents_removed || 0} torrent(s).` +
+            ((r.errors && r.errors.length) ? ` ${r.errors.length} error(s).` : "")
+          );
+          btn.hidden = true;
+          const box = document.getElementById("cleanup-report");
+          if (box) box.textContent = "";
+        } finally {
+          btn.disabled = false;
+        }
       } else if (act === "discover") {
         const max = document.getElementById("discover-max");
         const body = max && max.value ? { max_per_source: Number(max.value) } : {};

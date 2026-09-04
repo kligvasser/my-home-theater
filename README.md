@@ -53,6 +53,7 @@ home-theater sync       # advance in-flight downloads (poll -> import)
 home-theater subtitles  # fetch missing subtitles (bazarr or native backend)
 home-theater reconcile  # reconcile arr-owned items into the catalog
 home-theater backup     # timestamped SQLite backup
+home-theater cleanup    # find NAS extras + stuck torrents (dry run; --apply to remove)
 ```
 
 Everything is also on the dashboard: **Library**, **Candidates** (review/approve, **★ Follow** a series to auto-grab new seasons/episodes),

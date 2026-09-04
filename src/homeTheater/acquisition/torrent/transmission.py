@@ -110,7 +110,16 @@ class TransmissionClient:
         torrents = args.get("torrents") or []
         if not torrents:
             return None
-        t = torrents[0]
+        return self._to_status(torrents[0], infohash)
+
+    async def list_torrents(self) -> list[TorrentStatus]:
+        """Every torrent the client currently holds (for cleanup/orphan checks)."""
+
+        args = await self._rpc("torrent-get", {"fields": _FIELDS})
+        rows = args.get("torrents") or []
+        return [self._to_status(t, str(t.get("hashString", ""))) for t in rows]
+
+    def _to_status(self, t: dict[str, Any], infohash: str) -> TorrentStatus:
         progress = float(t.get("percentDone", 0.0) or 0.0)
         state = int(t.get("status", 0) or 0)
         complete = progress >= 1.0

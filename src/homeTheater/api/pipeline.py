@@ -115,3 +115,28 @@ def api_scan(background: BackgroundTasks) -> dict[str, Any]:
 
     background.add_task(_run)
     return {"started": True}
+
+
+@router.get("/cleanup", dependencies=[Depends(require_token)])
+async def api_cleanup_plan() -> dict[str, Any]:
+    """Dry-run cleanup report: NAS extras + stuck torrents that could be removed."""
+
+    from ..cleanup import plan_cleanup
+
+    plan = await plan_cleanup(get_config())
+    d = plan.as_dict()
+    # Trim the extras list for the UI (full delete re-derives it server-side).
+    d["extras_sample"] = [{"path": e["path"], "size": e["size"]} for e in d["extras"][:50]]
+    d["extras_count"] = len(d["extras"])
+    d["stuck_count"] = len(d["stuck"])
+    del d["extras"]
+    return d
+
+
+@router.post("/cleanup", dependencies=[Depends(require_token)])
+async def api_cleanup_apply() -> dict[str, Any]:
+    """Perform cleanup now: delete NAS extras and remove stuck/imported torrents."""
+
+    from ..cleanup import apply_cleanup
+
+    return await apply_cleanup(get_config())

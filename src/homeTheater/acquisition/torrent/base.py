@@ -107,6 +107,10 @@ class DownloadClient(Protocol):
         """Current state, or ``None`` if the client no longer knows this hash."""
         ...
 
+    async def list_torrents(self) -> list[TorrentStatus]:
+        """Every torrent the client currently holds (for cleanup/orphan checks)."""
+        ...
+
     async def remove(self, infohash: str, *, delete_data: bool) -> None:
         """Remove a torrent, optionally deleting its downloaded files."""
         ...

@@ -250,6 +250,45 @@ def backup() -> None:
     log.info("backup.cli_done", dest=str(dest))
 
 
+def cleanup(apply: bool = False) -> None:
+    """Find (and with --apply, remove) NAS extras + stuck completed torrents."""
+
+    import asyncio
+
+    from .cleanup import apply_cleanup, plan_cleanup
+    from .config import get_config
+    from .db import init_db
+
+    _configure()
+    config = get_config()
+    init_db()
+
+    plan = asyncio.run(plan_cleanup(config))
+    gb = plan.extras_bytes / 1e9
+    print(f"NAS extras: {len(plan.extras)} file(s), {gb:.2f} GB")
+    for e in plan.extras[:40]:
+        print(f"  {e.size / 1e6:8.1f} MB  {e.path}")
+    if len(plan.extras) > 40:
+        print(f"  … and {len(plan.extras) - 40} more")
+    print(f"Stuck torrents: {len(plan.stuck)}")
+    for t in plan.stuck:
+        print(f"  [{t.reason}] {t.name}")
+    for note in plan.notes:
+        print(f"note: {note}")
+
+    if not apply:
+        print("\nDry run. Re-run with --apply to delete the above.")
+        return
+    result = asyncio.run(apply_cleanup(config))
+    log.info("cleanup.cli_done", **{k: v for k, v in result.items() if k != "notes"})
+    print(
+        f"\nDeleted {result.get('extras_deleted', 0)} extra file(s), "
+        f"removed {result.get('torrents_removed', 0)} torrent(s)."
+    )
+    for err in result.get("errors", []):
+        print(f"  error: {err}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="home-theater")
     sub = parser.add_subparsers(dest="command")
@@ -271,6 +310,10 @@ def main() -> None:
     sub.add_parser("apply-naming", help="push the folder-structure policy to Radarr/Sonarr/Bazarr")
     sub.add_parser("train", help="train the preference classifier from approve/reject labels")
     sub.add_parser("backup", help="write a timestamped SQLite backup")
+    cleanup_p = sub.add_parser(
+        "cleanup", help="find NAS extras + stuck torrents (dry run unless --apply)"
+    )
+    cleanup_p.add_argument("--apply", action="store_true", help="actually delete/remove")
     args = parser.parse_args()
 
     if args.command == "scan":
@@ -297,6 +340,8 @@ def main() -> None:
         train()
     elif args.command == "backup":
         backup()
+    elif args.command == "cleanup":
+        cleanup(apply=args.apply)
     else:
         serve()
 

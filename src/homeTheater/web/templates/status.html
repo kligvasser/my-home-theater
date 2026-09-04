@@ -57,6 +57,16 @@
 </table>
 </div>
 
+<h2>🧹 Cleanup</h2>
+<p class="muted small">Find junk safely: leftover featurette/extra files in TV season
+  folders, and finished torrents that are already imported or orphaned (never ones
+  still importing). Scan first — nothing is deleted until you press Apply.</p>
+<div class="pipeline-controls">
+  <button type="button" data-action="cleanup-scan">🔍 Scan for cleanup</button>
+  <button type="button" class="danger" data-action="cleanup-apply" hidden>🗑 Apply cleanup</button>
+</div>
+<div id="cleanup-report" class="small" style="margin-top:10px"></div>
+
 <h2>Recent runs</h2>
 {% include "_runs_table.html" %}
 {% endblock %}
