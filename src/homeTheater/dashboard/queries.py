@@ -458,6 +458,55 @@ def list_candidates(
     return ordered[start : start + page_size], total
 
 
+@dataclass(frozen=True, slots=True)
+class FollowedRow:
+    tmdb_id: int
+    title: str
+    year: int | None
+    kind: str
+    seasons_count: int | None
+    series_status: str | None
+    owned_seasons: int  # how many distinct seasons are on the NAS
+
+    @property
+    def tmdb_url(self) -> str | None:
+        if self.tmdb_id is None:
+            return None
+        return f"https://www.themoviedb.org/tv/{self.tmdb_id}"
+
+
+def list_followed() -> list[FollowedRow]:
+    """Followed series, with how many seasons are already owned — for the
+    'Following' panel. Alphabetical."""
+
+    with session_scope() as s:
+        titles = s.scalars(
+            select(Title).where(Title.followed.is_(True)).order_by(func.lower(Title.title))
+        ).all()
+        rows: list[FollowedRow] = []
+        for t in titles:
+            owned = (
+                s.scalar(
+                    select(func.count(func.distinct(OwnedFile.season))).where(
+                        OwnedFile.title_id == t.id, OwnedFile.season.is_not(None)
+                    )
+                )
+                or 0
+            )
+            rows.append(
+                FollowedRow(
+                    tmdb_id=t.tmdb_id or 0,
+                    title=t.title,
+                    year=t.year,
+                    kind=str(t.kind),
+                    seasons_count=t.seasons_count,
+                    series_status=t.series_status,
+                    owned_seasons=owned,
+                )
+            )
+        return rows
+
+
 def candidate_counts() -> dict[str, int]:
     """Count candidates by status (for dashboard badges)."""
 

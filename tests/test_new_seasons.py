@@ -214,3 +214,52 @@ def test_build_query_targets_season() -> None:
     assert build_query("Breaking Bad", 2008, TitleKind.series, season=3) == "Breaking Bad S03"
     assert build_query("Breaking Bad", 2008, TitleKind.series) == "Breaking Bad"
     assert build_query("Heat", 1995, TitleKind.movie, season=None) == "Heat 1995"
+
+
+@respx.mock
+async def test_followed_series_auto_grabs_new_season(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A followed series with no files yet yields an *approved* (auto-grab)
+    season candidate for each aired season — not a 'new' suggestion."""
+
+    _env(monkeypatch)
+    from sqlalchemy import select
+
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate, CandidateStatus, Title
+    from homeTheater.discovery import run_discovery
+
+    init_db()
+    # Follow Silo, owning nothing of it.
+    with session_scope() as s:
+        s.add(Title(tmdb_id=1396, title="Silo", year=2023, kind=TitleKind.series, followed=True))
+
+    _mock_empty_trending()
+    respx.get(f"{TMDB}/tv/1396").mock(
+        return_value=httpx.Response(
+            200,
+            json=_tv_details(
+                [
+                    {"season_number": 1, "episode_count": 10, "air_date": "2023-05-05"},
+                    {"season_number": 2, "episode_count": 10, "air_date": "2024-11-15"},
+                    {"season_number": 3, "episode_count": 10, "air_date": "2099-01-01"},  # unaired
+                ]
+            ),
+        )
+    )
+    respx.get(OMDB).mock(
+        return_value=httpx.Response(
+            200, json={"Response": "True", "imdbRating": "8.9", "imdbVotes": "300000"}
+        )
+    )
+
+    stats = await run_discovery(get_config())
+    assert stats.created == 2  # S1 + S2 aired; S3 not yet
+
+    with session_scope() as s:
+        cands = s.scalars(select(Candidate).join(Title).where(Title.tmdb_id == 1396)).all()
+        assert {c.season for c in cands} == {1, 2}
+        assert all(c.status == CandidateStatus.approved for c in cands)  # auto-grab
+        assert all("following" in (c.reason or "") for c in cands)

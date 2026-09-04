@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 
 def _reset() -> None:
@@ -186,3 +187,61 @@ def test_grab_endpoint_adds_and_queues_in_one_call(
         assert body["id"] == 42 and body["queued"] is True and body["message"] == "grabbed"
         assert calls["reuse_existing"] is True  # idempotent add
         assert calls["queued_id"] == 42  # and it queued the same candidate
+
+
+def test_follow_unfollow_endpoints(config_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Follow sets Title.followed (auto-grab), unfollow clears it; both gated."""
+    monkeypatch.setenv("DASHBOARD_TOKEN", "tok")
+    _reset()
+
+    from homeTheater.api import create_app
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Title, TitleKind
+
+    init_db()
+
+    async def fake_follow(config, tmdb_id, kind=TitleKind.series):  # type: ignore[no-untyped-def]
+        with session_scope() as s:
+            t = Title(
+                tmdb_id=tmdb_id, title="Silo", year=2023, kind=TitleKind.series, followed=True
+            )
+            s.add(t)
+            s.flush()
+            return t.id
+
+    import homeTheater.api.candidates as cand_api
+
+    monkeypatch.setattr(cand_api, "follow_series", fake_follow)
+
+    with TestClient(create_app()) as client:
+        assert client.post("/api/candidates/follow", json={"tmdb_id": 125988}).status_code == 401
+
+        r = client.post(
+            "/api/candidates/follow",
+            json={"tmdb_id": 125988, "kind": "series"},
+            headers={"X-Auth-Token": "tok"},
+        )
+        assert r.status_code == 200 and r.json()["followed"] is True
+        with session_scope() as s:
+            t = s.scalar(select(Title).where(Title.tmdb_id == 125988))
+            assert t is not None and t.followed is True
+
+        # unfollow clears it
+        r = client.post(
+            "/api/candidates/unfollow",
+            json={"tmdb_id": 125988, "kind": "series"},
+            headers={"X-Auth-Token": "tok"},
+        )
+        assert r.status_code == 200 and r.json()["followed"] is False
+        with session_scope() as s:
+            assert s.scalar(select(Title).where(Title.tmdb_id == 125988)).followed is False
+
+        # unknown series → 404
+        assert (
+            client.post(
+                "/api/candidates/unfollow",
+                json={"tmdb_id": 999999, "kind": "series"},
+                headers={"X-Auth-Token": "tok"},
+            ).status_code
+            == 404
+        )

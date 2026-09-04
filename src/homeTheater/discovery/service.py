@@ -264,11 +264,15 @@ def _persist(enriched: list[_Enriched], config: AppConfig, stats: DiscoveryStats
                     title_id=title.id,
                     season=item.disc.season,
                     source=item.disc.origin,
-                    status=CandidateStatus.approved if auto else CandidateStatus.new,
+                    status=(
+                        CandidateStatus.approved
+                        if (auto or item.disc.auto_grab)
+                        else CandidateStatus.new
+                    ),
                     reason=reason,
                     score=quality,
                     features=feats,
-                    decided_at=utcnow() if auto else None,
+                    decided_at=utcnow() if (auto or item.disc.auto_grab) else None,
                 )
             )
             stats.created += 1

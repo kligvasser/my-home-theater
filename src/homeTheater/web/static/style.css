@@ -305,3 +305,10 @@ button.mini.danger:hover:not(:disabled) {
 .subs .sub { display: inline-block; margin-right: 8px; white-space: nowrap; }
 .subs .sub.ok { color: var(--ok); }
 .subs .sub.no { color: var(--muted); }
+
+.following { margin-top: 14px; }
+.follow-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.follow-chip { display: inline-flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--border); border-radius: 999px; padding: 4px 6px 4px 12px; }
+.follow-chip a { color: var(--fg); text-decoration: none; }
+.follow-chip .unfollow { cursor: pointer; background: transparent; border: none; color: var(--muted); font-size: 14px; line-height: 1; padding: 2px 6px; border-radius: 999px; }
+.follow-chip .unfollow:hover { background: var(--border); color: var(--fg); }

@@ -137,6 +137,29 @@
         const body = max && max.value ? { max_per_source: Number(max.value) } : {};
         const out = await api("POST", "/api/candidates/discover", body);
         flash(`Discovery started (up to ${out.max_per_source}/source) — see Runs.`);
+      } else if (act === "follow") {
+        btn.disabled = true;
+        const prev = btn.textContent;
+        btn.textContent = "following…";
+        try {
+          await api("POST", "/api/candidates/follow", {
+            tmdb_id: Number(btn.dataset.tmdb),
+            kind: btn.dataset.kind || "series",
+          });
+          btn.textContent = "★ Following";
+          flash("Following — new seasons & episodes will grab automatically.");
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = prev;
+          throw err;
+        }
+      } else if (act === "unfollow") {
+        await api("POST", "/api/candidates/unfollow", {
+          tmdb_id: Number(btn.dataset.tmdb),
+          kind: btn.dataset.kind || "series",
+        });
+        btn.closest(".follow-chip")?.remove();
+        flash("Unfollowed.");
       } else if (act === "grab-candidate") {
         btn.disabled = true;
         btn.textContent = "grabbing…";
@@ -271,6 +294,16 @@
           grab.dataset.tmdbId = it.tmdb_id;
           grab.dataset.kind = it.kind;
           row.appendChild(grab);
+          if (it.kind === "series") {
+            const follow = document.createElement("button");
+            follow.textContent = "★ Follow";
+            follow.className = "secondary";
+            follow.title = "Follow — auto-grab new seasons/episodes as they air";
+            follow.dataset.action = "follow";
+            follow.dataset.tmdb = it.tmdb_id;
+            follow.dataset.kind = "series";
+            row.appendChild(follow);
+          }
           const add = document.createElement("button");
           add.textContent = "add";
           add.className = "secondary";

@@ -34,6 +34,7 @@ class Discovered:
     season: int | None = None  # season-scoped (series you own): grab this season
     season_episodes: int | None = None  # announced episode count of that season
     reason: str | None = None  # overrides the default skip_filter reason
+    auto_grab: bool = False  # followed series: approve on creation so it grabs itself
 
 
 class CandidateSource(Protocol):
@@ -116,12 +117,15 @@ class TraktWatchlistSource:
 
 @dataclass
 class LibraryNewSeasonsSource:
-    """New seasons of series you already own.
+    """New seasons of series you own *or follow*.
 
-    Walks the owned catalog (series with season-numbered files), asks TMDb for
-    each show's season list, and yields one season-scoped ``Discovered`` per
-    aired season newer than the newest one on disk. ``skip_filter``: you
-    already chose the show, so no rating/vote gate.
+    Walks owned series (by season-numbered files) and followed series, asks TMDb
+    for each show's season list, and yields one season-scoped ``Discovered`` per
+    aired season newer than the newest one on disk. ``skip_filter``: you already
+    chose the show, so no rating/vote gate. Followed series are ``auto_grab`` —
+    their new-season candidates are approved on creation so they download without
+    a manual OK; a followed show you own nothing of yet backfills every aired
+    season.
     """
 
     @property
@@ -136,8 +140,11 @@ class LibraryNewSeasonsSource:
         from ..db.session import session_scope
         from .service import BLOCKING_STATUSES  # deferred: service imports this module
 
+        latest_owned: dict[int, int] = {}  # tmdb_id -> newest season on disk
+        names: dict[int, str] = {}
+        followed: set[int] = set()
         with session_scope() as s:
-            rows = s.execute(
+            for tmdb_id, name, season in s.execute(
                 select(Title.tmdb_id, Title.title, OwnedFile.season)
                 .join(OwnedFile, OwnedFile.title_id == Title.id)
                 .where(
@@ -145,7 +152,20 @@ class LibraryNewSeasonsSource:
                     Title.tmdb_id.is_not(None),
                     OwnedFile.season.is_not(None),
                 )
-            ).all()
+            ).all():
+                latest_owned[tmdb_id] = max(latest_owned.get(tmdb_id, 0), season)
+                names[tmdb_id] = name
+            # Followed series (may own nothing yet → latest_owned defaults to 0).
+            for tmdb_id, name in s.execute(
+                select(Title.tmdb_id, Title.title).where(
+                    Title.kind == TitleKind.series,
+                    Title.tmdb_id.is_not(None),
+                    Title.followed.is_(True),
+                )
+            ).all():
+                followed.add(tmdb_id)
+                latest_owned.setdefault(tmdb_id, 0)
+                names[tmdb_id] = name
             # Seasons already suggested (live or rejected) must not be re-emitted:
             # they'd only be dropped at persist time while eating the source limit.
             taken = {
@@ -160,15 +180,12 @@ class LibraryNewSeasonsSource:
                     )
                 ).all()
             }
-        latest_owned: dict[int, int] = {}  # tmdb_id -> newest season on disk
-        names: dict[int, str] = {}
-        for tmdb_id, name, season in rows:
-            latest_owned[tmdb_id] = max(latest_owned.get(tmdb_id, 0), season)
-            names[tmdb_id] = name
 
         today = utcnow().date().isoformat()
         out: list[Discovered] = []
-        for tmdb_id in sorted(latest_owned):
+        # Followed shows first so the auto-grab items aren't crowded out by the
+        # per-run limit.
+        for tmdb_id in sorted(latest_owned, key=lambda t: (t not in followed, t)):
             if len(out) >= limit:
                 log.info("new_seasons.limit_reached", limit=limit)
                 break
@@ -180,6 +197,7 @@ class LibraryNewSeasonsSource:
                 )
                 continue
             have = latest_owned[tmdb_id]
+            is_followed = tmdb_id in followed
             for season in details.seasons:
                 # Specials (S0) are noise; unaired seasons can't be grabbed yet.
                 # ISO dates compare correctly as strings.
@@ -190,7 +208,12 @@ class LibraryNewSeasonsSource:
                 if not season.air_date or season.air_date > today:
                     continue
                 episodes = f" ({season.episode_count} episodes)" if season.episode_count else ""
-                reason = f"new season S{season.number:02d}{episodes} — you own up to S{have:02d}"
+                if is_followed:
+                    reason = f"following: new season S{season.number:02d}{episodes} (auto-grab)"
+                else:
+                    reason = (
+                        f"new season S{season.number:02d}{episodes} — you own up to S{have:02d}"
+                    )
                 out.append(
                     Discovered(
                         details,
@@ -200,6 +223,7 @@ class LibraryNewSeasonsSource:
                         season=season.number,
                         season_episodes=season.episode_count,
                         reason=reason,
+                        auto_grab=is_followed,
                     )
                 )
         return out[:limit]

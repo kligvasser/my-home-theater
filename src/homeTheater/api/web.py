@@ -17,6 +17,7 @@ from ..dashboard import (
     candidate_counts,
     get_stats,
     list_candidates,
+    list_followed,
     list_missing_subtitles,
     list_titles,
     recent_runs,
@@ -107,6 +108,7 @@ def candidates(
         {
             "candidates": rows,
             "counts": candidate_counts(),
+            "followed": list_followed(),
             "status": str(shown),
             "kind": kind or "",
             "sort": sort,

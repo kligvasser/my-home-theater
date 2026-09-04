@@ -163,6 +163,13 @@ to the NAS, so it no longer uploads.
 
 ## Season grabs
 
+**Following a series** (the ★ Follow button on a series card or search result)
+monitors it and **auto-grabs** new seasons/episodes as they air — even a show you
+own nothing of yet backfills every aired season. It works by marking the title
+`followed`; the new-seasons discovery source then emits *approved* season
+candidates for followed shows (owned shows still emit plain suggestions), which
+the acquire job grabs and the season top-up keeps current.
+
 Approving a **series** (from trending, the watchlist, or the search box) means the
 whole series: at grab time it is expanded into one candidate per aired season,
 so a show never arrives as a single stray episode. Each season candidate then

@@ -13,7 +13,7 @@ from ..acquisition import cancel_candidate, queue_candidate, restart_candidate
 from ..config import effective_config, get_config
 from ..dashboard import candidate_counts, list_candidates
 from ..db.models import CandidateStatus, TitleKind
-from ..discovery.actions import add_manual, approve, reject
+from ..discovery.actions import add_manual, approve, follow_series, reject, set_followed
 from ..errors import InvalidTransitionError, NotConfiguredError, redact_exc
 from ..logging_setup import get_logger
 from ..metadata.tmdb import TMDbClient
@@ -113,6 +113,45 @@ async def api_grab(body: ManualGrab) -> dict[str, Any]:
         "dry_run": outcome.dry_run,
         "message": outcome.message,
     }
+
+
+class Follow(BaseModel):
+    tmdb_id: int
+    kind: TitleKind = TitleKind.series
+
+
+@router.post("/follow", dependencies=[Depends(require_token)])
+async def api_follow(body: Follow, background: BackgroundTasks) -> dict[str, Any]:
+    """Follow a series: monitor it and auto-grab new seasons/episodes as they
+    air. Kicks a discovery run in the background so anything already out is
+    picked up now instead of waiting for the next scheduled sweep."""
+
+    try:
+        title_id = await follow_series(get_config(), body.tmdb_id, body.kind)
+    except NotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    from ..discovery import run_discovery
+
+    async def _run() -> None:
+        try:
+            await run_discovery(effective_config())
+        except Exception as exc:  # already logged + recorded in job_run
+            log.warning("follow.discover_failed", error=redact_exc(exc))
+
+    background.add_task(_run)
+    return {"title_id": title_id, "followed": True}
+
+
+@router.post("/unfollow", dependencies=[Depends(require_token)])
+def api_unfollow(body: Follow) -> dict[str, Any]:
+    """Stop following a series (leaves existing candidates/downloads alone)."""
+
+    if not set_followed(body.tmdb_id, body.kind, False):
+        raise HTTPException(status_code=404, detail="series not found")
+    return {"tmdb_id": body.tmdb_id, "followed": False}
 
 
 @router.get("/search", dependencies=[Depends(require_token)])

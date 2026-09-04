@@ -111,6 +111,9 @@ class Title(Base, TimestampMixin):
     # Radarr/Sonarr report a file for this title (set by reconcile_library) —
     # counts as "owned" for discovery even before the NAS scanner sees the file.
     arr_has_file: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Followed series: auto-grab new seasons/episodes as they air (series only).
+    # Unlike "owned", a followed show is monitored even before you have any files.
+    followed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     # Last enrichment attempt: keeps titles the providers can't resolve (or that
     # legitimately have no IMDb rating) from being re-enqueued on every run.
     last_enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

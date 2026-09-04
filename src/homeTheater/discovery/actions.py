@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from ..config import AppConfig
 from ..db.base import utcnow
-from ..db.models import Candidate, CandidateSource, CandidateStatus, TitleKind
+from ..db.models import Candidate, CandidateSource, CandidateStatus, Title, TitleKind
 from ..db.session import session_scope
 from ..errors import InvalidTransitionError, NotConfiguredError
 from ..features import extract_features
@@ -126,3 +126,49 @@ async def add_manual(
         session.add(cand)
         session.flush()
         return cand.id
+
+
+async def follow_series(config: AppConfig, tmdb_id: int, kind: TitleKind = TitleKind.series) -> int:
+    """Mark a series as followed: upsert its Title from TMDb and set ``followed``.
+
+    Following auto-grabs new seasons/episodes as they air (the new-seasons
+    discovery source treats followed shows as auto-grab). Returns the title id.
+    Only series can be followed — movies don't have new episodes.
+    """
+
+    if kind is not TitleKind.series:
+        raise ValueError("Only series can be followed.")
+    secrets = config.secrets
+    if secrets.tmdb_api_key is None:
+        raise NotConfiguredError("TMDB_API_KEY is not set in .env.")
+
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        tmdb = TMDbClient(
+            secrets.tmdb_api_key.get_secret_value(),
+            http,
+            language=config.metadata.language,
+            cache_days=config.metadata.cache_days,
+        )
+        try:
+            details = await tmdb.details(tmdb_id, kind)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise ValueError(f"TMDb has no series with id {tmdb_id}") from exc
+            raise
+
+    with session_scope() as session:
+        title = _upsert_title(session, kind, details)
+        title.followed = True
+        return title.id
+
+
+def set_followed(tmdb_id: int, kind: TitleKind, followed: bool) -> bool:
+    """Toggle ``followed`` on an existing title (by tmdb id + kind). Returns True
+    if a title was found and updated."""
+
+    with session_scope() as session:
+        title = session.scalar(select(Title).where(Title.tmdb_id == tmdb_id, Title.kind == kind))
+        if title is None:
+            return False
+        title.followed = followed
+        return True

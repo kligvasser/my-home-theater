@@ -55,7 +55,7 @@ home-theater reconcile  # reconcile arr-owned items into the catalog
 home-theater backup     # timestamped SQLite backup
 ```
 
-Everything is also on the dashboard: **Library**, **Candidates** (review/approve),
+Everything is also on the dashboard: **Library**, **Candidates** (review/approve, **★ Follow** a series to auto-grab new seasons/episodes),
 **Activity** (live grab → download → import → subtitles), **Subtitles**, **Gaps**,
 **Insights**, **Settings**, **Status**.
 

@@ -49,6 +49,28 @@
   <div id="cand-results" class="sresults"></div>
 </section>
 
+<section class="following">
+  <h2>📺 Following <span class="muted small">— new seasons &amp; episodes grab automatically</span></h2>
+  {% if followed %}
+  <div class="follow-list">
+    {% for f in followed %}
+    <span class="follow-chip" data-tmdb="{{ f.tmdb_id }}">
+      {% if f.tmdb_url %}<a href="{{ f.tmdb_url }}" target="_blank" rel="noopener noreferrer">{{ f.title }}</a>{% else %}{{ f.title }}{% endif %}
+      <span class="muted small">
+        {%- if f.owned_seasons %} {{ f.owned_seasons }}/{{ f.seasons_count or '?' }} seasons{% else %} new{% endif -%}
+        {%- if f.series_status %} · {{ f.series_status }}{% endif -%}
+      </span>
+      <button type="button" class="unfollow" title="Stop following"
+              data-action="unfollow" data-tmdb="{{ f.tmdb_id }}" data-kind="series">✕</button>
+    </span>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="muted small">Not following anything yet. Search a series above and press <b>★ Follow</b>,
+    or use <b>★ Follow</b> on a series card below.</p>
+  {% endif %}
+</section>
+
 {% if candidates %}
 <div class="candidate-grid">
   {% for c in candidates %}
@@ -83,6 +105,10 @@
       <details class="overview"><summary>description</summary><p>{{ c.overview }}</p></details>
       {% endif %}
       <div class="cactions">
+        {% if c.kind == "series" and c.tmdb_id %}
+        <button type="button" data-action="follow" data-tmdb="{{ c.tmdb_id }}" data-kind="series"
+                title="Follow this series — auto-grab new seasons/episodes">★ Follow</button>
+        {% endif %}
         {% if c.status == "new" %}
         <button type="button" data-action="candidate" data-verb="approve" data-id="{{ c.id }}"
                 title="Approve — grabbed by the scheduled acquire job (respects the download window)">✓ Approve (schedule)</button>
