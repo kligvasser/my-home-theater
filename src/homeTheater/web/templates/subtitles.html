@@ -13,8 +13,11 @@
   </div>
   {% endfor %}
   <p class="muted note">Bazarr does the actual fetching (into each title's <code>Subs/</code>
-     folder once the naming policy is applied). Trigger a search for all missing via the
-     token-gated API: <code>POST /api/subtitles/search</code>.</p>
+     folder once the naming policy is applied), or the native backend writes them beside
+     each file.</p>
+  <div class="pipeline-controls" style="margin-top:10px">
+    <button type="button" data-action="subs-now">💬 Fetch missing subtitles</button>
+  </div>
 </section>
 
 <nav class="statusfilter">
@@ -27,6 +30,7 @@
 
 <h2>Missing <code>{{ shown }}</code> subtitles ({{ missing | length }})</h2>
 {% if missing %}
+<div class="table-wrap">
 <table class="library">
   <thead><tr><th></th><th>Title</th><th>Year</th><th>Kind</th><th>IMDb</th><th>Files</th></tr></thead>
   <tbody>
@@ -42,6 +46,7 @@
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% else %}
 <p class="muted">Every owned title has <code>{{ shown }}</code> subtitles. 🎉</p>
 {% endif %}

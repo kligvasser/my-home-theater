@@ -73,11 +73,19 @@
   function flash(msg, isError) {
     const bar = document.getElementById("flash");
     if (!bar) return alert(msg);
-    bar.textContent = msg;
     bar.className = "flash " + (isError ? "err" : "ok");
+    bar.textContent = msg;
+    const x = document.createElement("button");
+    x.className = "flash-x";
+    x.type = "button";
+    x.setAttribute("aria-label", "Dismiss");
+    x.textContent = "✕";
+    x.addEventListener("click", () => (bar.hidden = true));
+    bar.appendChild(x);
     bar.hidden = false;
     window.clearTimeout(bar._t);
-    bar._t = window.setTimeout(() => (bar.hidden = true), 6000);
+    // Successes auto-dismiss; errors stay until dismissed so they can be read.
+    if (!isError) bar._t = window.setTimeout(() => (bar.hidden = true), 6000);
   }
 
   // One delegated click handler drives every [data-action] button.
@@ -102,9 +110,27 @@
         // approve | reject | queue on a candidate card
         const id = btn.dataset.id;
         const verb = btn.dataset.verb;
-        const out = await api("POST", `/api/candidates/${id}/${verb}`);
-        flash(out.message || `${verb}: ok`);
-        window.setTimeout(() => window.location.reload(), 600);
+        if (verb === "reject" && !window.confirm(
+          "Reject this candidate?\n\nIt leaves the queue and won't be re-suggested " +
+          "(the rejection also trains the preference model)."
+        )) return;
+        const card = btn.closest(".candidate");
+        const buttons = card ? card.querySelectorAll("button") : [btn];
+        buttons.forEach((b) => (b.disabled = true));
+        try {
+          const out = await api("POST", `/api/candidates/${id}/${verb}`);
+          flash(out.message || `${verb}: ok`);
+          // The card leaves the current filter (new→approved/queued/rejected);
+          // remove it in place instead of reloading and losing scroll position.
+          if (card) {
+            card.style.transition = "opacity .25s";
+            card.style.opacity = "0";
+            window.setTimeout(() => card.remove(), 250);
+          }
+        } catch (err) {
+          buttons.forEach((b) => (b.disabled = false));
+          throw err;
+        }
       } else if (act === "restart") {
         const id = btn.dataset.cand;
         if (!window.confirm("Restart this item?\n\nClears the current download (removing any leftover torrent) and re-grabs from scratch.")) return;
@@ -328,6 +354,7 @@
     "acquire-now": { url: "/api/pipeline/acquire-now", msg: "Grabbing approved candidates now — watch the steppers." },
     "sync-now": { url: "/api/pipeline/sync", msg: "Advancing downloads (poll + import)…" },
     "scan-now": { url: "/api/pipeline/scan", msg: "Rescanning the NAS — new files enter the catalog." },
+    "enrich-now": { url: "/api/pipeline/enrich", msg: "Enriching titles (ratings, genres, taste)… watch Runs." },
     "subs-now": { url: "/api/subtitles/search", msg: "Fetching missing subtitles…" },
   };
 

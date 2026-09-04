@@ -34,6 +34,7 @@ library, queue, or reject history. <b>add</b> creates a candidate (🔒 unlock f
 {% if error %}
 <p class="muted">{{ error }}</p>
 {% elif rows %}
+<div class="table-wrap">
 <table class="library gaps">
   <thead>
     <tr><th></th><th>Title</th><th>Year</th><th>Kind</th><th>TMDb</th><th>Votes</th><th></th></tr>
@@ -61,13 +62,18 @@ library, queue, or reject history. <b>add</b> creates a candidate (🔒 unlock f
       <td class="r">{{ "%.1f"|format(r.rating) if r.rating else "—" }}</td>
       <td class="r">{{ "{:,}".format(r.votes) if r.votes else 0 }}</td>
       <td>
-        <button class="primary" data-action="add-candidate"
-                data-tmdb-id="{{ r.tmdb_id }}" data-kind="{{ r.kind }}">＋ add</button>
+        <button class="primary" data-action="grab-candidate"
+                data-tmdb-id="{{ r.tmdb_id }}" data-kind="{{ r.kind }}"
+                title="Add and grab now">⬇ Grab</button>
+        <button data-action="add-candidate"
+                data-tmdb-id="{{ r.tmdb_id }}" data-kind="{{ r.kind }}"
+                title="Add to the queue without grabbing">＋ add</button>
       </td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% else %}
 <p class="muted">No gaps for these filters — everything top-rated above your thresholds is
 already owned, queued, or rejected. 🎉</p>

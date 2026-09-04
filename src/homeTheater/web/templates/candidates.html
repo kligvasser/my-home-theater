@@ -86,7 +86,7 @@
         <span class="pill">{{ c.kind }}</span>
         {% if c.imdb_rating is not none %}<span>⭐ {{ "%.1f"|format(c.imdb_rating) }}</span>{% endif %}
         {% if c.imdb_votes is not none %}<span class="muted">{{ "{:,}".format(c.imdb_votes) }} votes</span>{% endif %}
-        {% if c.score is not none %}<span class="muted">score {{ c.score }}</span>{% endif %}
+        {% if c.score is not none %}<span class="muted" title="Ranking score: rating &amp; votes blended with your taste match and the learned preference model. Higher = better fit; used only to order the queue.">score {{ c.score }}</span>{% endif %}
       </div>
       {% if c.imdb_url or c.tmdb_url %}
       <div class="clinks">

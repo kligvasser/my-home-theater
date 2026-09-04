@@ -16,6 +16,11 @@
 
 {% block content %}
 <h1>Library at a glance</h1>
+<div class="pipeline-controls" style="margin-bottom:16px">
+  <button type="button" data-action="scan-now">🔎 Rescan NAS</button>
+  <button type="button" data-action="enrich-now">✨ Enrich metadata</button>
+  <button type="button" data-action="discover">🧭 Discover candidates</button>
+</div>
 
 <section class="cards">
   <div class="card"><span class="num">{{ stats.total_titles }}</span><span class="lbl">Titles</span></div>

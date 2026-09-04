@@ -76,6 +76,28 @@ async def api_sync(background: BackgroundTasks) -> dict[str, Any]:
     return {"started": True}
 
 
+@router.post("/pipeline/enrich", dependencies=[Depends(require_token)])
+def api_enrich(background: BackgroundTasks) -> dict[str, Any]:
+    """Backfill TMDb/IMDb ids, ratings, genres and taste features for catalog
+    titles that are missing them — the data the dashboard/insights display."""
+
+    def _run() -> None:
+        try:
+            import asyncio
+
+            from ..config import get_config
+            from ..metadata.service import enrich_catalog
+
+            asyncio.run(enrich_catalog(get_config()))
+        except Exception as exc:
+            from ..errors import redact_exc
+
+            log.warning("enrich_now.failed", error=redact_exc(exc))
+
+    background.add_task(_run)
+    return {"started": True}
+
+
 @router.post("/pipeline/scan", dependencies=[Depends(require_token)])
 def api_scan(background: BackgroundTasks) -> dict[str, Any]:
     """Rescan the NAS now so freshly-imported files enter the catalog (→ subs)."""

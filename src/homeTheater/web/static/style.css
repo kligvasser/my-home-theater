@@ -27,12 +27,18 @@ a:hover { text-decoration: underline; }
 code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: .9em; }
 
 .topbar {
-  display: flex; align-items: center; gap: 24px;
+  display: flex; align-items: center; gap: 16px 24px; flex-wrap: wrap;
   padding: 12px 24px; background: var(--panel); border-bottom: 1px solid var(--border);
   position: sticky; top: 0; z-index: 5;
 }
 .brand { font-weight: 700; font-size: 1.05rem; }
-.topbar nav { display: flex; gap: 18px; }
+.topbar nav { display: flex; gap: 14px 18px; flex-wrap: wrap; }
+.topbar .lockbtn { margin-left: auto; }
+@media (max-width: 640px) {
+  .topbar { gap: 10px 14px; padding: 10px 14px; }
+  .topbar nav { gap: 10px 14px; order: 3; width: 100%; }
+  .topbar .lockbtn { order: 2; }
+}
 .topbar nav a { color: var(--muted); }
 .topbar nav a.active { color: var(--text); font-weight: 600; }
 
@@ -59,6 +65,7 @@ h2 { font-size: 1.05rem; margin: 28px 0 10px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
 @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
 
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
 th { color: var(--muted); font-weight: 600; font-size: .82rem; text-transform: uppercase; letter-spacing: .03em; }
@@ -312,3 +319,10 @@ button.mini.danger:hover:not(:disabled) {
 .follow-chip a { color: var(--fg); text-decoration: none; }
 .follow-chip .unfollow { cursor: pointer; background: transparent; border: none; color: var(--muted); font-size: 14px; line-height: 1; padding: 2px 6px; border-radius: 999px; }
 .follow-chip .unfollow:hover { background: var(--border); color: var(--fg); }
+
+/* Keyboard focus ring (accessibility) — visible on the dark theme. */
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px;
+}
+.flash .flash-x { float: right; margin-left: 12px; background: transparent; border: none;
+  color: var(--muted); cursor: pointer; font-size: 1rem; padding: 0 2px; }

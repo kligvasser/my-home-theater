@@ -10,20 +10,20 @@
   <header class="topbar">
     <a class="brand" href="/">🎬 my-home-theater</a>
     <nav>
-      <a href="/" class="{{ 'active' if active == 'dashboard' }}">Dashboard</a>
-      <a href="/library" class="{{ 'active' if active == 'library' }}">Library</a>
-      <a href="/candidates" class="{{ 'active' if active == 'candidates' }}">Candidates</a>
-      <a href="/activity" class="{{ 'active' if active == 'activity' }}">Activity</a>
-      <a href="/subtitles" class="{{ 'active' if active == 'subtitles' }}">Subtitles</a>
-      <a href="/insights" class="{{ 'active' if active == 'insights' }}">Insights</a>
-      <a href="/gaps" class="{{ 'active' if active == 'gaps' }}">Gaps</a>
-      <a href="/settings" class="{{ 'active' if active == 'settings' }}">Settings</a>
-      <a href="/runs" class="{{ 'active' if active == 'runs' }}">Runs</a>
-      <a href="/status" class="{{ 'active' if active == 'status' }}">Status</a>
+      <a href="/" class="{{ 'active' if active == 'dashboard' }}"{{ ' aria-current="page"' if active == 'dashboard' else '' }}>Dashboard</a>
+      <a href="/library" class="{{ 'active' if active == 'library' }}"{{ ' aria-current="page"' if active == 'library' else '' }}>Library</a>
+      <a href="/candidates" class="{{ 'active' if active == 'candidates' }}"{{ ' aria-current="page"' if active == 'candidates' else '' }}>Candidates</a>
+      <a href="/activity" class="{{ 'active' if active == 'activity' }}"{{ ' aria-current="page"' if active == 'activity' else '' }}>Activity</a>
+      <a href="/subtitles" class="{{ 'active' if active == 'subtitles' }}"{{ ' aria-current="page"' if active == 'subtitles' else '' }}>Subtitles</a>
+      <a href="/insights" class="{{ 'active' if active == 'insights' }}"{{ ' aria-current="page"' if active == 'insights' else '' }}>Insights</a>
+      <a href="/gaps" class="{{ 'active' if active == 'gaps' }}"{{ ' aria-current="page"' if active == 'gaps' else '' }}>Gaps</a>
+      <a href="/settings" class="{{ 'active' if active == 'settings' }}"{{ ' aria-current="page"' if active == 'settings' else '' }}>Settings</a>
+      <a href="/runs" class="{{ 'active' if active == 'runs' }}"{{ ' aria-current="page"' if active == 'runs' else '' }}>Runs</a>
+      <a href="/status" class="{{ 'active' if active == 'status' }}"{{ ' aria-current="page"' if active == 'status' else '' }}>Status</a>
     </nav>
-    <button id="lock" class="lockbtn" data-action="lock" type="button">🔒</button>
+    <button id="lock" class="lockbtn" data-action="lock" type="button" aria-label="Unlock write actions">🔒</button>
   </header>
-  <div id="flash" class="flash" hidden></div>
+  <div id="flash" class="flash" role="alert" aria-live="polite" hidden></div>
   <main>
     {% block content %}{% endblock %}
   </main>
