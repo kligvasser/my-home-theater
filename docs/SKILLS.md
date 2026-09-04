@@ -32,7 +32,15 @@ kept alive by launchd/systemd.
 - `dashboard/queries.py` — all read-only dashboard queries (return dataclasses,
   never detached ORM objects).
 - `health/checks.py` — backend-aware service probes for the Status page.
-- `scheduler/` — APScheduler jobs, gated by `schedule.enabled`.
+- `scheduler/` — APScheduler jobs, gated by `schedule.enabled`. One global
+  `asyncio.Lock` serializes scheduled jobs; each job has a wall-clock timeout
+  (`schedule.job_timeout_minutes`) so a hung NAS job can't starve the others.
+- `reconcile/` — apply Radarr/Sonarr import webhooks/polls to the catalog
+  (season-aware: an S3 import completes the S3 candidate, not any live sibling).
+- `cleanup.py` — dry-run-first janitor: find/delete NAS extras (no-episode files)
+  and remove stuck torrents (imported/orphaned only — never a pending import).
+- `locks.py` — cross-process advisory `flock` (`job_lock`); `sync`, `discovery`
+  and `acquire` take it so a manual/dashboard run can't race the scheduled one.
 
 ## Backends are seams, not forks
 
@@ -42,8 +50,15 @@ service function, so callers (CLI, API, scheduler) never change:
 - **Acquisition** (`acquisition.backend: arr | torrent`): `queue_candidate` /
   `sync_downloads` in `acquisition/service.py` delegate to `torrent/service.py`
   when `torrent`. The torrent path: `TorrentSource` search (apibay/1337x/rarbg) →
-  `select.py` ranking → `TransmissionClient.add_magnet` → on completion, copy into
-  the NAS via a `LibraryTarget`, register an `OwnedFile`, fetch its subtitles.
+  `select.py` ranking (season/episode-verified; executable-named releases and
+  quarantined infohashes dropped) → post-grab metadata screen (remove lone-exe /
+  no-media fakes before they download) → `TransmissionClient.add_magnet` → on
+  completion, copy into the NAS via a `LibraryTarget` (resumable `.part`, EIO
+  backoff, extras skipped), register an `OwnedFile`, fetch its subtitles.
+  Series: a whole-series candidate expands into one candidate per aired season;
+  each grabs the season pack or, for an airing season, tops up episodes as they
+  air (against `features.season_episodes`, completing once the show has ended).
+  A **followed** series (`Title.followed`) auto-grabs new seasons via discovery.
 - **Subtitles** (`subtitles.backend: bazarr | native`): `sweep_subtitles` in
   `subtitles/service.py` delegates to `native/service.py` when `native`.
   `SubtitleSource`s are tried in the configured order; first hit wins.
@@ -58,7 +73,10 @@ in the service layer.
   imported`, plus `rejected` / `failed`. `rejected` is a training label — never
   silently resurrect it. Discovery skips titles that are owned OR have a candidate
   in any non-terminal state incl. `imported` (else an owned title re-appears as a
-  fresh candidate).
+  fresh candidate). Candidates are season-scoped for series (`Candidate.season`):
+  the owned/live/rejected invariants apply per `(title, season)`, so rejecting S3
+  never buries a future S4, and a season top-up returns the candidate to
+  `approved` while episodes are still missing.
 - **Download** (`Download.state`, torrent backend): `queued → downloading →
   importing → imported`, plus `completed` (bytes down, import pending retry),
   `failed`, `cancelled`. `sync_downloads` re-polls `queued/downloading/importing/

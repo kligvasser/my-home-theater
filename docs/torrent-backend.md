@@ -193,6 +193,22 @@ existing series folder is reused even when its name is styled differently
 (`Colin.From.Accounts` vs `Colin From Accounts`), so a show never splits across
 two folders.
 
+## Cleanup
+
+`home-theater cleanup` (dry run) / `--apply`, or the 🧹 **Cleanup** panel on the
+Status page, finds and removes two kinds of junk safely:
+
+- **NAS extras** — featurette/behind-the-scenes files (no `SxxExx`) that older
+  builds copied into TV season folders. Found by walking the mounted library and
+  classifying with the same parser the scanner/importer use.
+- **Stuck torrents** — completed torrents Transmission still holds that are
+  already imported (a redundant seed) or orphaned (no live download). A torrent
+  whose import is still *pending* is never touched, so nothing that hasn't
+  reached the NAS is removed.
+
+Nothing is deleted without an explicit `--apply` / **Apply** press; deletions go
+through the OS mount (the WD MyCloud rejects `smbclient` deletes).
+
 ## Limitations
 
 - Import is a straight copy with the target name; it does not push naming

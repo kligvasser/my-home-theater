@@ -2,9 +2,10 @@
 
 Automate a personal movie & TV library end-to-end: scan the NAS, enrich metadata,
 discover what's worth adding (rating/vote filtered + learned taste, plus new
-seasons of series you own), grab it,
-import it, fetch subtitles, and drive the whole thing from an HTML dashboard.
-Python-first, SQLite-backed, no Docker required.
+seasons of series you own or **follow**), grab it — one click from search, or
+automatically for followed shows — import it, fetch subtitles, and drive the
+whole thing from an HTML dashboard. Python-first, SQLite-backed, no Docker
+required.
 
 ![Candidate queue](docs/img/candidates.png)
 
@@ -35,7 +36,9 @@ cp .env.example .env                 # secrets (see below)
 ```
 
 **Secrets (`.env`, never committed).** `DASHBOARD_TOKEN` (gates every mutating
-action — `python -c "import secrets; print(secrets.token_urlsafe(32))"`);
+action — `python -c "import secrets; print(secrets.token_urlsafe(32))"`;
+set `DASHBOARD_REQUIRE_AUTH=true` to also gate the read pages/APIs if you expose
+the dashboard beyond a trusted LAN);
 `TMDB_API_KEY` + `OMDB_API_KEY`; `SMB_HOST`/`SMB_USER`/`SMB_PASS` for the NAS.
 Then per backend: `TRANSMISSION_URL/USER/PASS` (torrent) and/or
 `OPENSUBTITLES_*` + `KTUVIT_*` (native subtitles). Optional: `RADARR_*`/`SONARR_*`/
@@ -56,9 +59,12 @@ home-theater backup     # timestamped SQLite backup
 home-theater cleanup    # find NAS extras + stuck torrents (dry run; --apply to remove)
 ```
 
-Everything is also on the dashboard: **Library**, **Candidates** (review/approve, **★ Follow** a series to auto-grab new seasons/episodes),
-**Activity** (live grab → download → import → subtitles), **Subtitles**, **Gaps**,
-**Insights**, **Settings**, **Status**.
+Everything is also on the dashboard: **Library**, **Candidates** (review/approve,
+one-click **⬇ Grab** from TMDb search, **★ Follow** a series to auto-grab new
+seasons/episodes), **Activity** (live grab → download → import → subtitles, with
+in-app Rescan/Enrich/Sync/Subtitle triggers), **Subtitles**, **Gaps** (grab what
+you're missing), **Insights**, **Settings**, and **Status** (service health + a
+🧹 **Cleanup** panel for NAS extras and stuck torrents).
 
 ## Going live safely
 
@@ -75,7 +81,7 @@ on until you trust the pipeline.
 ## Develop
 
 ```bash
-.venv/bin/pytest        # 222 tests, no external services hit
+.venv/bin/pytest        # 268 tests, no external services hit
 .venv/bin/ruff check .
 .venv/bin/black .
 .venv/bin/mypy src/homeTheater
