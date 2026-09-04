@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from ..config import effective_config, get_config
 from ..logging_setup import get_logger
@@ -122,8 +122,12 @@ async def api_cleanup_plan() -> dict[str, Any]:
     """Dry-run cleanup report: NAS extras + stuck torrents that could be removed."""
 
     from ..cleanup import plan_cleanup
+    from ..errors import JobBusyError
 
-    plan = await plan_cleanup(get_config())
+    try:
+        plan = await plan_cleanup(get_config())
+    except JobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     d = plan.as_dict()
     # Trim the extras list for the UI (full delete re-derives it server-side).
     d["extras_sample"] = [{"path": e["path"], "size": e["size"]} for e in d["extras"][:50]]
@@ -138,5 +142,9 @@ async def api_cleanup_apply() -> dict[str, Any]:
     """Perform cleanup now: delete NAS extras and remove stuck/imported torrents."""
 
     from ..cleanup import apply_cleanup
+    from ..errors import JobBusyError
 
-    return await apply_cleanup(get_config())
+    try:
+        return await apply_cleanup(get_config())
+    except JobBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

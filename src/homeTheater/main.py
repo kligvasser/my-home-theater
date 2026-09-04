@@ -258,12 +258,17 @@ def cleanup(apply: bool = False) -> None:
     from .cleanup import apply_cleanup, plan_cleanup
     from .config import get_config
     from .db import init_db
+    from .errors import JobBusyError
 
     _configure()
     config = get_config()
     init_db()
 
-    plan = asyncio.run(plan_cleanup(config))
+    try:
+        plan = asyncio.run(plan_cleanup(config))
+    except JobBusyError as exc:
+        print(f"Cleanup skipped: {exc}")
+        raise SystemExit(2) from None
     gb = plan.extras_bytes / 1e9
     print(f"NAS extras: {len(plan.extras)} file(s), {gb:.2f} GB")
     for e in plan.extras[:40]:
@@ -279,7 +284,11 @@ def cleanup(apply: bool = False) -> None:
     if not apply:
         print("\nDry run. Re-run with --apply to delete the above.")
         return
-    result = asyncio.run(apply_cleanup(config))
+    try:
+        result = asyncio.run(apply_cleanup(config))
+    except JobBusyError as exc:
+        print(f"Cleanup skipped: {exc}")
+        raise SystemExit(2) from None
     log.info("cleanup.cli_done", **{k: v for k, v in result.items() if k != "notes"})
     print(
         f"\nDeleted {result.get('extras_deleted', 0)} extra file(s), "

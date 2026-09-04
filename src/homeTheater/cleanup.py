@@ -191,21 +191,44 @@ async def remove_stuck_torrents(config: AppConfig, hashes: list[str]) -> tuple[i
     return len(hashes), []
 
 
-async def plan_cleanup(config: AppConfig) -> CleanupPlan:
-    """Dry-run: report what cleanup would remove, without changing anything."""
-
+async def _plan(config: AppConfig) -> CleanupPlan:
     extras, notes = find_nas_extras(config)
     stuck, stuck_notes = await find_stuck_torrents(config)
     return CleanupPlan(extras=extras, stuck=stuck, notes=notes + stuck_notes)
 
 
+async def plan_cleanup(config: AppConfig) -> CleanupPlan:
+    """Dry-run: report what cleanup would remove, without changing anything.
+
+    Takes the ``sync`` job lock: cleanup walks/deletes on the NAS, and the WD
+    MyCloud throws EIO when that overlaps an import — so cleanup and sync are
+    mutually exclusive. Raises JobBusyError if an import is in progress."""
+
+    from .locks import job_lock
+
+    with job_lock(config, "sync"):
+        return await _plan(config)
+
+
 async def apply_cleanup(
     config: AppConfig, *, extras: bool = True, stuck: bool = True
 ) -> dict[str, Any]:
-    """Perform cleanup. Re-derives the plan (so it acts on current state) and
-    deletes/removes what it finds. Returns a summary dict."""
+    """Perform cleanup under the ``sync`` job lock (mutually exclusive with
+    imports — see :func:`plan_cleanup`). Raises JobBusyError if sync is running.
 
-    plan = await plan_cleanup(config)
+    Re-derives the plan (so it acts on current state) and deletes/removes what it
+    finds. Returns a summary dict."""
+
+    from .locks import job_lock
+
+    with job_lock(config, "sync"):
+        return await _apply_locked(config, extras=extras, stuck=stuck)
+
+
+async def _apply_locked(
+    config: AppConfig, *, extras: bool = True, stuck: bool = True
+) -> dict[str, Any]:
+    plan = await _plan(config)
     result: dict[str, Any] = {"notes": list(plan.notes)}
 
     if extras:

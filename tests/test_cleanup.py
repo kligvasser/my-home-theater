@@ -171,3 +171,24 @@ async def test_find_stuck_torrents_notes_when_client_down(
 
     stuck, notes = await find_stuck_torrents(get_config())
     assert stuck == [] and notes and "unreachable" in notes[0]
+
+
+async def test_cleanup_yields_to_running_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """cleanup and sync share the NAS; plan/apply must refuse while the sync lock
+    is held (an import in progress) rather than thrash the mount concurrently."""
+    _write_config(tmp_path, monkeypatch)
+    from homeTheater.cleanup import apply_cleanup, plan_cleanup
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db
+    from homeTheater.errors import JobBusyError
+    from homeTheater.locks import job_lock
+
+    init_db()
+    cfg = get_config()
+    with job_lock(cfg, "sync"):  # simulate an import holding the lock
+        with pytest.raises(JobBusyError):
+            await plan_cleanup(cfg)
+        with pytest.raises(JobBusyError):
+            await apply_cleanup(cfg)
