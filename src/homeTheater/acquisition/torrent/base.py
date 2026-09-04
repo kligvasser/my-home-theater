@@ -99,7 +99,9 @@ class TorrentStatus:
 class DownloadClient(Protocol):
     """A torrent download client (Transmission today)."""
 
-    async def add_magnet(self, magnet: str, *, download_dir: str | None) -> AddedTorrent: ...
+    async def add_magnet(
+        self, magnet: str, *, download_dir: str | None, seed_ratio_limit: float | None = None
+    ) -> AddedTorrent: ...
 
     async def status(self, infohash: str) -> TorrentStatus | None:
         """Current state, or ``None`` if the client no longer knows this hash."""

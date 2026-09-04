@@ -352,7 +352,11 @@ async def _grab(
     for rel in chosen:
         magnet = rel.magnet_uri()
         assert magnet is not None  # select_release only returns releases with a magnet
-        added = await client.add_magnet(magnet, download_dir=_download_dir(config, kind))
+        added = await client.add_magnet(
+            magnet,
+            download_dir=_download_dir(config, kind),
+            seed_ratio_limit=config.torrent.seed_ratio_limit,
+        )
         out.append((added.infohash, rel.title, added.already_existed))
     return out
 

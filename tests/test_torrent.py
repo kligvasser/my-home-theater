@@ -1319,3 +1319,49 @@ def test_resume_appends_from_partial_part(tmp_path: Path) -> None:
 
     assert Path(out).read_bytes() == src.read_bytes()  # correct, no corruption
     assert seen and seen[0] == 6000  # progress started from the resume point
+
+
+@respx.mock
+async def test_add_magnet_sets_seed_ratio_zero_to_stop_seeding() -> None:
+    """The add sets seedRatioMode=1 / limit=0 so a finished torrent stops
+    uploading immediately (we're not a seedbox)."""
+    add_ok = {
+        "result": "success",
+        "arguments": {"torrent-added": {"hashString": HASH, "name": "x"}},
+    }
+    route = respx.post(TRANSMISSION).mock(
+        side_effect=[
+            httpx.Response(409, headers={"X-Transmission-Session-Id": "s"}),
+            httpx.Response(200, json=add_ok),
+        ]
+    )
+    async with httpx.AsyncClient() as http:
+        await TransmissionClient(TRANSMISSION, http).add_magnet(
+            "magnet:?xt=urn:btih:" + HASH, download_dir=None, seed_ratio_limit=0.0
+        )
+    import json as _json
+
+    body = _json.loads(route.calls[1].request.content)["arguments"]
+    assert body["seedRatioMode"] == 1 and body["seedRatioLimit"] == 0.0
+
+
+@respx.mock
+async def test_add_magnet_seeds_indefinitely_when_ratio_negative() -> None:
+    add_ok = {
+        "result": "success",
+        "arguments": {"torrent-added": {"hashString": HASH, "name": "x"}},
+    }
+    route = respx.post(TRANSMISSION).mock(
+        side_effect=[
+            httpx.Response(409, headers={"X-Transmission-Session-Id": "s"}),
+            httpx.Response(200, json=add_ok),
+        ]
+    )
+    async with httpx.AsyncClient() as http:
+        await TransmissionClient(TRANSMISSION, http).add_magnet(
+            "magnet:?xt=urn:btih:" + HASH, download_dir=None, seed_ratio_limit=-1.0
+        )
+    import json as _json
+
+    body = _json.loads(route.calls[1].request.content)["arguments"]
+    assert "seedRatioLimit" not in body  # left to Transmission's global setting

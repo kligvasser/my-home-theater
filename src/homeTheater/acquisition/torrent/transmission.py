@@ -81,10 +81,17 @@ class TransmissionClient:
             return args
         raise RuntimeError("Transmission RPC failed to negotiate a session id")
 
-    async def add_magnet(self, magnet: str, *, download_dir: str | None) -> AddedTorrent:
+    async def add_magnet(
+        self, magnet: str, *, download_dir: str | None, seed_ratio_limit: float | None = None
+    ) -> AddedTorrent:
         arguments: dict[str, Any] = {"filename": magnet, "paused": False}
         if download_dir:
             arguments["download-dir"] = download_dir
+        if seed_ratio_limit is not None and seed_ratio_limit >= 0:
+            # seedRatioMode 1 = honor this per-torrent limit; 0.0 = stop seeding
+            # as soon as the download completes (we're not a seedbox).
+            arguments["seedRatioMode"] = 1
+            arguments["seedRatioLimit"] = seed_ratio_limit
         args = await self._rpc("torrent-add", arguments)
         # Transmission returns torrent-added, or torrent-duplicate if the hash is
         # already present; both carry hashString/name.

@@ -143,6 +143,7 @@ torrent:
   library_base_dir: null       # null -> write to the NAS over SMB (nas.* + SMB_*);
                                # set a local/mounted path to copy there instead
   delete_local_after_import: false  # true -> remove torrent+local files after
+  seed_ratio_limit: 0.0             # stop seeding at completion; <0 = seed forever
                                     # import (a real "move"); false keeps seeding
 
 # Free-form list of provider names you've enabled (metadata/library/subtitle).

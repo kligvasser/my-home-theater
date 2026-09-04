@@ -239,6 +239,9 @@ class Torrent(BaseModel):
     # After a successful import, remove the torrent + its local files from the
     # client (a true "move"). Default False keeps the local copy seeding.
     delete_local_after_import: bool = False
+    # Stop seeding once a torrent finishes: 0.0 = stop at completion (don't waste
+    # upload bandwidth — the app isn't a seedbox); negative = seed indefinitely.
+    seed_ratio_limit: float = 0.0
 
 
 class DownloadWindow(BaseModel):

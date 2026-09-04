@@ -39,6 +39,7 @@ imported. Writes go to a `.part` sidecar and are atomically renamed into place.
 | `import_to_library` | `true` | Copy finished movies into the NAS layout. |
 | `library_base_dir` | `null` | `null` → write to the NAS over SMB (`nas.*` + `SMB_*` creds). Set a local/mounted path to copy there instead. |
 | `delete_local_after_import` | `false` | `true` → remove the torrent + its local files after a successful import (a true "move"). `false` keeps the local copy **seeding**. |
+| `seed_ratio_limit` | `0.0` | Stop seeding once a torrent completes (`0.0`), so it doesn't keep uploading before the post-import removal runs. Negative = seed indefinitely. |
 
 **This is the app's only write path to the NAS** (the scanner is read-only).
 
