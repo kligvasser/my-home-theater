@@ -25,6 +25,7 @@ across two folders.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import re
 import subprocess
@@ -54,6 +55,40 @@ _COPY_CHUNK = 4 * 1024 * 1024  # 4 MiB — throughput + progress granularity
 
 class ImportError_(RuntimeError):
     """The completed torrent could not be imported (no media file, copy failed)."""
+
+
+class NasUnavailableError(ImportError_):
+    """The NAS/SMB session faulted mid-import (EIO, connection reset, stale
+    handle). The transfer isn't wrong — the link is — so the whole sweep should
+    back off and retry later rather than hammer a faulting share file by file."""
+
+
+# errno values that mean "the SMB link faulted", not "this file is bad".
+_TRANSPORT_ERRNOS = frozenset(
+    {
+        errno.EIO,
+        errno.ENOTCONN,
+        errno.ESTALE,
+        errno.ETIMEDOUT,
+        errno.EHOSTDOWN,
+        errno.EHOSTUNREACH,
+        errno.ECONNRESET,
+        errno.ECONNABORTED,
+        errno.EPIPE,
+        errno.ENODEV,
+    }
+)
+
+
+def _classify_oserror(exc: OSError, dest: str) -> ImportError_:
+    """Wrap a copy/rename OSError: transport faults become NasUnavailableError."""
+
+    if exc.errno in _TRANSPORT_ERRNOS:
+        return NasUnavailableError(
+            f"NAS link faulted copying {os.path.basename(dest)!r} "
+            f"({exc.strerror}); backing off to retry next sweep."
+        )
+    return ImportError_(f"copy to {dest!r} failed: {exc.strerror}")
 
 
 def _copy_stream(fsrc: Any, fdst: Any, total: int, on_progress: ProgressCb) -> int:
@@ -177,6 +212,8 @@ def _finalize_local(tmp: str, dest: str) -> None:
             os.remove(dest)
         os.rename(tmp, dest)
     except OSError as exc:
+        if exc.errno in _TRANSPORT_ERRNOS:
+            raise _classify_oserror(exc, dest) from None
         raise ImportError_(
             f"NAS is holding {dest!r} busy ({exc.strerror}); leaving {os.path.basename(tmp)} "
             "in place to finish on a later sweep — if it persists, remount the share."
@@ -417,12 +454,16 @@ class LocalLibraryTarget:
                 tmp = f"{dest}.{os.getpid()}.part"
                 log.warning("import.stale_part", path=dest + ".part", using=tmp)
 
-        with open(local_src, "rb") as fsrc, open(tmp, "wb") as fdst:
-            _copy_stream(fsrc, fdst, src_size, on_progress)
-        if os.path.getsize(tmp) != src_size:
-            os.remove(tmp)
-            raise ImportError_(f"size mismatch copying to {dest!r}")
-        _finalize_local(tmp, dest)
+        try:
+            with open(local_src, "rb") as fsrc, open(tmp, "wb") as fdst:
+                _copy_stream(fsrc, fdst, src_size, on_progress)
+            if os.path.getsize(tmp) != src_size:
+                raise ImportError_(f"size mismatch copying to {dest!r}")
+            _finalize_local(tmp, dest)
+        except OSError as exc:
+            # Leave a partial .part for the resumable retry; a transport fault
+            # backs the whole sweep off rather than thrashing the faulting NAS.
+            raise _classify_oserror(exc, dest) from exc
         return dest
 
 

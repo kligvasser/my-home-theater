@@ -1028,3 +1028,146 @@ def test_finalize_raises_retryable_when_nas_holds_dest_busy(
         target.import_file(str(src), "Movies/M", "M.mkv")
     # the freshly-copied .part survives for the retry
     assert (dest.parent / "M.mkv.part").read_bytes() == b"w" * 1500
+
+
+def test_import_eio_raises_nas_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An EIO mid-copy is classified as a transport fault (retryable), and the
+    partial .part is kept for the resumable retry."""
+    import errno as _errno
+
+    from homeTheater.acquisition.torrent import importer
+    from homeTheater.acquisition.torrent.importer import LocalLibraryTarget, NasUnavailableError
+
+    src = tmp_path / "src.mkv"
+    src.write_bytes(b"q" * 4000)
+    lib = tmp_path / "lib"
+
+    real_replace = importer.os.replace
+
+    def eio_replace(*_a: object, **_k: object) -> None:
+        raise OSError(_errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(importer.os, "replace", eio_replace)
+    # the whole finalize path faults, so _finalize_local exhausts its fallback
+    monkeypatch.setattr(importer.os, "remove", eio_replace)
+    monkeypatch.setattr(importer.os, "rename", eio_replace)
+
+    with pytest.raises(NasUnavailableError, match="faulted"):
+        LocalLibraryTarget(str(lib)).import_file(str(src), "Movies/M", "M.mkv")
+    monkeypatch.setattr(importer.os, "replace", real_replace)
+
+
+def test_non_transport_oserror_is_plain_import_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import errno as _errno
+
+    from homeTheater.acquisition.torrent import importer
+    from homeTheater.acquisition.torrent.importer import ImportError_, NasUnavailableError
+
+    src = tmp_path / "src.mkv"
+    src.write_bytes(b"q" * 100)
+
+    def eacces(*_a: object, **_k: object) -> None:
+        raise OSError(_errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(importer.os, "replace", eacces)
+    monkeypatch.setattr(importer.os, "remove", eacces)
+    monkeypatch.setattr(importer.os, "rename", eacces)
+    with pytest.raises(ImportError_) as ei:
+        importer.LocalLibraryTarget(str(tmp_path / "lib")).import_file(
+            str(src), "Movies/M", "M.mkv"
+        )
+    assert not isinstance(ei.value, NasUnavailableError)  # a real error, not a backoff
+
+
+@respx.mock
+async def test_sync_defers_remaining_imports_on_nas_fault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When one completed import faults on the NAS link, the rest of the sweep is
+    deferred (not attempted) so we don't thrash a faulting share."""
+    _write_config(
+        tmp_path, dry_run=False, monkeypatch=monkeypatch, library_base_dir=str(tmp_path / "lib")
+    )
+    _reset()
+    from homeTheater.acquisition.torrent import service
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate, CandidateSource, CandidateStatus, Download, Title
+
+    init_db()
+    with session_scope() as s:
+        for i in range(2):
+            t = Title(tmdb_id=500 + i, title=f"M{i}", year=2000, kind=TitleKind.movie)
+            s.add(t)
+            s.flush()
+            c = Candidate(
+                title_id=t.id, source=CandidateSource.manual, status=CandidateStatus.downloading
+            )
+            s.add(c)
+            s.flush()
+            s.add(
+                Download(
+                    candidate_id=c.id, external_id=str(i) * 40, state="downloading", release=f"M{i}"
+                )
+            )
+
+    dl_dir = tmp_path / "dl"
+    dl_dir.mkdir()
+    (dl_dir / "a.mkv").write_bytes(b"x" * 100)
+    (dl_dir / "b.mkv").write_bytes(b"y" * 100)
+
+    def status_for(name: str, h: str) -> dict:
+        return {
+            "hashString": h,
+            "name": name,
+            "percentDone": 1.0,
+            "status": 6,
+            "downloadDir": str(dl_dir),
+            "error": 0,
+            "errorString": "",
+        }
+
+    respx.post(TRANSMISSION).mock(
+        side_effect=[
+            httpx.Response(409, headers={"X-Transmission-Session-Id": "s"}),
+            httpx.Response(
+                200,
+                json={
+                    "result": "success",
+                    "arguments": {"torrents": [status_for("a.mkv", "0" * 40)]},
+                },
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "result": "success",
+                    "arguments": {"torrents": [status_for("b.mkv", "1" * 40)]},
+                },
+            ),
+        ]
+    )
+
+    calls = {"n": 0}
+    from homeTheater.acquisition.torrent.importer import NasUnavailableError
+
+    def fault_first(*_a: object, **_k: object) -> str:
+        calls["n"] += 1
+        raise NasUnavailableError(
+            "NAS link faulted copying 'a.mkv' (Input/output error); backing off."
+        )
+
+    monkeypatch.setattr(service, "import_completed_movie", fault_first, raising=False)
+    # patch where it's imported lazily inside _finish_completed
+    import homeTheater.acquisition.torrent.importer as imp
+
+    monkeypatch.setattr(imp, "import_completed_movie", fault_first)
+
+    from homeTheater.acquisition import sync_downloads
+    from homeTheater.config import get_config
+
+    stats = await sync_downloads(get_config())
+
+    # only the first completed import was attempted; the second was deferred
+    assert calls["n"] == 1
+    assert any("NAS unavailable" in e for e in stats.errors)

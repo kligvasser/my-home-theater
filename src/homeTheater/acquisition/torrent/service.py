@@ -47,7 +47,7 @@ from ...errors import InvalidTransitionError, NotConfiguredError, redact_exc
 from ...logging_setup import get_logger
 from ..service import QueueOutcome, SyncStats
 from .base import DownloadClient, TorrentRelease, TorrentSource, TorrentStatus
-from .importer import mount_lost
+from .importer import NasUnavailableError, mount_lost
 from .select import build_query, parse_season_episode, select_release
 from .sources import PirateBaySource, RarbgSource, X1337Source
 from .transmission import TransmissionClient
@@ -727,8 +727,12 @@ async def sync_downloads_torrent(config: AppConfig) -> SyncStats:
                     year,
                     season,
                 )
-                if err is not None and mount_lost(config):
+                if err is not None and (mount_lost(config) or err.startswith("NAS unavailable")):
+                    # The SMB link faulted (or dropped): stop importing this sweep
+                    # so we don't thrash a faulting NAS file by file. Next sweep,
+                    # ensure_mounted self-heals a dropped mount and resume kicks in.
                     imports_blocked = True
+                    log.warning("sync.imports_deferred", reason=err)
                 continue
 
             with session_scope() as s:
@@ -931,6 +935,9 @@ async def _finish_completed(
                 year=year,
                 on_progress=_import_progress_cb(download_id),
             )
+        except NasUnavailableError as exc:
+            error = f"NAS unavailable: {redact_exc(exc)}"
+            log.warning("import.nas_unavailable", download=download_id, title=title, detail=error)
         except Exception as exc:
             error = f"import failed: {redact_exc(exc)}"
             log.warning("import.failed", download=download_id, title=title, detail=error)
@@ -950,6 +957,9 @@ async def _finish_completed(
                 on_progress=_import_progress_cb(download_id),
             )
             dest = os.path.dirname(episodes[-1].dest) if episodes else None
+        except NasUnavailableError as exc:
+            error = f"NAS unavailable: {redact_exc(exc)}"
+            log.warning("import.nas_unavailable", download=download_id, title=title, detail=error)
         except Exception as exc:
             error = f"import failed: {redact_exc(exc)}"
             log.warning("import.failed", download=download_id, title=title, detail=error)
