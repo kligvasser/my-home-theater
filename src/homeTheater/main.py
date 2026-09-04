@@ -69,11 +69,16 @@ def discover() -> None:
     from .config import effective_config
     from .db import init_db
     from .discovery import run_discovery
+    from .errors import JobBusyError
 
     _configure()
     init_db()  # dev convenience; production uses Alembic
     # effective_config: dashboard runtime overrides (thresholds etc.) apply here too.
-    stats = asyncio.run(run_discovery(effective_config()))
+    try:
+        stats = asyncio.run(run_discovery(effective_config()))
+    except JobBusyError as exc:
+        log.warning("discover.cli_skipped", reason=str(exc))
+        raise SystemExit(2) from None
     log.info("discover.cli_done", **stats.as_dict())
 
 
@@ -101,11 +106,16 @@ def acquire() -> None:
     from .acquisition import queue_approved
     from .config import get_config
     from .db import init_db
+    from .errors import JobBusyError
 
     _configure()
     config = get_config()
     init_db()  # dev convenience; production uses Alembic
-    stats = asyncio.run(queue_approved(config))
+    try:
+        stats = asyncio.run(queue_approved(config))
+    except JobBusyError as exc:
+        log.warning("acquire.cli_skipped", reason=str(exc))
+        raise SystemExit(2) from None
     log.info("acquire.cli_done", **stats.as_dict())
 
 

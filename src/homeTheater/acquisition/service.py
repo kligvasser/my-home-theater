@@ -307,7 +307,17 @@ async def cancel_candidate(config: AppConfig, candidate_id: int) -> str:
 
 
 async def queue_approved(config: AppConfig) -> AcquireStats:
-    """Queue every approved candidate. Records an ``acquire`` job_run."""
+    """Queue every approved candidate, under the cross-process job lock so a
+    manual acquire can't race the scheduled one. Records an ``acquire`` job_run.
+    Raises JobBusyError if an acquire run is already in progress elsewhere."""
+
+    from ..locks import job_lock
+
+    with job_lock(config, "acquire"):
+        return await _queue_approved(config)
+
+
+async def _queue_approved(config: AppConfig) -> AcquireStats:
 
     with session_scope() as s:
         run = JobRun(kind="acquire", started_at=utcnow(), status=RunStatus.running)

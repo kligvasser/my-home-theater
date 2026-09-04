@@ -125,12 +125,23 @@ def _backfill_ids(session: Session, title: Title, event: ImportEvent) -> None:
             log.warning("reconcile.imdb_id_conflict", title=title.title, other=conflict)
 
 
-def _mark_candidate_imported(session: Session, title_id: int) -> bool:
-    cand = session.scalar(
-        select(Candidate)
-        .where(Candidate.title_id == title_id, Candidate.status.in_(LIVE_STATUSES))
-        .order_by(Candidate.id.desc())
-    )
+def _mark_candidate_imported(session: Session, title_id: int, season: int | None = None) -> bool:
+    # Season-scoped candidates: an import for S3 must complete the S3 candidate,
+    # not whatever live candidate happens to have the highest id (e.g. a
+    # concurrently-grabbed S4). Match the season when one is given; fall back to
+    # a season-less (whole-title) candidate otherwise.
+    where = [Candidate.title_id == title_id, Candidate.status.in_(LIVE_STATUSES)]
+    cand = None
+    if season is not None:
+        cand = session.scalar(
+            select(Candidate)
+            .where(*where, Candidate.season == season)
+            .order_by(Candidate.id.desc())
+        )
+    if cand is None:
+        # No season-specific match: take any live candidate (a whole-title grab,
+        # or the season data simply wasn't threaded through).
+        cand = session.scalar(select(Candidate).where(*where).order_by(Candidate.id.desc()))
     if cand is None:
         return False
     cand.status = CandidateStatus.imported
@@ -177,7 +188,7 @@ def reconcile_import(event: ImportEvent) -> ReconcileResult:
             owned.resolution = event.resolution or owned.resolution
             owned.size_bytes = event.size_bytes or owned.size_bytes
 
-        imported = _mark_candidate_imported(session, title.id)
+        imported = _mark_candidate_imported(session, title.id, event.season)
         log.info(
             "reconcile.import",
             title=title.title,

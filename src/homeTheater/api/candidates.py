@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
 from typing import Any
 
@@ -137,7 +138,8 @@ async def api_follow(body: Follow, background: BackgroundTasks) -> dict[str, Any
 
     async def _run() -> None:
         try:
-            await run_discovery(effective_config())
+            cfg = await asyncio.to_thread(effective_config)
+            await run_discovery(cfg)
         except Exception as exc:  # already logged + recorded in job_run
             log.warning("follow.discover_failed", error=redact_exc(exc))
 
@@ -208,7 +210,7 @@ async def api_discover(body: DiscoverRun, background: BackgroundTasks) -> dict[s
 
     from ..discovery import run_discovery
 
-    cfg = effective_config()
+    cfg = await asyncio.to_thread(effective_config)
     if cfg.secrets.tmdb_api_key is None:
         raise HTTPException(status_code=503, detail="TMDB_API_KEY is not configured")
     if body.max_per_source:

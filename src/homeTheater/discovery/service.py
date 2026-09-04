@@ -279,6 +279,17 @@ def _persist(enriched: list[_Enriched], config: AppConfig, stats: DiscoveryStats
 
 
 async def run_discovery(config: AppConfig) -> DiscoveryStats:
+    """Run discovery under the cross-process job lock, so a manual "discover more"
+    can't race the scheduled run (double TMDb quota, duplicate candidate inserts).
+    Raises JobBusyError if a discovery run is already in progress elsewhere."""
+
+    from ..locks import job_lock
+
+    with job_lock(config, "discovery"):
+        return await _run_discovery(config)
+
+
+async def _run_discovery(config: AppConfig) -> DiscoveryStats:
     """Run discovery across configured sources. Records a ``discovery`` job_run."""
 
     secrets = config.secrets

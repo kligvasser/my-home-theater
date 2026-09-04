@@ -520,9 +520,16 @@ def _grabbed_episodes(candidate_id: int, title_id: int, season: int) -> set[int]
     for name in releases:
         if not name:
             continue
-        _seasons, eps = parse_season_episode(name)
-        if not eps:  # no episode number on a live download: it's the season pack
-            return None
+        seasons, eps = parse_season_episode(name)
+        if not eps:
+            # A real season pack parses as season(s) with no episode. A release
+            # guessit can't extract an episode from (odd naming) is NOT a pack —
+            # treating it as one would wrongly declare the season complete and
+            # stop top-up. Count it as one covered episode's worth via its season
+            # only when it's an unmistakable pack; otherwise ignore for coverage.
+            if seasons:
+                return None  # genuine pack in flight
+            continue
         episodes.update(eps)
     return episodes
 
@@ -886,14 +893,20 @@ def _unsafe_content(files: list[str] | None) -> str | None:
 
     if not files:
         return None
+    # A real release contains the actual video. If it does, keep it even when a
+    # small installer/junk .exe rides along (common in scene/repacks) — nuking a
+    # completed multi-GB download over a 0-byte stub is worse than the risk.
+    # The dangerous fakes are the ones with NO media at all: a lone .exe wearing
+    # a movie name, or a rar-only bundle.
+    if any(is_media_file(name.strip()) for name in files):
+        return None
     for name in files:
         clean = name.strip()
         ext = os.path.splitext(clean)[1].strip().lower()
         if ext in _EXECUTABLE_EXTS:
-            return f"contains an executable ({os.path.basename(clean)!r}) — likely malware"
-    if not any(is_media_file(name.strip()) for name in files):
-        return "contains no media file"
-    return None
+            exe = os.path.basename(clean)
+            return f"executable {exe!r} and no media (likely malware)"
+    return "contains no media file"
 
 
 async def _quarantine(
@@ -955,9 +968,11 @@ def _status_after_finished(s: Session, cand: Candidate, download_id: int) -> Can
                 Download.candidate_id == cand.id, Download.state == "imported"
             )
         ).all():
-            _seasons, eps = parse_season_episode(name or "")
+            seasons, eps = parse_season_episode(name or "")
             if not eps:
-                pack = True
+                if seasons:  # a real season pack completes the whole season
+                    pack = True
+                continue  # unparseable episode name: don't infer a pack
             covered.update(eps)
         if cand.season is not None:
             covered |= _owned_episodes(cand.title_id, cand.season)

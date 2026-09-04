@@ -281,3 +281,52 @@ async def test_reconcile_library_marks_arr_owned_and_prunes_flag(
     assert stats2.arr_flag_cleared == 1
     with session_scope() as s:
         assert s.query(Title).one().arr_has_file is False
+
+
+def test_reconcile_import_marks_matching_season_candidate(config_file: Path) -> None:
+    """An import for S3 completes the S3 candidate, not a higher-id live S4
+    (e.g. a followed show with both seasons auto-grabbed at once)."""
+    _reset()
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate, CandidateSource, CandidateStatus, Title
+    from homeTheater.reconcile import reconcile_import
+    from homeTheater.reconcile.events import ImportEvent
+
+    init_db()
+    with session_scope() as s:
+        t = Title(tmdb_id=1396, title="Silo", year=2023, kind=TitleKind.series)
+        s.add(t)
+        s.flush()
+        # S3 grabbed first (lower id), then S4 (higher id) — both live.
+        s.add(
+            Candidate(
+                title_id=t.id,
+                season=3,
+                source=CandidateSource.discovery,
+                status=CandidateStatus.queued,
+            )
+        )
+        s.add(
+            Candidate(
+                title_id=t.id,
+                season=4,
+                source=CandidateSource.discovery,
+                status=CandidateStatus.queued,
+            )
+        )
+
+    ev = ImportEvent(
+        kind=TitleKind.series,
+        title="Silo",
+        tmdb_id=1396,
+        path=r"\\nas\T\TV Shows\Silo\Season 03\Silo.S03E01.mkv",
+        season=3,
+        episode=1,
+    )
+    result = reconcile_import(ev)
+    assert result.candidate_imported
+
+    with session_scope() as s:
+        by_season = {c.season: c.status for c in s.query(Candidate).all()}
+        assert by_season[3] == CandidateStatus.imported  # the right one
+        assert by_season[4] == CandidateStatus.queued  # untouched

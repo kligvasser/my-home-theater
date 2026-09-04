@@ -167,11 +167,18 @@ def test_insights_api_and_page(config_file: Path) -> None:
         assert "Blade Runner" in page.text
 
 
-def test_similarity_api_requires_tmdb_key(config_file: Path) -> None:
+def test_similarity_api_requires_tmdb_key(config_file: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DASHBOARD_TOKEN", "tok")
     _reset()
     _seed_library()
     from homeTheater.api import create_app
 
     with TestClient(create_app()) as client:
-        r = client.get("/api/similarity", params={"tmdb_id": 78, "kind": "movie"})
-        assert r.status_code == 503  # no TMDB_API_KEY in test env
+        # Token-gated (it spends TMDb quota + runs sklearn): no token -> 401.
+        assert client.get("/api/similarity", params={"tmdb_id": 78}).status_code == 401
+        r = client.get(
+            "/api/similarity",
+            params={"tmdb_id": 78, "kind": "movie"},
+            headers={"X-Auth-Token": "tok"},
+        )
+        assert r.status_code == 503  # authorized, but no TMDB_API_KEY in test env
