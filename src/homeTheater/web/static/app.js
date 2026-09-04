@@ -158,6 +158,37 @@
         await api("DELETE", `/api/titles/${id}`);
         btn.closest("tr, article")?.remove();
         flash(`Deleted "${name}" from the catalog.`);
+      } else if (act === "cleanup-run") {
+        // One-click cleanup: preview, confirm with counts, then apply.
+        btn.disabled = true;
+        const prev = btn.textContent;
+        btn.textContent = "scanning…";
+        try {
+          const p = await api("GET", "/api/cleanup");
+          const total = (p.extras_count || 0) + (p.stuck_count || 0);
+          if (total === 0) {
+            flash("Nothing to clean up — you're tidy. ✨");
+            for (const n of p.notes || []) flash(n, true);
+            return;
+          }
+          const gb = (p.extras_bytes / 1e9).toFixed(2);
+          if (!window.confirm(
+            `Delete ${p.extras_count} extra file(s) (${gb} GB) from the NAS and ` +
+            `remove ${p.stuck_count} stuck torrent(s)?\n\n` +
+            "Only non-episode extras and already-imported/orphaned torrents are " +
+            "touched. This cannot be undone (files are deleted)."
+          )) return;
+          btn.textContent = "cleaning…";
+          const r = await api("POST", "/api/cleanup");
+          flash(
+            `Deleted ${r.extras_deleted || 0} extra file(s), removed ` +
+            `${r.torrents_removed || 0} torrent(s).` +
+            ((r.errors && r.errors.length) ? ` ${r.errors.length} error(s).` : "")
+          );
+        } finally {
+          btn.disabled = false;
+          btn.textContent = prev;
+        }
       } else if (act === "cleanup-scan") {
         const box = document.getElementById("cleanup-report");
         btn.disabled = true;
