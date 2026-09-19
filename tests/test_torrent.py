@@ -1365,3 +1365,83 @@ async def test_add_magnet_seeds_indefinitely_when_ratio_negative() -> None:
 
     body = _json.loads(route.calls[1].request.content)["arguments"]
     assert "seedRatioLimit" not in body  # left to Transmission's global setting
+
+
+@respx.mock
+async def test_restart_keeps_quarantine_ban_and_picks_different_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Restarting a candidate whose grab was quarantined must keep the ban and
+    grab a *different* release — not delete the ban and re-pick the same fake."""
+    _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch)
+    _reset()
+    cid = _seed_approved()
+
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate, CandidateStatus, Download
+
+    bad = "f" * 40
+    with session_scope() as s:
+        s.add(
+            Download(
+                candidate_id=cid,
+                external_id=bad,
+                state="failed",
+                release="The Matrix 1999 1080p WEB",
+                error="removed: executable 'x.exe' and no media (likely malware)",
+            )
+        )
+        s.get(Candidate, cid).status = CandidateStatus.failed
+
+    # Search still returns the banned fake (top) + a clean 1080p release.
+    rows = [
+        {
+            "id": "9",
+            "name": "The Matrix 1999 1080p WEB",
+            "info_hash": bad,
+            "seeders": "999",
+            "leechers": "1",
+            "size": "1",
+        },
+        *_apibay_rows(),
+    ]
+    respx.get(f"{APIBAY}/q.php").mock(return_value=httpx.Response(200, json=rows))
+    add_ok = {
+        "result": "success",
+        "arguments": {"torrent-added": {"hashString": HASH, "name": "ok"}},
+    }
+    meta = {
+        "result": "success",
+        "arguments": {
+            "torrents": [
+                {
+                    "hashString": HASH,
+                    "name": "ok",
+                    "percentDone": 0.0,
+                    "status": 4,
+                    "downloadDir": "/d",
+                    "error": 0,
+                    "errorString": "",
+                    "files": [{"name": "The.Matrix.1999.1080p.BluRay.x264.mkv", "length": 1}],
+                }
+            ]
+        },
+    }
+    respx.post(TRANSMISSION).mock(
+        side_effect=[
+            httpx.Response(409, headers={"X-Transmission-Session-Id": "s"}),
+            httpx.Response(200, json=add_ok),  # torrent-add
+            httpx.Response(200, json=meta),  # screen torrent-get
+        ]
+    )
+
+    from homeTheater.acquisition import restart_candidate
+    from homeTheater.config import get_config
+
+    outcome = await restart_candidate(get_config(), cid)
+
+    assert outcome.queued
+    with session_scope() as s:
+        rows = {(d.external_id, d.state) for d in s.query(Download).all()}
+        assert (bad, "failed") in rows  # ban record survived the restart
+        assert (HASH, "downloading") in rows  # a different, clean release grabbed

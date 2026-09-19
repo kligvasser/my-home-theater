@@ -77,8 +77,19 @@ def _load_snap(candidate_id: int) -> _Snap | None:
         title = s.get(Title, cand.title_id)
         if title is None:
             return None
+        # Only an ACTIVE download blocks a re-grab; a failed/cancelled row (incl. a
+        # quarantine ban) must not — else restarting a quarantined candidate is a
+        # no-op ("already approved").
         has_download = (
-            s.scalar(sa_select(Download.id).where(Download.candidate_id == cand.id)) is not None
+            s.scalar(
+                sa_select(Download.id).where(
+                    Download.candidate_id == cand.id,
+                    Download.state.in_(
+                        ("queued", "downloading", "importing", "completed", "imported")
+                    ),
+                )
+            )
+            is not None
         )
         return _Snap(
             cand.id,

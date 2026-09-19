@@ -264,8 +264,17 @@ async def restart_candidate(config: AppConfig, candidate_id: int) -> QueueOutcom
                 f"candidate {candidate_id} was rejected; approve it before restarting"
             )
         downloads = s.scalars(select(Download).where(Download.candidate_id == candidate_id)).all()
-        hashes = [d.external_id for d in downloads if d.external_id]
+        # Preserve quarantine ban records (a malware/junk torrent removed by the
+        # screen or sync): deleting them would wipe the infohash ban and re-grab
+        # would just pick the same fake again — the restart loop the user hit.
+        hashes = [
+            d.external_id
+            for d in downloads
+            if d.external_id and not (d.error or "").startswith("removed:")
+        ]
         for d in downloads:
+            if (d.error or "").startswith("removed:"):
+                continue
             s.delete(d)
         cand.status = CandidateStatus.approved
         cand.decided_at = utcnow()
