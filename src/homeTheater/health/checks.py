@@ -8,8 +8,10 @@ reports ``configured=False``; a configured-but-unreachable one reports
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 from pydantic import SecretStr
@@ -17,7 +19,10 @@ from pydantic import SecretStr
 from ..config import AppConfig
 from ..errors import redact_exc
 
-_TIMEOUT = httpx.Timeout(6.0)
+_TIMEOUT = httpx.Timeout(5.0)
+# Hard cap per probe so one provider that ignores the httpx timeout (slow TLS,
+# mDNS, a wedged socket) can't hang the whole Status page.
+_PROBE_CAP_SECONDS = 7.0
 
 # Results are cached briefly so the (unauthenticated) status page can't be used
 # to hammer providers or burn API quota on every page load.
@@ -246,17 +251,31 @@ async def check_all(config: AppConfig) -> list[ProviderStatus]:
         if _cache is not None and _cache[1] == key and now - _cache[0] < CACHE_TTL_SECONDS:
             return _cache[2]
 
-        checks = [check_tmdb(config), check_omdb(config), check_smb(config)]
-        if config.acquisition.backend == "torrent":
-            checks += [check_transmission(config), check_nas_mount(config)]
-        else:
-            checks += [check_radarr(config), check_sonarr(config)]
-        if config.subtitles.backend == "native":
-            checks.append(check_opensubtitles(config))
-        else:
-            checks.append(check_bazarr(config))
+        async def _bounded(name: str, coro: Any) -> ProviderStatus:
+            try:
+                return await asyncio.wait_for(coro, _PROBE_CAP_SECONDS)
+            except TimeoutError:
+                return ProviderStatus(name, True, False, "probe timed out")
 
-        statuses = list(await asyncio.gather(*checks))
-        statuses += await check_subtitle_accounts(config)
+        named: list[tuple[str, Any]] = [
+            ("tmdb", check_tmdb(config)),
+            ("omdb", check_omdb(config)),
+            ("smb", check_smb(config)),
+        ]
+        if config.acquisition.backend == "torrent":
+            named += [
+                ("transmission", check_transmission(config)),
+                ("nas-mount", check_nas_mount(config)),
+            ]
+        else:
+            named += [("radarr", check_radarr(config)), ("sonarr", check_sonarr(config))]
+        if config.subtitles.backend == "native":
+            named.append(("opensubtitles.com", check_opensubtitles(config)))
+        else:
+            named.append(("bazarr", check_bazarr(config)))
+
+        statuses = list(await asyncio.gather(*(_bounded(n, c) for n, c in named)))
+        with contextlib.suppress(TimeoutError):
+            statuses += await asyncio.wait_for(check_subtitle_accounts(config), _PROBE_CAP_SECONDS)
         _cache = (now, key, statuses)
         return statuses
