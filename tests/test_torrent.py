@@ -1445,3 +1445,15 @@ async def test_restart_keeps_quarantine_ban_and_picks_different_release(
         rows = {(d.external_id, d.state) for d in s.query(Download).all()}
         assert (bad, "failed") in rows  # ban record survived the restart
         assert (HASH, "downloading") in rows  # a different, clean release grabbed
+
+
+def test_build_query_strips_apostrophes() -> None:
+    """Scene releases drop apostrophes: "Widow's Bay" must search as "Widows Bay"
+    (the apostrophe form returns 0 hits on the indexer)."""
+    from homeTheater.acquisition.torrent.select import build_query
+    from homeTheater.db.models import TitleKind
+
+    assert build_query("Widow's Bay", 2026, TitleKind.series, season=1) == "Widows Bay S01"
+    assert build_query("Marvel’s Agents", None, TitleKind.series, season=2) == "Marvels Agents S02"
+    assert build_query("Bob's Burgers", None, TitleKind.movie, None) == "Bobs Burgers"
+    assert build_query("The Matrix", 1999, TitleKind.movie) == "The Matrix 1999"

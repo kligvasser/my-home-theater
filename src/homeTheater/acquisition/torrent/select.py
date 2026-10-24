@@ -29,9 +29,13 @@ def build_query(title: str, year: int | None, kind: TitleKind, season: int | Non
     Movies add the year (cheap disambiguation); series don't, since a season/pack
     release rarely carries the first-air year in its name. Season-scoped
     candidates target that season's pack ("Title S03").
+
+    Apostrophes are stripped: scene releases drop them, so the TMDb title
+    "Widow's Bay" must be searched as "Widows Bay" or the indexer returns nothing.
     """
 
-    title = title.strip()
+    # Remove apostrophe variants (straight, curly, backtick) — "Widow's" -> "Widows".
+    title = re.sub(r"['‘’`]", "", title).strip()
     if kind is TitleKind.movie and year:
         return f"{title} {year}"
     if kind is TitleKind.series and season is not None:
