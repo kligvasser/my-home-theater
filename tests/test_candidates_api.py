@@ -245,3 +245,82 @@ def test_follow_unfollow_endpoints(config_file: Path, monkeypatch: pytest.Monkey
             ).status_code
             == 404
         )
+
+
+def test_unfollow_stops_in_flight_autograb(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unfollowing a series also cancels its active auto-grab (the season the
+    follow already queued), not just the flag — leaving imported content alone."""
+    monkeypatch.setenv("DASHBOARD_TOKEN", "tok")
+    _reset()
+
+    from homeTheater.api import create_app
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import (
+        Candidate,
+        CandidateSource,
+        CandidateStatus,
+        Download,
+        Title,
+        TitleKind,
+    )
+
+    init_db()
+    with session_scope() as s:
+        t = Title(
+            tmdb_id=207484,
+            title="Outlander: Blood of My Blood",
+            kind=TitleKind.series,
+            followed=True,
+        )
+        s.add(t)
+        s.flush()
+        # S01 imported (keep), S02 downloading (stop)
+        s.add(
+            Candidate(
+                title_id=t.id,
+                season=1,
+                source=CandidateSource.discovery,
+                status=CandidateStatus.imported,
+            )
+        )
+        c2 = Candidate(
+            title_id=t.id,
+            season=2,
+            source=CandidateSource.discovery,
+            status=CandidateStatus.downloading,
+        )
+        s.add(c2)
+        s.flush()
+        s.add(
+            Download(
+                candidate_id=c2.id, external_id="a" * 40, state="downloading", release="S02E01"
+            )
+        )
+
+    import homeTheater.api.candidates as cand_api
+
+    async def fake_cancel(config, candidate_id):  # type: ignore[no-untyped-def]
+        with session_scope() as s:
+            c = s.get(Candidate, candidate_id)
+            c.status = CandidateStatus.rejected
+        return "Outlander: Blood of My Blood"
+
+    monkeypatch.setattr(cand_api, "cancel_candidate", fake_cancel)
+
+    with TestClient(create_app()) as client:
+        r = client.post(
+            "/api/candidates/unfollow",
+            json={"tmdb_id": 207484, "kind": "series"},
+            headers={"X-Auth-Token": "tok"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["followed"] is False and body["stopped"] == 1  # S02 cancelled
+
+    with session_scope() as s:
+        by_season = {c.season: c.status for c in s.query(Candidate).all()}
+        assert by_season[1] == CandidateStatus.imported  # untouched
+        assert by_season[2] == CandidateStatus.rejected  # stopped
+        assert s.scalar(select(Title.followed)) is False

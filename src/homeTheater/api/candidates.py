@@ -14,7 +14,7 @@ from ..acquisition import cancel_candidate, queue_candidate, restart_candidate
 from ..config import effective_config, get_config
 from ..dashboard import candidate_counts, list_candidates
 from ..db.models import CandidateStatus, TitleKind
-from ..discovery.actions import add_manual, approve, follow_series, reject, set_followed
+from ..discovery.actions import add_manual, approve, follow_series, reject
 from ..errors import InvalidTransitionError, NotConfiguredError, redact_exc
 from ..logging_setup import get_logger
 from ..metadata.tmdb import TMDbClient
@@ -148,12 +148,49 @@ async def api_follow(body: Follow, background: BackgroundTasks) -> dict[str, Any
 
 
 @router.post("/unfollow", dependencies=[Depends(require_token)])
-def api_unfollow(body: Follow) -> dict[str, Any]:
-    """Stop following a series (leaves existing candidates/downloads alone)."""
+async def api_unfollow(body: Follow) -> dict[str, Any]:
+    """Stop following a series AND stop its in-flight auto-grabs.
 
-    if not set_followed(body.tmdb_id, body.kind, False):
-        raise HTTPException(status_code=404, detail="series not found")
-    return {"tmdb_id": body.tmdb_id, "followed": False}
+    Clearing the flag only stops *future* seasons; a season the follow already
+    auto-grabbed keeps downloading otherwise. So we also cancel its active
+    (approved/queued/downloading) candidates — leaving undecided suggestions and
+    already-imported content untouched."""
+
+    from sqlalchemy import select
+
+    from ..db.models import Candidate, CandidateStatus, Title
+    from ..db.session import session_scope
+
+    with session_scope() as s:
+        title = s.scalar(
+            select(Title).where(Title.tmdb_id == body.tmdb_id, Title.kind == body.kind)
+        )
+        if title is None:
+            raise HTTPException(status_code=404, detail="series not found")
+        title.followed = False
+        active = list(
+            s.scalars(
+                select(Candidate.id).where(
+                    Candidate.title_id == title.id,
+                    Candidate.status.in_(
+                        (
+                            CandidateStatus.approved,
+                            CandidateStatus.queued,
+                            CandidateStatus.downloading,
+                        )
+                    ),
+                )
+            ).all()
+        )
+
+    stopped = 0
+    for cid in active:
+        try:
+            await cancel_candidate(get_config(), cid)
+            stopped += 1
+        except Exception as exc:
+            log.warning("unfollow.cancel_failed", candidate=cid, error=redact_exc(exc))
+    return {"tmdb_id": body.tmdb_id, "followed": False, "stopped": stopped}
 
 
 @router.get("/search", dependencies=[Depends(require_token)])
