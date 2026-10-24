@@ -703,3 +703,97 @@ async def test_sync_pack_skips_extras_no_junk_titles(
         owned = s.query(OwnedFile).all()
         assert {o.episode for o in owned} == {1, 2}
         assert s.get(Candidate, cid).status == CandidateStatus.imported
+
+
+TMDB2 = "https://api.themoviedb.org/3"
+
+
+@respx.mock
+async def test_series_expand_skips_owned_seasons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Grabbing a series you mostly own expands only the UNOWNED aired seasons —
+    it must not re-create candidates for seasons already on the NAS."""
+    _write_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("TMDB_API_KEY", "k")
+    _reset()
+    cid = _seed_series_candidate()  # title-level (season=None), tmdb 125988
+
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate, OwnedFile
+
+    # Own S01+S02 (2 episodes each, announced count 2) → only S03 should expand.
+    with session_scope() as s:
+        tid = s.get(Candidate, cid).title_id
+        for season in (1, 2):
+            for ep in (1, 2):
+                s.add(
+                    OwnedFile(
+                        path=f"/nas/S{season}E{ep}.mkv",
+                        title_id=tid,
+                        kind=TitleKind.series,
+                        season=season,
+                        episode=ep,
+                    )
+                )
+
+    _mock_tmdb_seasons(
+        [
+            {"season_number": 1, "episode_count": 2, "air_date": "2023-05-05"},
+            {"season_number": 2, "episode_count": 2, "air_date": "2024-11-15"},
+            {"season_number": 3, "episode_count": 2, "air_date": "2025-11-15"},
+        ]
+    )
+    _apibay_by_query({"Silo S03": [_row("Silo S03 COMPLETE 1080p WEB H264", "d" * 40)]})
+    _transmission_accepts_adds()
+
+    from homeTheater.acquisition import queue_candidate
+    from homeTheater.config import get_config
+
+    outcome = await queue_candidate(get_config(), cid)
+
+    assert outcome.queued and "S03" in outcome.message
+    with session_scope() as s:
+        seasons = {c.season for c in s.query(Candidate).all()}
+        assert seasons == {3}  # only S03 expanded; S01/S02 (owned) skipped
+
+
+@respx.mock
+async def test_series_all_owned_reports_not_plain_grab(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If every aired season is already owned, a series grab reports that rather
+    than falling back to a plain whole-title search."""
+    _write_config(tmp_path, monkeypatch)
+    monkeypatch.setenv("TMDB_API_KEY", "k")
+    _reset()
+    cid = _seed_series_candidate()
+
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate, OwnedFile
+
+    with session_scope() as s:
+        tid = s.get(Candidate, cid).title_id
+        for season in (1, 2):
+            s.add(
+                OwnedFile(
+                    path=f"/nas/s{season}e1.mkv",
+                    title_id=tid,
+                    kind=TitleKind.series,
+                    season=season,
+                    episode=1,
+                )
+            )
+
+    _mock_tmdb_seasons(
+        [
+            {"season_number": 1, "episode_count": 1, "air_date": "2023-05-05"},
+            {"season_number": 2, "episode_count": 1, "air_date": "2024-11-15"},
+        ]
+    )
+
+    from homeTheater.acquisition import queue_candidate
+    from homeTheater.config import get_config
+
+    outcome = await queue_candidate(get_config(), cid)
+    assert not outcome.queued and "already owned" in outcome.message

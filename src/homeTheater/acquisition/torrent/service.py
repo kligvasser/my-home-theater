@@ -495,9 +495,9 @@ def _quarantined_hashes() -> frozenset[str]:
 
     with session_scope() as s:
         rows = s.scalars(
-            sa_select(Download.external_id).where(
-                Download.state == "failed", Download.error.like("removed:%")
-            )
+            # Any state: the screen marks failed, but a user ✖ Cancel of a malware
+            # item leaves it cancelled — both carry the "removed:" ban marker.
+            sa_select(Download.external_id).where(Download.error.like("removed:%"))
         ).all()
     return frozenset(h.lower() for h in rows if h)
 
@@ -589,6 +589,17 @@ async def _aired_seasons(config: AppConfig, title_id: int) -> list[Any]:
     )
 
 
+def _season_fully_owned(title_id: int, season: int, announced: int | None) -> bool:
+    """True when the NAS already holds this whole season — so a whole-series grab
+    shouldn't re-create a candidate for it. With no announced count, any owned
+    episode is treated as complete (conservative: don't re-grab what you have)."""
+
+    owned = _owned_episodes(title_id, season)
+    if not owned:
+        return False
+    return len(owned) >= announced if announced else True
+
+
 async def _expand_series(config: AppConfig, snap: _Snap) -> list[int]:
     """Turn a title-level series candidate into per-season candidates.
 
@@ -600,7 +611,12 @@ async def _expand_series(config: AppConfig, snap: _Snap) -> list[int]:
 
     from ...discovery.service import BLOCKING_STATUSES
 
-    seasons = await _aired_seasons(config, snap.title_id)
+    aired = await _aired_seasons(config, snap.title_id)
+    # Don't re-grab seasons already on the NAS (following a show you mostly own
+    # must target only the new season, not re-queue S01-S05).
+    seasons = [
+        sn for sn in aired if not _season_fully_owned(snap.title_id, sn.number, sn.episode_count)
+    ]
     if not seasons:
         return []
 
@@ -662,6 +678,17 @@ async def _queue_series(config: AppConfig, snap: _Snap) -> QueueOutcome | None:
 
     ids = await _expand_series(config, snap)
     if not ids:
+        # No unowned aired seasons to grab. If TMDb had seasons at all, report
+        # that rather than falling through to a plain whole-title search (which
+        # would re-grab a show you already fully own).
+        if await _aired_seasons(config, snap.title_id):
+            return QueueOutcome(
+                snap.candidate_id,
+                False,
+                config.features.dry_run,
+                None,
+                "all aired seasons already owned or in progress",
+            )
         return None
     parts: list[str] = []
     queued = False
