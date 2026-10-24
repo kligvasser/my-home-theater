@@ -223,3 +223,23 @@ def test_reads_open_by_default(config_file: Path, monkeypatch: pytest.MonkeyPatc
     init_db()
     with TestClient(create_app()) as client:
         assert client.get("/library").status_code == 200
+
+
+def test_sync_endpoint_reports_already_running(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Manual sync while one is in progress reports it, not a false 'started'."""
+    monkeypatch.setenv("DASHBOARD_TOKEN", "tok")
+    _reset()
+    from homeTheater.api import create_app
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db
+    from homeTheater.locks import job_lock
+
+    init_db()
+    with TestClient(create_app()) as client:
+        with job_lock(get_config(), "sync"):  # simulate an in-progress sync
+            r = client.post("/api/pipeline/sync", headers={"X-Auth-Token": "tok"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["started"] is False and "already running" in body["message"]

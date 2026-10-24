@@ -321,8 +321,10 @@
         const job = PIPELINE_JOBS[act];
         btn.disabled = true;
         try {
-          await api("POST", job.url);
-          flash(job.msg);
+          const out = await api("POST", job.url);
+          // Prefer the server's message (e.g. "a sync is already running") over
+          // the canned one so a refused/no-op trigger isn't reported as started.
+          flash(out && out.message ? out.message : job.msg);
           if (typeof pipelineTick === "function") window.setTimeout(pipelineTick, 700);
         } finally {
           window.setTimeout(() => (btn.disabled = false), 1500);

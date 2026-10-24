@@ -63,6 +63,10 @@ async def api_sync(background: BackgroundTasks) -> dict[str, Any]:
     """Advance in-flight downloads now (poll the client, import completed ones)."""
 
     from ..acquisition import sync_downloads
+    from ..locks import is_job_running
+
+    if is_job_running(get_config(), "sync"):
+        return {"started": False, "message": "A sync is already running — it'll finish on its own."}
 
     async def _run() -> None:
         try:
@@ -73,7 +77,7 @@ async def api_sync(background: BackgroundTasks) -> dict[str, Any]:
             log.warning("sync_now.failed", error=redact_exc(exc))
 
     background.add_task(_run)
-    return {"started": True}
+    return {"started": True, "message": "Advancing downloads…"}
 
 
 @router.post("/pipeline/enrich", dependencies=[Depends(require_token)])

@@ -48,3 +48,24 @@ def job_lock(config: AppConfig, name: str) -> Iterator[None]:
         yield
     finally:
         os.close(fd)  # releases the flock
+
+
+def is_job_running(config: AppConfig, name: str) -> bool:
+    """True if the ``name`` job lock is currently held (by any process).
+
+    A non-blocking probe: grab-and-release the flock. Used to tell the user a
+    sync/acquire is already in progress instead of silently no-op'ing."""
+
+    path = os.path.join(_lock_dir(config), f"{name}.lock")
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
