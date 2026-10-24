@@ -218,6 +218,10 @@ class Torrent(BaseModel):
     min_seeders: int = Field(5, ge=0, description="drop releases below this seeder count")
     # Allowed release resolutions; None -> reuse thresholds.allowed_resolutions.
     resolutions: list[str] | None = None
+    # Only grab real HD: reject cam/telesync/telecine/screener sources, SD
+    # containers (avi/xvid/divx), and releases with no detectable HD resolution
+    # (the usual shape of a fake/foreign-dub "WEB-DL" with no res in its name).
+    require_hd: bool = True
     max_results_per_source: int = Field(30, ge=1, le=200)
     # Download target dirs handed to the client; None -> the client's own default.
     movie_download_dir: str | None = None

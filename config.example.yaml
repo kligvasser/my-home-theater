@@ -144,6 +144,7 @@ torrent:
                                # set a local/mounted path to copy there instead
   delete_local_after_import: false  # true -> remove torrent+local files after
   seed_ratio_limit: 0.0             # stop seeding at completion; <0 = seed forever
+  require_hd: true                  # only grab HD; reject cam/TS/TC/screener + avi/xvid + no-res fakes
                                     # import (a real "move"); false keeps seeding
 
 # Free-form list of provider names you've enabled (metadata/library/subtitle).

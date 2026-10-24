@@ -22,6 +22,23 @@ _EXECUTABLE_NAME = re.compile(
     r"\.\s*(exe|scr|bat|cmd|com|msi|pif|vbs|jar|apk|dmg|lnk)\s*$", re.IGNORECASE
 )
 
+# Low-quality / pre-retail sources — never HD, often fakes. Matched as delimited
+# release tags (surrounded by space/dot/dash/underscore/bracket) so short tokens
+# like "ts"/"tc" don't fire inside real words ("Guts", "Match").
+_LOW_QUALITY = re.compile(
+    r"(?i)(?:^|[\s.\-_\[(])"
+    r"(cam|camrip|hdcam|ts|telesync|hdts|hdtc|tc|telecine|scr|screener|dvdscr"
+    r"|r5|workprint|wp|pdvd|predvd|dvdscreener)"
+    r"(?:$|[\s.\-_\])])"
+)
+
+# SD / legacy containers & codecs: a modern HD release is mkv/mp4 + x264/x265,
+# never avi/xvid/divx. Their presence marks an old rip or a fake.
+_SD_CONTAINER = re.compile(r"(?i)(?:^|[\s.\-_\[(])(avi|xvid|divx)(?:$|[\s.\-_\])])")
+
+# Resolutions we consider HD.
+_HD_RESOLUTIONS = frozenset({"720p", "1080p", "1440p", "2160p", "4320p"})
+
 
 def build_query(title: str, year: int | None, kind: TitleKind, season: int | None = None) -> str:
     """A search string broad enough to get hits but specific enough to be relevant.
@@ -80,6 +97,7 @@ def select_release(
     season: int | None = None,
     episode: int | None = None,
     banned: frozenset[str] | None = None,
+    require_hd: bool = True,
 ) -> TorrentRelease | None:
     """Best downloadable release, or ``None`` if nothing qualifies.
 
@@ -95,6 +113,11 @@ def select_release(
 
     ``banned`` infohashes (previously quarantined as malware/junk) are never
     picked again — their listing names look clean, only their content told.
+
+    ``require_hd`` (default) rejects cam/telesync/telecine/screener sources, SD
+    containers (avi/xvid/divx), and releases with no detectable HD resolution —
+    so a fake "WEB-DL [Foreign Dub]" with no resolution, or a TC/CAM rip, is
+    never grabbed. Turn it off to accept lower-quality or unlabeled releases.
     """
 
     allowed = [r.lower() for r in allowed_resolutions] if allowed_resolutions else []
@@ -106,6 +129,8 @@ def select_release(
             continue  # malware bait, whatever its seeders say
         if banned and rel.infohash and rel.infohash.lower() in banned:
             continue  # quarantined before; the same fake resurfaces in searches
+        if require_hd and (_LOW_QUALITY.search(rel.title) or _SD_CONTAINER.search(rel.title)):
+            continue  # cam/ts/tc/screener or avi/xvid — never real HD
         if season is not None:
             seasons, episodes = parse_season_episode(rel.title)
             if seasons != [season]:
@@ -116,8 +141,17 @@ def select_release(
             elif episode not in episodes:
                 continue
         res = detect_resolution(rel.title)
-        if allowed and res is not None and res not in allowed:
-            continue
+        if res is None:
+            # No parseable resolution: only a fake/old rip hides it. With
+            # require_hd we skip it rather than gamble (this is exactly the
+            # "Bad Apples WEB-DL [Ukr Dub]" shape).
+            if require_hd:
+                continue
+        else:
+            if res not in _HD_RESOLUTIONS and require_hd:
+                continue
+            if allowed and res not in allowed:
+                continue
         # Lower rank = better: preferred resolutions first (by the operator's
         # ordering), unknown-resolution last; then more seeders wins.
         res_rank = allowed.index(res) if (allowed and res in allowed) else len(allowed)

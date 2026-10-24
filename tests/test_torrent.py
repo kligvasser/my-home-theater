@@ -1457,3 +1457,149 @@ def test_build_query_strips_apostrophes() -> None:
     assert build_query("Marvel’s Agents", None, TitleKind.series, season=2) == "Marvels Agents S02"
     assert build_query("Bob's Burgers", None, TitleKind.movie, None) == "Bobs Burgers"
     assert build_query("The Matrix", 1999, TitleKind.movie) == "The Matrix 1999"
+
+
+def test_select_require_hd_rejects_cam_sd_and_unknown_resolution() -> None:
+    """require_hd drops cam/ts/tc/screener sources, avi/xvid containers, and
+    releases with no detectable HD resolution (the fake-WEB-DL shape)."""
+    from homeTheater.acquisition.torrent.select import select_release
+
+    good = TorrentRelease(
+        "pb", "Bad Apples 2025 1080p WEB-DL x265-BONE", 1500, 1, 1, infohash="a" * 40
+    )
+    junk = [
+        TorrentRelease("pb", "Bad Apples 2025 HDTS x264", 9000, 1, 1, infohash="b" * 40),
+        TorrentRelease("pb", "Bad Apples 2025 TELESYNC 720p", 9000, 1, 1, infohash="c" * 40),
+        TorrentRelease("pb", "Bad.Apples.2025.HDRip.XviD.AC3", 9000, 1, 1, infohash="d" * 40),
+        TorrentRelease("pb", "Bad Apples (2026) WEB-DL [Ukr Dub]", 9000, 1, 1, infohash="e" * 40),
+        TorrentRelease("pb", "Bad Apples 2025 CAM", 9000, 1, 1, infohash="f" * 40),
+    ]
+    picked = select_release(
+        [*junk, good], allowed_resolutions=["1080p", "2160p"], min_seeders=1, require_hd=True
+    )
+    # Every junk release out-seeds the good one, but all are rejected.
+    assert picked is not None and picked.infohash == "a" * 40
+
+    # Each junk release alone yields nothing under require_hd.
+    for j in junk:
+        assert select_release([j], allowed_resolutions=["1080p", "2160p"], min_seeders=1) is None
+
+
+def test_select_require_hd_false_keeps_unknown_resolution() -> None:
+    """With require_hd off, an unlabeled release is still a (last-ranked) option."""
+    from homeTheater.acquisition.torrent.select import select_release
+
+    rel = TorrentRelease("pb", "Some Movie WEB-DL", 50, 1, 1, infohash="a" * 40)
+    assert (
+        select_release([rel], allowed_resolutions=["1080p"], min_seeders=1, require_hd=True) is None
+    )
+    keep = select_release([rel], allowed_resolutions=[], min_seeders=1, require_hd=False)
+    assert keep is not None
+
+
+def test_low_quality_tag_not_matched_inside_words() -> None:
+    """Short tags (ts/tc) must not fire inside real words."""
+    from homeTheater.acquisition.torrent.select import select_release
+
+    rel = TorrentRelease("pb", "Guts 2025 1080p WEB-DL x265", 100, 1, 1, infohash="a" * 40)
+    picked = select_release([rel], allowed_resolutions=["1080p"], min_seeders=1, require_hd=True)
+    assert picked is not None  # "Guts" is not a telesync
+
+
+@respx.mock
+async def test_movie_year_fallback_grabs_real_hd_when_year_mismatches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TMDb year 2026 but releases say 2025: the year query finds only a fake, so
+    a title-only retry grabs the real HD release."""
+    _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch)
+    _reset()
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate, CandidateSource, CandidateStatus, Title
+
+    init_db()
+    with session_scope() as s:
+        t = Title(tmdb_id=777, title="Bad Apples", year=2026, kind=TitleKind.movie)
+        s.add(t)
+        s.flush()
+        c = Candidate(
+            title_id=t.id, source=CandidateSource.discovery, status=CandidateStatus.approved
+        )
+        s.add(c)
+        s.flush()
+        cid = c.id
+
+    def respond(request):  # year query -> fake only; title-only -> real HD
+        q = request.url.params.get("q", "")
+        if q == "Bad Apples 2026":
+            return httpx.Response(
+                200, json=[_row_q("Bad Apples (2026) WEB-DL [Ukr Dub]", "e" * 40)]
+            )
+        if q == "Bad Apples":
+            return httpx.Response(
+                200,
+                json=[
+                    _row_q("Bad Apples (2026) WEB-DL [Ukr Dub]", "e" * 40, 9000),
+                    _row_q("Bad Apples 2025 1080p WEB-DL x265-BONE", HASH, 1500),
+                ],
+            )
+        return httpx.Response(200, json=[])
+
+    respx.get(f"{APIBAY}/q.php").mock(side_effect=respond)
+    respx.post(TRANSMISSION).mock(
+        side_effect=[
+            httpx.Response(409, headers={"X-Transmission-Session-Id": "s"}),
+            httpx.Response(
+                200,
+                json={
+                    "result": "success",
+                    "arguments": {"torrent-added": {"hashString": HASH, "name": "ok"}},
+                },
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "result": "success",
+                    "arguments": {
+                        "torrents": [
+                            {
+                                "hashString": HASH,
+                                "name": "ok",
+                                "percentDone": 0.0,
+                                "status": 4,
+                                "downloadDir": "/d",
+                                "error": 0,
+                                "errorString": "",
+                                "files": [
+                                    {
+                                        "name": "Bad.Apples.2025.1080p.WEB-DL.x265-BONE.mkv",
+                                        "length": 1,
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                },
+            ),
+        ]
+    )
+
+    from homeTheater.acquisition import queue_candidate
+    from homeTheater.config import get_config
+    from homeTheater.db.models import Download
+
+    outcome = await queue_candidate(get_config(), cid)
+    assert outcome.queued
+    with session_scope() as s:
+        assert s.query(Download).one().external_id == HASH  # the real 2025 HD, not the fake
+
+
+def _row_q(name: str, infohash: str, seeders: int = 100) -> dict:
+    return {
+        "id": "1",
+        "name": name,
+        "info_hash": infohash,
+        "seeders": str(seeders),
+        "leechers": "1",
+        "size": "1000000",
+    }

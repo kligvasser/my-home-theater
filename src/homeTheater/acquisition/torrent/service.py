@@ -299,14 +299,31 @@ async def queue_candidate_torrent(config: AppConfig, candidate_id: int) -> Queue
         if snap.kind is TitleKind.series and snap.season is not None:
             return await _queue_season(config, http, sources, snap, allowed)
 
+        banned = _quarantined_hashes()
         query = build_query(snap.title, snap.year, snap.kind)
         releases = await _search_all(sources, query, snap.kind)
         chosen = select_release(
             releases,
             allowed_resolutions=allowed,
             min_seeders=config.torrent.min_seeders,
-            banned=_quarantined_hashes(),
+            banned=banned,
+            require_hd=config.torrent.require_hd,
         )
+        if chosen is None and snap.kind is TitleKind.movie and snap.year:
+            # TMDb's year can differ from the release year (e.g. a 2025 film TMDb
+            # lists as 2026), so the year-pinned search finds only fakes. Retry
+            # title-only; require_hd still guards the broader result set.
+            alt = build_query(snap.title, None, snap.kind)
+            if alt != query:
+                releases = await _search_all(sources, alt, snap.kind)
+                chosen = select_release(
+                    releases,
+                    allowed_resolutions=allowed,
+                    min_seeders=config.torrent.min_seeders,
+                    banned=banned,
+                    require_hd=config.torrent.require_hd,
+                )
+                query = alt
         if chosen is None:
             return QueueOutcome(
                 candidate_id,
@@ -733,6 +750,7 @@ async def _queue_season(
                 min_seeders=min_seeders,
                 season=n,
                 banned=banned,
+                require_hd=config.torrent.require_hd,
             )
             if chosen is not None:
                 if config.features.dry_run:
@@ -767,6 +785,7 @@ async def _queue_season(
             season=n,
             episode=e,
             banned=banned,
+            require_hd=config.torrent.require_hd,
         )
         if chosen is None:
             misses += 1
