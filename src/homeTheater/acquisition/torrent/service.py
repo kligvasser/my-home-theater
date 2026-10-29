@@ -333,6 +333,7 @@ async def queue_candidate_torrent(config: AppConfig, candidate_id: int) -> Queue
             min_seeders=config.torrent.min_seeders,
             banned=banned,
             require_hd=config.torrent.require_hd,
+            movie=snap.kind is TitleKind.movie,
         )
         if chosen is None and snap.kind is TitleKind.movie and snap.year:
             # TMDb's year can differ from the release year (e.g. a 2025 film TMDb
@@ -347,6 +348,7 @@ async def queue_candidate_torrent(config: AppConfig, candidate_id: int) -> Queue
                     min_seeders=config.torrent.min_seeders,
                     banned=banned,
                     require_hd=config.torrent.require_hd,
+                    movie=True,
                 )
                 query = alt
         if chosen is None:

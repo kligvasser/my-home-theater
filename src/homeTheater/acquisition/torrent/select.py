@@ -98,6 +98,7 @@ def select_release(
     episode: int | None = None,
     banned: frozenset[str] | None = None,
     require_hd: bool = True,
+    movie: bool = False,
 ) -> TorrentRelease | None:
     """Best downloadable release, or ``None`` if nothing qualifies.
 
@@ -113,6 +114,10 @@ def select_release(
 
     ``banned`` infohashes (previously quarantined as malware/junk) are never
     picked again — their listing names look clean, only their content told.
+
+    ``movie`` rejects releases that parse as a TV episode/season — a movie search
+    ("Digger 2026") otherwise matches an episode whose *title* contains the word
+    ("Moonshiners S16E04 Digger Knows Best").
 
     ``require_hd`` (default) rejects cam/telesync/telecine/screener sources, SD
     containers (avi/xvid/divx), and releases with no detectable HD resolution —
@@ -131,6 +136,10 @@ def select_release(
             continue  # quarantined before; the same fake resurfaces in searches
         if require_hd and (_LOW_QUALITY.search(rel.title) or _SD_CONTAINER.search(rel.title)):
             continue  # cam/ts/tc/screener or avi/xvid — never real HD
+        if movie:
+            seasons, episodes = parse_season_episode(rel.title)
+            if seasons or episodes:
+                continue  # a TV episode/season, not the movie we asked for
         if season is not None:
             seasons, episodes = parse_season_episode(rel.title)
             if seasons != [season]:

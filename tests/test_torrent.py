@@ -1632,3 +1632,28 @@ async def test_grab_refused_when_local_disk_low(
     assert not outcome.queued and "low local disk space" in outcome.message
     with session_scope() as s:
         assert s.query(Download).count() == 0  # nothing grabbed
+
+
+def test_select_movie_rejects_tv_episode_matches() -> None:
+    """A movie search must not grab a TV episode whose title contains the movie
+    name ("Digger" -> "Moonshiners S16E04 Digger Knows Best")."""
+    from homeTheater.acquisition.torrent.select import select_release
+
+    episode = TorrentRelease(
+        "pb",
+        "Moonshiners S16E04 Digger Knows Best 1080p WEB-DL H264-RAWR",
+        900,
+        1,
+        1,
+        infohash="a" * 40,
+    )
+    real = TorrentRelease("pb", "Digger 2026 1080p WEB-DL x265-BONE", 50, 1, 1, infohash="b" * 40)
+
+    # Without movie=, the high-seeded episode would win.
+    assert (
+        select_release([episode], allowed_resolutions=["1080p"], min_seeders=1, movie=True) is None
+    )
+    picked = select_release(
+        [episode, real], allowed_resolutions=["1080p"], min_seeders=1, movie=True
+    )
+    assert picked is not None and picked.infohash == "b" * 40  # the actual movie
