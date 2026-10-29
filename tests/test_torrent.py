@@ -1657,3 +1657,61 @@ def test_select_movie_rejects_tv_episode_matches() -> None:
         [episode, real], allowed_resolutions=["1080p"], min_seeders=1, movie=True
     )
     assert picked is not None and picked.infohash == "b" * 40  # the actual movie
+
+
+def test_select_movie_title_and_year_guards() -> None:
+    """A movie grab requires the release's title to BE the movie and its year to
+    be within ±1 — rejecting same-word junk and different-year films."""
+    from homeTheater.acquisition.torrent.select import select_release
+
+    reject = [
+        TorrentRelease(
+            "pb",
+            "OnlyTarts.24.06.28.Era.Queen.Gold.Digger.XXX.1080p",
+            9000,
+            1,
+            1,
+            infohash="a" * 40,
+        ),
+        TorrentRelease(
+            "pb", "Moonshiners S16E04 Digger Knows Best 1080p WEB-DL", 9000, 1, 1, infohash="b" * 40
+        ),
+        TorrentRelease("pb", "Digger 2020 1080p AMZN WEB-DL x264", 9000, 1, 1, infohash="c" * 40),
+    ]
+    real = TorrentRelease("pb", "Digger 2026 1080p WEB-DL x265-BONE", 20, 1, 1, infohash="d" * 40)
+
+    # All the high-seeded junk is rejected; only the real 2026 Digger qualifies.
+    assert (
+        select_release(
+            [*reject],
+            allowed_resolutions=["1080p"],
+            min_seeders=1,
+            movie=True,
+            expected_title="Digger",
+            expected_year=2026,
+        )
+        is None
+    )
+    picked = select_release(
+        [*reject, real],
+        allowed_resolutions=["1080p"],
+        min_seeders=1,
+        movie=True,
+        expected_title="Digger",
+        expected_year=2026,
+    )
+    assert picked is not None and picked.infohash == "d" * 40
+
+    # ±1 year drift (Bad Apples TMDb 2026 vs release 2025) is still accepted.
+    ba = TorrentRelease("pb", "Bad Apples 2025 1080p WEB-DL x265", 100, 1, 1, infohash="e" * 40)
+    assert (
+        select_release(
+            [ba],
+            allowed_resolutions=["1080p"],
+            min_seeders=1,
+            movie=True,
+            expected_title="Bad Apples",
+            expected_year=2026,
+        )
+        is not None
+    )

@@ -40,6 +40,33 @@ _SD_CONTAINER = re.compile(r"(?i)(?:^|[\s.\-_\[(])(avi|xvid|divx)(?:$|[\s.\-_\])
 _HD_RESOLUTIONS = frozenset({"720p", "1080p", "1440p", "2160p", "4320p"})
 
 
+def _title_tokens(name: str) -> list[str]:
+    """Lower-case alphanumeric tokens of a title (for movie title matching)."""
+
+    return [t for t in re.split(r"[^a-z0-9]+", name.lower()) if t]
+
+
+def _release_is_title(release_name: str, expected_title: str) -> bool:
+    """Does a release actually belong to ``expected_title``? guessit's parsed
+    title must START with the movie's title tokens — so "Digger" matches
+    "Digger 2026 1080p..." but not "OnlyTarts ... Gold Digger ..." (title
+    "OnlyTarts") or "Moonshiners S16E04 Digger Knows Best" (title "Moonshiners")."""
+
+    want = _title_tokens(expected_title)
+    if not want:
+        return True
+    parsed = guessit(release_name).get("title")
+    if not parsed:
+        return False
+    got = _title_tokens(str(parsed))
+    return got[: len(want)] == want
+
+
+def _release_year(release_name: str) -> int | None:
+    y = guessit(release_name).get("year")
+    return int(y) if isinstance(y, int) else None
+
+
 def build_query(title: str, year: int | None, kind: TitleKind, season: int | None = None) -> str:
     """A search string broad enough to get hits but specific enough to be relevant.
 
@@ -99,6 +126,8 @@ def select_release(
     banned: frozenset[str] | None = None,
     require_hd: bool = True,
     movie: bool = False,
+    expected_title: str | None = None,
+    expected_year: int | None = None,
 ) -> TorrentRelease | None:
     """Best downloadable release, or ``None`` if nothing qualifies.
 
@@ -140,6 +169,12 @@ def select_release(
             seasons, episodes = parse_season_episode(rel.title)
             if seasons or episodes:
                 continue  # a TV episode/season, not the movie we asked for
+            if expected_title and not _release_is_title(rel.title, expected_title):
+                continue  # the movie name appears, but it's a different release
+            if expected_year is not None:
+                ry = _release_year(rel.title)
+                if ry is not None and abs(ry - expected_year) > 1:
+                    continue  # a different film sharing the title (Digger 2020 vs 2026)
         if season is not None:
             seasons, episodes = parse_season_episode(rel.title)
             if seasons != [season]:
