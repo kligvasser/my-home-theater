@@ -1603,3 +1603,32 @@ def _row_q(name: str, infohash: str, seeders: int = 100) -> dict:
         "leechers": "1",
         "size": "1000000",
     }
+
+
+@respx.mock
+async def test_grab_refused_when_local_disk_low(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A critically-low download dir makes the grab fail fast with a clear
+    message instead of starting a download that would ENOSPC."""
+    _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch)
+    _reset()
+    cid = _seed_approved()
+
+    # Force a tiny free-space reading + a high threshold so the guard trips.
+    import homeTheater.acquisition.torrent.service as svc
+
+    monkeypatch.setattr(svc, "_free_gb", lambda path: 0.3)
+    from homeTheater.config import get_config
+
+    cfg = get_config()
+    object.__setattr__(cfg.torrent, "min_free_gb", 5.0)
+
+    from homeTheater.acquisition import queue_candidate
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Download
+
+    outcome = await queue_candidate(cfg, cid)
+    assert not outcome.queued and "low local disk space" in outcome.message
+    with session_scope() as s:
+        assert s.query(Download).count() == 0  # nothing grabbed

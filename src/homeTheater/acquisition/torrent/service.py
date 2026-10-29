@@ -148,6 +148,19 @@ def _download_dir(config: AppConfig, kind: TitleKind) -> str | None:
     return t.movie_download_dir if kind is TitleKind.movie else t.series_download_dir
 
 
+def _free_gb(path: str | None) -> float | None:
+    """Free space (GB) on the filesystem holding ``path``, or None if unknown."""
+
+    if not path:
+        return None
+    import shutil
+
+    try:
+        return shutil.disk_usage(path).free / 1e9
+    except OSError:
+        return None
+
+
 def _mount_to_unc(dest: str, config: AppConfig) -> str:
     """Map a local mount dest back to the SMB UNC path the scanner uses, so a later
     NAS scan reconciles this file instead of pruning + re-adding it."""
@@ -280,6 +293,18 @@ async def queue_candidate_torrent(config: AppConfig, candidate_id: int) -> Queue
     if snap.status is CandidateStatus.rejected:
         raise InvalidTransitionError(
             f"candidate {candidate_id} was rejected; approve it again before queueing"
+        )
+
+    free = _free_gb(_download_dir(config, snap.kind))
+    if free is not None and config.torrent.min_free_gb and free < config.torrent.min_free_gb:
+        log.warning("acquire.low_disk", candidate=candidate_id, free_gb=round(free, 1))
+        return QueueOutcome(
+            candidate_id,
+            False,
+            config.features.dry_run,
+            None,
+            f"low local disk space: {free:.1f} GB free (< {config.torrent.min_free_gb} GB) "
+            "— free space or lower torrent.min_free_gb; not grabbing",
         )
 
     if snap.kind is TitleKind.series and snap.season is None:

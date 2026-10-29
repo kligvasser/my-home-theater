@@ -218,6 +218,10 @@ class Torrent(BaseModel):
     min_seeders: int = Field(5, ge=0, description="drop releases below this seeder count")
     # Allowed release resolutions; None -> reuse thresholds.allowed_resolutions.
     resolutions: list[str] | None = None
+    # Refuse to start a grab when the download dir has less than this much free
+    # space (GB), so a full local disk fails fast with a clear message instead of
+    # ENOSPC mid-download. 0 disables the check.
+    min_free_gb: float = Field(5.0, ge=0)
     # Only grab real HD: reject cam/telesync/telecine/screener sources, SD
     # containers (avi/xvid/divx), and releases with no detectable HD resolution
     # (the usual shape of a fake/foreign-dub "WEB-DL" with no res in its name).
