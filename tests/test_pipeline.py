@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from homeTheater.config.settings import DownloadWindow
 from homeTheater.db.models import CandidateStatus, TitleKind
-from homeTheater.pipeline import _build, _Row
+from homeTheater.pipeline import _build, _Dl, _primary, _Row
 
 
 def _reset() -> None:
@@ -224,6 +224,72 @@ def test_importing_ignores_live_download_progress() -> None:
     )
     assert st.stage == "Importing to NAS 30%"  # copy fraction, not the 100% download
     assert st.progress == 0.3
+
+
+# --- season candidate: per-episode breakdown -------------------------------
+
+
+def _dl(dl_id: int, release: str, state: str, progress: float) -> _Dl:
+    return _Dl(
+        id=dl_id,
+        infohash=f"h{dl_id}",
+        release=release,
+        state=state,
+        progress=progress,
+        save_path="/d",
+        error=None,
+    )
+
+
+def _season_row(downloads: list[_Dl], status: CandidateStatus) -> _Row:
+    primary = _primary(downloads)
+    assert primary is not None
+    return _Row(
+        candidate_id=9,
+        title="Dexter: Resurrection",
+        year=2025,
+        kind="series",
+        status=status,
+        infohash=primary.infohash,
+        release=primary.release,
+        dl_state=primary.state,
+        dl_progress=primary.progress,
+        save_path=primary.save_path,
+        error=primary.error,
+        subtitle_present=[],
+        downloads=tuple(downloads),
+    )
+
+
+def test_primary_tracks_least_advanced_episode() -> None:
+    # E02 imported, E01 still downloading: the headline must follow E01, not the
+    # newer (higher-id) imported E02 — the bug that showed the season "Done".
+    e01 = _dl(1, "Dexter Resurrection S02E01 1080p WEB-CAKES", "downloading", 0.45)
+    e02 = _dl(2, "Dexter Resurrection S02E02 1080p x265-MeGusta", "imported", 1.0)
+    assert _primary([e01, e02]).id == e01.id
+
+
+def test_season_headline_not_done_while_episode_downloads() -> None:
+    e01 = _dl(1, "Dexter Resurrection S02E01 1080p WEB-CAKES", "downloading", 0.45)
+    e02 = _dl(2, "Dexter Resurrection S02E02 1080p x265-MeGusta", "imported", 1.0)
+    st = _build(_season_row([e01, e02], CandidateStatus.downloading), None, ["he", "en"])
+    assert st.stage == "Downloading 45%"
+    # Both episodes are listed, sorted, each with its own state.
+    labels = [(e.label, e.stage, e.state) for e in st.episodes]
+    assert labels == [
+        ("S02E01", "Downloading 45%", "active"),
+        ("S02E02", "Done", "done"),
+    ]
+
+
+def test_single_download_candidate_has_no_episode_breakdown() -> None:
+    # A movie (one download) shows no per-episode list.
+    st = _build(
+        _row(CandidateStatus.downloading, dl_state="downloading", progress=0.3, present=[]),
+        None,
+        ["he"],
+    )
+    assert st.episodes == []
 
 
 def test_imported_candidate_excluded_from_activity(

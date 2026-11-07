@@ -281,6 +281,16 @@ button.danger { background: color-mix(in srgb, var(--fail) 18%, var(--panel)); }
 .exec-subs { font-size: .82rem; margin-top: 6px; }
 .exec-subs .sub.ok { color: var(--ok); }
 .exec-subs .sub.wait { color: var(--muted); }
+/* Per-episode breakdown inside a season candidate's card. */
+.exec-eps { list-style: none; margin: 8px 0 0; padding: 6px 0 0; border-top: 1px dashed var(--border); display: flex; flex-direction: column; gap: 5px; }
+.exec-ep { display: flex; align-items: center; gap: 8px; font-size: .8rem; flex-wrap: wrap; }
+.exec-eplabel { font-variant-numeric: tabular-nums; font-weight: 600; min-width: 64px; color: var(--text); }
+.exec-epbar { flex: 1 1 60px; height: 6px; min-width: 60px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+.exec-epbar > span { display: block; height: 100%; background: var(--accent); transition: width .6s ease; }
+.exec-epstage { margin-left: auto; padding: 1px 8px; border-radius: 999px; font-size: .74rem; font-weight: 600; }
+.exec-epstage.run { color: var(--running); background: color-mix(in srgb, var(--running) 18%, transparent); }
+.exec-epstage.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 18%, transparent); }
+.exec-epstage.err { color: var(--fail); background: color-mix(in srgb, var(--fail) 18%, transparent); }
 .exec-stage-line { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: .76rem; font-weight: 600; margin-top: 6px; }
 .exec-error { color: var(--fail); font-size: .82rem; margin-top: 8px; }
 .exec-slot { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 8px; }

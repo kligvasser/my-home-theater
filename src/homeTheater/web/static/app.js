@@ -466,6 +466,28 @@
         : `<span class="sub wait">${esc(l)} …</span>`);
     return `<div class="exec-subs">Subs: ${parts.join(" · ")}</div>`;
   }
+  function epClass(ep) {
+    if (ep.state === "failed") return "err";
+    if (ep.stage === "Done") return "ok";
+    return "run";
+  }
+  function episodesHtml(item) {
+    if (!item.episodes || item.episodes.length < 2) return "";
+    const rows = item.episodes
+      .map((ep) => {
+        const pct = Math.round((ep.progress || 0) * 100);
+        const bar = /^(Downloading|Importing)/.test(ep.stage)
+          ? `<span class="exec-epbar"><span style="width:${pct}%"></span></span>`
+          : "";
+        return (
+          `<li class="exec-ep"><span class="exec-eplabel">${esc(ep.label)}</span>` +
+          bar +
+          `<span class="exec-epstage ${epClass(ep)}">${esc(ep.stage)}</span></li>`
+        );
+      })
+      .join("");
+    return `<ul class="exec-eps">${rows}</ul>`;
+  }
   function metaHtml(item) {
     const bits = [];
     const r = fmtRate(item.down_rate); if (r) bits.push("▼ " + r);
@@ -497,6 +519,7 @@
       `<div class="stepper">${stepperHtml(item)}</div>` +
       progressHtml(item) +
       metaHtml(item) +
+      episodesHtml(item) +
       subsHtml(item) +
       (item.error ? `<div class="exec-error">⚠ ${esc(item.error)}</div>` : "") +
       `<div class="exec-actions">${restartBtn(item)} ${cancelBtn(item)}</div>` +
@@ -508,6 +531,7 @@
       `<div class="stepper compact">${stepperHtml(item)}</div>` +
       progressHtml(item) +
       `<div class="exec-stage-line ${stageClass(item)}">${esc(item.stage)}</div>` +
+      episodesHtml(item) +
       subsHtml(item) +
       `<div class="exec-actions">${restartBtn(item)} ${cancelBtn(item)}</div>`
     );
