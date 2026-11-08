@@ -2,8 +2,11 @@
 
 A provider is a :class:`SubtitleSource`: ``search`` returns candidate subtitles
 for one owned media file + language, ``download`` fetches the chosen one as raw
-``.srt`` bytes (already decompressed). The rest of the app never sees a provider's
-payload — only :class:`SubtitleResult`.
+bytes (already decompressed). The rest of the app never sees a provider's payload
+— only :class:`SubtitleResult`.
+
+Empty search results mean "the provider answered: nothing". A provider that could
+not answer must raise (see :class:`SubtitleSourceError`), never return ``[]``.
 """
 
 from __future__ import annotations
@@ -13,7 +16,40 @@ import struct
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+import httpx
+
 from ...db.models import TitleKind
+
+
+class SubtitleSourceError(RuntimeError):
+    """A provider failed (outage, bad response); says nothing about availability."""
+
+
+class SourceAuthError(SubtitleSourceError):
+    """Credentials rejected: pointless to call this provider again this sweep."""
+
+
+class SourceQuotaError(SubtitleSourceError):
+    """Quota or rate limit hit: pointless to call this provider again this sweep."""
+
+
+class InvalidSubtitleError(ValueError):
+    """The payload is not a usable subtitle (HTML, binary, truncated, oversized)."""
+
+
+def raise_for_http(
+    resp: httpx.Response, source: str, *, quota_codes: tuple[int, ...] = (429,)
+) -> None:
+    """Map a non-2xx response onto the provider error types."""
+
+    code = resp.status_code
+    if resp.is_success:
+        return
+    if code in (401, 403):
+        raise SourceAuthError(f"{source}: HTTP {code}")
+    if code in quota_codes:
+        raise SourceQuotaError(f"{source}: HTTP {code}")
+    raise SubtitleSourceError(f"{source}: HTTP {code}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +67,14 @@ class SubtitleQuery:
     moviehash: str | None = None  # OpenSubtitles hash of the file, if computable
     filesize: int | None = None  # media file size in bytes (for .org hash matching)
 
+    @property
+    def searchable(self) -> bool:
+        """False for a series file with no season/episode: any hit would be a guess."""
+
+        if self.kind is not TitleKind.series:
+            return True
+        return self.season is not None and self.episode is not None
+
 
 @dataclass(frozen=True, slots=True)
 class SubtitleResult:
@@ -42,6 +86,9 @@ class SubtitleResult:
     score: float  # provider ranking hint (hash match, downloads); higher = better
     ref: dict[str, Any] = field(default_factory=dict)
     hearing_impaired: bool = False
+    hash_match: bool = False  # matched the file's moviehash, not just the title
+    season: int | None = None  # carried for picking the member of a season-pack zip
+    episode: int | None = None
 
 
 class SubtitleSource(Protocol):
@@ -78,5 +125,5 @@ def opensubtitles_hash(path: str) -> str | None:
             for _ in range(chunk // step):
                 value = (value + struct.unpack(fmt, f.read(step))[0]) & 0xFFFFFFFFFFFFFFFF
         return f"{value:016x}"
-    except OSError:
+    except (OSError, struct.error):  # struct.error: file shrank mid-read
         return None

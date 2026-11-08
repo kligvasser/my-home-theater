@@ -21,6 +21,7 @@ from urllib.parse import quote
 import httpx
 
 from ....db.models import TitleKind
+from ....errors import redact_exc
 from ....logging_setup import get_logger
 from ..base import TorrentRelease
 from ..http import ChallengeError, fetch_html
@@ -67,7 +68,7 @@ class X1337Source:
                 self._client, url, flaresolverr_url=self._flaresolverr, timeout=self._timeout
             )
         except ChallengeError as exc:
-            log.warning("torrent.1337x.blocked", detail=str(exc))
+            log.warning("torrent.1337x.blocked", detail=redact_exc(exc))
             return []
 
         rows = list(self._parse_rows(html))
@@ -111,7 +112,7 @@ class X1337Source:
                 timeout=self._timeout,
             )
         except (ChallengeError, httpx.HTTPError) as exc:
-            log.warning("torrent.1337x.detail_failed", href=href, detail=str(exc))
+            log.warning("torrent.1337x.detail_failed", href=href, detail=redact_exc(exc))
             return None
         match = _MAGNET_RE.search(html)
         # Decode HTML entities (&amp; -> &) so tracker/dn params aren't garbled.

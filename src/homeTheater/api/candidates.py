@@ -10,12 +10,13 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from ..acquisition import cancel_candidate, queue_candidate, restart_candidate
+from ..acquisition import cancel_candidate, queue_candidate, restart_candidate, retry_import
 from ..config import effective_config, get_config
 from ..dashboard import candidate_counts, list_candidates
 from ..db.models import CandidateStatus, TitleKind
 from ..discovery.actions import add_manual, approve, follow_series, reject
-from ..errors import InvalidTransitionError, NotConfiguredError, redact_exc
+from ..errors import InvalidTransitionError, JobBusyError, NotConfiguredError, redact_exc
+from ..locks import is_job_running
 from ..logging_setup import get_logger
 from ..metadata.tmdb import TMDbClient
 from .auth import require_token
@@ -23,6 +24,27 @@ from .auth import require_token
 log = get_logger(__name__)
 
 router = APIRouter(prefix="/api/candidates", tags=["candidates"])
+
+
+def _metadata_outage(exc: httpx.HTTPError) -> HTTPException:
+    log.warning("tmdb.request_failed", error=redact_exc(exc))
+    return HTTPException(status_code=502, detail="TMDb request failed")
+
+
+def _http_error(exc: Exception) -> HTTPException:
+    """The status for what an acquisition call raised. Our own error types carry
+    messages we wrote. A ``ValueError`` can be anything: a pydantic or JSON error
+    quoting a provider's response, so it's redacted."""
+
+    if isinstance(exc, NotConfiguredError):
+        return HTTPException(status_code=503, detail=str(exc))
+    if isinstance(exc, InvalidTransitionError | JobBusyError):
+        return HTTPException(status_code=409, detail=str(exc))
+    detail = redact_exc(exc)
+    return HTTPException(status_code=404 if "not found" in detail else 400, detail=detail)
+
+
+_ACQUIRE_ERRORS = (NotConfiguredError, InvalidTransitionError, JobBusyError, ValueError)
 
 
 class ManualAdd(BaseModel):
@@ -77,7 +99,9 @@ async def api_manual(body: ManualAdd) -> dict[str, int | str]:
     except NotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=redact_exc(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise _metadata_outage(exc) from exc
     return {"id": candidate_id, "status": "new"}
 
 
@@ -92,22 +116,19 @@ async def api_grab(body: ManualGrab) -> dict[str, Any]:
     the search box (no separate add -> approve -> grab). Idempotent: an existing
     live candidate for the title is grabbed rather than duplicated."""
 
-    cfg = get_config()
+    cfg = await asyncio.to_thread(effective_config)
     try:
         candidate_id = await add_manual(cfg, body.tmdb_id, body.kind, reuse_existing=True)
     except NotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=redact_exc(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise _metadata_outage(exc) from exc
     try:
         outcome = await queue_candidate(cfg, candidate_id)
-    except NotConfiguredError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except InvalidTransitionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        code = 404 if "not found" in str(exc) else 400
-        raise HTTPException(status_code=code, detail=str(exc)) from exc
+    except _ACQUIRE_ERRORS as exc:
+        raise _http_error(exc) from exc
     return {
         "id": candidate_id,
         "queued": outcome.queued,
@@ -132,7 +153,9 @@ async def api_follow(body: Follow, background: BackgroundTasks) -> dict[str, Any
     except NotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=redact_exc(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise _metadata_outage(exc) from exc
 
     from ..discovery import run_discovery
 
@@ -154,7 +177,9 @@ async def api_unfollow(body: Follow) -> dict[str, Any]:
     Clearing the flag only stops *future* seasons; a season the follow already
     auto-grabbed keeps downloading otherwise. So we also cancel its active
     (approved/queued/downloading) candidates — leaving undecided suggestions and
-    already-imported content untouched."""
+    already-imported content untouched. They end ``cancelled``, which is no dislike,
+    and following again reopens them. One mid-import can't be cancelled yet: it's
+    counted in ``skipped``, and its import finishes."""
 
     from sqlalchemy import select
 
@@ -183,14 +208,16 @@ async def api_unfollow(body: Follow) -> dict[str, Any]:
             ).all()
         )
 
-    stopped = 0
+    cfg = await asyncio.to_thread(effective_config)
+    stopped = skipped = 0
     for cid in active:
         try:
-            await cancel_candidate(get_config(), cid)
+            await cancel_candidate(cfg, cid)
             stopped += 1
         except Exception as exc:
+            skipped += 1
             log.warning("unfollow.cancel_failed", candidate=cid, error=redact_exc(exc))
-    return {"tmdb_id": body.tmdb_id, "followed": False, "stopped": stopped}
+    return {"tmdb_id": body.tmdb_id, "followed": False, "stopped": stopped, "skipped": skipped}
 
 
 @router.get("/search", dependencies=[Depends(require_token)])
@@ -250,6 +277,11 @@ async def api_discover(body: DiscoverRun, background: BackgroundTasks) -> dict[s
     cfg = await asyncio.to_thread(effective_config)
     if cfg.secrets.tmdb_api_key is None:
         raise HTTPException(status_code=503, detail="TMDB_API_KEY is not configured")
+    if is_job_running(cfg, "discovery"):
+        return {
+            "started": False,
+            "message": "A discovery run is already running — it'll finish on its own.",
+        }
     if body.max_per_source:
         boosted = cfg.discovery.model_copy(update={"max_per_source": body.max_per_source})
         cfg = cfg.model_copy(update={"discovery": boosted})
@@ -269,14 +301,10 @@ async def api_queue(candidate_id: int) -> dict[str, Any]:
     """Hand a candidate to Radarr/Sonarr (or report the dry-run intent)."""
 
     try:
-        outcome = await queue_candidate(get_config(), candidate_id)
-    except NotConfiguredError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except InvalidTransitionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        code = 404 if "not found" in str(exc) else 400
-        raise HTTPException(status_code=code, detail=str(exc)) from exc
+        cfg = await asyncio.to_thread(effective_config)
+        outcome = await queue_candidate(cfg, candidate_id)
+    except _ACQUIRE_ERRORS as exc:
+        raise _http_error(exc) from exc
     return {
         "queued": outcome.queued,
         "dry_run": outcome.dry_run,
@@ -290,14 +318,10 @@ async def api_restart(candidate_id: int) -> dict[str, Any]:
     """Wipe a stuck candidate's download and re-grab it from scratch."""
 
     try:
-        outcome = await restart_candidate(get_config(), candidate_id)
-    except NotConfiguredError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except InvalidTransitionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except ValueError as exc:
-        code = 404 if "not found" in str(exc) else 400
-        raise HTTPException(status_code=code, detail=str(exc)) from exc
+        cfg = await asyncio.to_thread(effective_config)
+        outcome = await restart_candidate(cfg, candidate_id)
+    except _ACQUIRE_ERRORS as exc:
+        raise _http_error(exc) from exc
     return {
         "queued": outcome.queued,
         "dry_run": outcome.dry_run,
@@ -310,8 +334,20 @@ async def api_cancel(candidate_id: int) -> dict[str, Any]:
     """Cancel an in-flight item: remove its torrent + drop it from the pipeline."""
 
     try:
-        name = await cancel_candidate(get_config(), candidate_id)
-    except ValueError as exc:
-        code = 404 if "not found" in str(exc) else 400
-        raise HTTPException(status_code=code, detail=str(exc)) from exc
+        cfg = await asyncio.to_thread(effective_config)
+        name = await cancel_candidate(cfg, candidate_id)
+    except _ACQUIRE_ERRORS as exc:
+        raise _http_error(exc) from exc
     return {"cancelled": True, "message": f"Cancelled '{name}'"}
+
+
+@router.post("/{candidate_id}/retry-import", dependencies=[Depends(require_token)])
+def api_retry_import(candidate_id: int) -> dict[str, Any]:
+    """Send imports parked as ``needs_attention:`` round again, once the cause is
+    dealt with. Keeps the local data, unlike Restart."""
+
+    try:
+        parked = retry_import(candidate_id)
+    except ValueError as exc:
+        raise _http_error(exc) from exc
+    return {"retrying": parked}

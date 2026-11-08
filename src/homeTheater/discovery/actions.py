@@ -8,23 +8,40 @@ dashboard buttons can't silently contradict what Radarr/Sonarr are doing.
 from __future__ import annotations
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
 
 from ..config import AppConfig
 from ..db.base import utcnow
-from ..db.models import Candidate, CandidateSource, CandidateStatus, Title, TitleKind
+from ..db.models import (
+    Candidate,
+    CandidateSource,
+    CandidateStatus,
+    GrabRetry,
+    Title,
+    TitleKind,
+)
 from ..db.session import session_scope
-from ..errors import InvalidTransitionError, NotConfiguredError
+from ..errors import (
+    InvalidTransitionError,
+    NotConfiguredError,
+    TransientProviderError,
+    redact_exc,
+)
 from ..features import extract_features
+from ..logging_setup import get_logger
 from ..metadata.omdb import OMDbClient
 from ..metadata.tmdb import TMDbClient
 from .service import _upsert_title
+
+log = get_logger(__name__)
 
 # from-status -> statuses a dashboard action may set
 _ALLOWED: dict[CandidateStatus, tuple[CandidateStatus, ...]] = {
     CandidateStatus.new: (CandidateStatus.approved, CandidateStatus.rejected),
     CandidateStatus.approved: (CandidateStatus.rejected,),
     CandidateStatus.failed: (CandidateStatus.approved, CandidateStatus.rejected),
+    CandidateStatus.cancelled: (CandidateStatus.approved, CandidateStatus.rejected),
 }
 
 
@@ -42,6 +59,9 @@ def _set_status(candidate_id: int, status: CandidateStatus) -> bool:
             )
         cand.status = status
         cand.decided_at = utcnow()
+        if status is CandidateStatus.approved:
+            # A person saying "go" overrides any retry backoff.
+            s.execute(delete(GrabRetry).where(GrabRetry.candidate_id == candidate_id))
         return True
 
 
@@ -88,7 +108,11 @@ async def add_manual(
             omdb = OMDbClient(
                 secrets.omdb_api_key.get_secret_value(), http, cache_days=config.metadata.cache_days
             )
-            ratings = await omdb.by_imdb_id(details.imdb_id)
+            # Ratings are a bonus here: an OMDb outage or spent quota mustn't lose the add.
+            try:
+                ratings = await omdb.by_imdb_id(details.imdb_id)
+            except (TransientProviderError, httpx.HTTPError) as exc:
+                log.warning("manual_add.omdb_skipped", error=redact_exc(exc))
 
     with session_scope() as session:
         title = _upsert_title(session, kind, details)
@@ -128,11 +152,25 @@ async def add_manual(
         return cand.id
 
 
+def _reopen_cancelled(session: Session, title_id: int) -> None:
+    """Following says "I want this show": what an unfollow or cancel stopped is wanted
+    again. Rejected candidates stay rejected; that's a different statement."""
+
+    for cand in session.scalars(
+        select(Candidate).where(
+            Candidate.title_id == title_id, Candidate.status == CandidateStatus.cancelled
+        )
+    ).all():
+        cand.status = CandidateStatus.approved
+        cand.decided_at = utcnow()
+
+
 async def follow_series(config: AppConfig, tmdb_id: int, kind: TitleKind = TitleKind.series) -> int:
     """Mark a series as followed: upsert its Title from TMDb and set ``followed``.
 
     Following auto-grabs new seasons/episodes as they air (the new-seasons
-    discovery source treats followed shows as auto-grab). Returns the title id.
+    discovery source treats followed shows as auto-grab), and reopens seasons
+    cancelled earlier, which discovery alone would leave blocked. Returns the title id.
     Only series can be followed — movies don't have new episodes.
     """
 
@@ -159,6 +197,8 @@ async def follow_series(config: AppConfig, tmdb_id: int, kind: TitleKind = Title
     with session_scope() as session:
         title = _upsert_title(session, kind, details)
         title.followed = True
+        session.flush()
+        _reopen_cancelled(session, title.id)
         return title.id
 
 
@@ -171,4 +211,6 @@ def set_followed(tmdb_id: int, kind: TitleKind, followed: bool) -> bool:
         if title is None:
             return False
         title.followed = followed
+        if followed:
+            _reopen_cancelled(session, title.id)
         return True

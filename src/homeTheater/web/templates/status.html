@@ -30,7 +30,7 @@
 
 <h2>Pipeline</h2>
 <nav class="statusfilter">
-  {% for st in ["new", "approved", "queued", "downloading", "imported", "rejected", "failed"] %}
+  {% for st in statuses %}
   <a href="/candidates?status={{ st }}">{{ st }} <span class="count">{{ counts.get(st, 0) }}</span></a>
   {% endfor %}
 </nav>
@@ -57,15 +57,68 @@
 </table>
 </div>
 
+{% if jobs %}
+<h2>Scheduled jobs</h2>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Job</th><th>Every</th><th>Last success</th><th>Status</th><th>Note</th></tr></thead>
+  <tbody>
+  {% for j in jobs %}
+    <tr>
+      <td>{{ j.name }}</td>
+      <td>{{ j.interval_minutes }} min</td>
+      <td>{% if j.age_minutes is none %}never{% else %}{{ j.age_minutes }} min ago{% endif %}</td>
+      <td>
+        {% if j.stale %}<span class="pill failed">stale</span>
+        {% elif j.note %}<span class="muted">skipping</span>
+        {% else %}<span class="pill success">ok</span>{% endif %}
+      </td>
+      <td class="small mono">{{ j.note }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
 <h2>🧹 Cleanup</h2>
 <p class="muted small">Find junk safely: leftover featurette/extra files in TV season
   folders, and finished torrents that are already imported or orphaned (never ones
-  still importing). Scan first — nothing is deleted until you press Apply.</p>
+  still importing). Scan first — nothing is removed until you press Apply, and NAS
+  files go to the trash below.</p>
 <div class="pipeline-controls">
   <button type="button" data-action="cleanup-scan">🔍 Scan for cleanup</button>
   <button type="button" class="danger" data-action="cleanup-apply" hidden>🗑 Apply cleanup</button>
 </div>
 <div id="cleanup-report" class="small" style="margin-top:10px"></div>
+
+<h2>🗑 Trash</h2>
+{% if not trash_enabled %}
+<p class="muted small">The trash is off (<code>trash.enabled</code>): cleanup deletes NAS files outright.</p>
+{% endif %}
+<p class="muted small">What the app removed from the NAS stays in
+  <code>.home-theater-trash</code> for {{ trash_days }} days, then it's purged.
+  Restoring never overwrites a file; the next scan puts it back in the catalog.</p>
+{% if trash_items %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>File</th><th>Size</th><th>Why</th><th>Purged on</th><th></th></tr></thead>
+  <tbody>
+  {% for item in trash_items %}
+    <tr>
+      <td class="small mono">{{ item.original_path }}</td>
+      <td>{{ (item.size_bytes or 0) | human_size }}</td>
+      <td class="small">{{ item.reason or "" }}</td>
+      <td class="small">{{ item.purge_on }}</td>
+      <td><button type="button" class="mini" data-action="trash-restore" data-id="{{ item.id }}">↩ Restore</button></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+<p class="muted small">The trash is empty.</p>
+{% endif %}
 
 <h2>Recent runs</h2>
 {% include "_runs_table.html" %}

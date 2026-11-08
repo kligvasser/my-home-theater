@@ -108,8 +108,8 @@ def _apibay_rows() -> list[dict]:
 
 def test_select_prefers_allowed_resolution_over_seeders() -> None:
     releases = [
-        TorrentRelease("piratebay", "Movie 720p", 500, 1, 1, infohash="a" * 40),
-        TorrentRelease("piratebay", "Movie 1080p", 100, 1, 1, infohash="b" * 40),
+        TorrentRelease("piratebay", "Movie 720p", 500, 1, None, infohash="a" * 40),
+        TorrentRelease("piratebay", "Movie 1080p", 100, 1, None, infohash="b" * 40),
     ]
     picked = select_release(releases, allowed_resolutions=["1080p", "2160p"], min_seeders=1)
     assert picked is not None and picked.title == "Movie 1080p"  # 720p dropped despite seeders
@@ -125,15 +125,15 @@ def test_select_drops_under_seeded_and_magnetless() -> None:
 
 def test_select_ranks_unknown_resolution_last_then_by_seeders() -> None:
     releases = [
-        TorrentRelease("piratebay", "Movie DVDRip", 999, 1, 1, infohash="d" * 40),
-        TorrentRelease("piratebay", "Movie 1080p", 10, 1, 1, infohash="e" * 40),
+        TorrentRelease("piratebay", "Movie DVDRip", 999, 1, None, infohash="d" * 40),
+        TorrentRelease("piratebay", "Movie 1080p", 10, 1, None, infohash="e" * 40),
     ]
     picked = select_release(releases, allowed_resolutions=["1080p", "2160p"], min_seeders=1)
     assert picked is not None and picked.title == "Movie 1080p"
 
 
 def test_magnet_uri_built_from_infohash() -> None:
-    rel = TorrentRelease("piratebay", "Some Movie 1080p", 10, 1, 1, infohash=HASH)
+    rel = TorrentRelease("piratebay", "Some Movie 1080p", 10, 1, None, infohash=HASH)
     magnet = rel.magnet_uri()
     assert magnet is not None
     assert magnet.startswith(f"magnet:?xt=urn:btih:{HASH}")
@@ -340,6 +340,40 @@ async def test_sync_imports_completed_movie_into_library(
 
 
 @respx.mock
+@pytest.mark.parametrize("hook_fails", [False, True])
+async def test_import_asks_kodi_for_a_scan_and_survives_the_ask_failing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hook_fails: bool
+) -> None:
+    lib = tmp_path / "lib"
+    dl_dir = tmp_path / "dl"
+    dl_dir.mkdir()
+    (dl_dir / "movie.mkv").write_bytes(b"video-bytes" * 100)
+    _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch, library_base_dir=str(lib))
+    _reset()
+    _seed_downloading(_seed_approved())
+    respx.post(TRANSMISSION).mock(
+        side_effect=[
+            httpx.Response(409, headers={"X-Transmission-Session-Id": "s"}),
+            httpx.Response(200, json=_complete_status(str(dl_dir), "movie.mkv")),
+        ]
+    )
+    calls: list[object] = []
+
+    async def note_import(config: object) -> None:
+        calls.append(config)
+        if hook_fails:
+            raise RuntimeError("kodi trouble")
+
+    monkeypatch.setattr("homeTheater.kodi.note_import", note_import)
+    from homeTheater.acquisition import sync_downloads
+    from homeTheater.config import get_config
+
+    stats = await sync_downloads(get_config())
+
+    assert stats.completed == 1 and len(calls) == 1
+
+
+@respx.mock
 async def test_sync_import_failure_leaves_completed_for_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -486,10 +520,12 @@ def test_ensure_mounted_auto_remounts(monkeypatch: pytest.MonkeyPatch) -> None:
     from homeTheater.acquisition.torrent.importer import SmbMount
 
     calls: list[list[str]] = []
+    stdin: list[object] = []
     mounted = {"v": False}  # flips to True after the remount runs
 
     def fake_run(cmd: list[str], **kw: object) -> object:
         calls.append(cmd)
+        stdin.append(kw.get("input"))
         mounted["v"] = True
         return SimpleNamespace(returncode=0)
 
@@ -500,7 +536,8 @@ def test_ensure_mounted_auto_remounts(monkeypatch: pytest.MonkeyPatch) -> None:
     imp.ensure_mounted("/Volumes/Elements", mount)  # must not raise
 
     assert len(calls) == 1
-    assert 'mount volume "smb://me:pw@nas.local/Elements"' in calls[0]
+    assert calls[0] == ["osascript", "-"]  # nothing secret in the process list
+    assert stdin == [b'mount volume "smb://me:pw@nas.local/Elements"']
 
 
 @respx.mock
@@ -602,7 +639,7 @@ def test_register_owned_movie_catalogs_with_unc_path(
 
 
 @respx.mock
-async def test_cancel_removes_torrent_and_rejects(
+async def test_cancel_removes_torrent_and_is_not_a_rejection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_config(tmp_path, dry_run=False, monkeypatch=monkeypatch)
@@ -630,7 +667,7 @@ async def test_cancel_removes_torrent_and_rejects(
 
     assert name == "The Matrix"
     with session_scope() as s:
-        assert s.get(Candidate, cid).status == CandidateStatus.rejected
+        assert s.get(Candidate, cid).status == CandidateStatus.cancelled
         assert s.query(Download).one().state == "cancelled"
     removes = [c for c in route.calls if b'"torrent-remove"' in c.request.content]
     assert removes and b'"delete-local-data":true' in removes[0].request.content
@@ -703,10 +740,10 @@ def test_select_rejects_executable_styled_names() -> None:
             "Movie 2026 1080p WEB-DL DDP5 1 H 264-FLUX .exe",
             900,
             1,
-            1,
+            None,
             infohash="a" * 40,
         ),
-        TorrentRelease("piratebay", "Movie 2026 1080p WEB", 10, 1, 1, infohash="b" * 40),
+        TorrentRelease("piratebay", "Movie 2026 1080p WEB", 10, 1, None, infohash="b" * 40),
     ]
     picked = select_release(releases, allowed_resolutions=["1080p"], min_seeders=1)
     assert picked is not None and picked.infohash == "b" * 40
@@ -867,8 +904,9 @@ def test_import_skips_file_already_in_place(tmp_path: Path) -> None:
 
 
 def test_import_finishes_stale_complete_part(tmp_path: Path) -> None:
-    """A full-size .part left by a run that died before the rename is just
-    renamed into place — no second copy (the NAS may refuse to re-open it)."""
+    """A full-size .part from this same source, left by a run that died before the
+    rename, is renamed into place with no second copy."""
+    from homeTheater.acquisition.torrent import importer
     from homeTheater.acquisition.torrent.importer import LocalLibraryTarget
 
     src = tmp_path / "src.mkv"
@@ -877,10 +915,13 @@ def test_import_finishes_stale_complete_part(tmp_path: Path) -> None:
     part = lib / "Movies" / "M" / "M.mkv.part"
     part.parent.mkdir(parents=True)
     part.write_bytes(b"y" * 500)
+    importer._write_sidecar(str(part), importer._source_stamp(src.stat(), None))
+    part_inode = part.stat().st_ino
 
     out = LocalLibraryTarget(str(lib)).import_file(str(src), "Movies/M", "M.mkv")
 
     assert Path(out).read_bytes() == b"y" * 500
+    assert Path(out).stat().st_ino == part_inode  # renamed, not re-copied
     assert not part.exists()
 
 
@@ -1225,6 +1266,7 @@ async def test_grab_screens_out_executable_before_download(
         side_effect=[
             httpx.Response(409, headers={"X-Transmission-Session-Id": "s"}),
             httpx.Response(200, json=add_ok),  # torrent-add
+            httpx.Response(200, json={"result": "success", "arguments": {}}),  # torrent-set
             httpx.Response(200, json=meta),  # torrent-get (screen)
             httpx.Response(200, json={"result": "success", "arguments": {}}),  # torrent-remove
         ]
@@ -1301,7 +1343,8 @@ async def test_grab_keeps_clean_release(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_resume_appends_from_partial_part(tmp_path: Path) -> None:
-    """A partial .part is resumed (append), not re-copied from zero."""
+    """A partial .part from the same source is resumed (append), not re-copied."""
+    from homeTheater.acquisition.torrent import importer
     from homeTheater.acquisition.torrent.importer import LocalLibraryTarget
 
     src = tmp_path / "src.mkv"
@@ -1311,6 +1354,7 @@ def test_resume_appends_from_partial_part(tmp_path: Path) -> None:
     dest_dir.mkdir(parents=True)
     part = dest_dir / "M.mkv.part"
     part.write_bytes(src.read_bytes()[:6000])  # a prior faulted copy left 6000 bytes
+    importer._write_sidecar(str(part), importer._source_stamp(src.stat(), None))
 
     seen: list[int] = []
     out = LocalLibraryTarget(str(lib)).import_file(
@@ -1321,50 +1365,79 @@ def test_resume_appends_from_partial_part(tmp_path: Path) -> None:
     assert seen and seen[0] == 6000  # progress started from the resume point
 
 
+class _TransmissionRules:
+    """Applies RPC calls the way Transmission does: ``torrent-add`` ignores arguments
+    it doesn't define, which seed limits are, and only ``torrent-set`` changes them.
+    The test then asks what the torrent ended up with, not what the client sent."""
+
+    TORRENT_ADD_ARGS = frozenset({"filename", "paused", "download-dir"})
+
+    def __init__(self) -> None:
+        self.torrents: dict[str, dict] = {}
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        body = _json.loads(request.content)
+        args = body["arguments"]
+        if body["method"] == "torrent-add":
+            kept = {k: v for k, v in args.items() if k in self.TORRENT_ADD_ARGS}
+            self.torrents[HASH] = {"seedRatioMode": 0, **kept}
+            added = {"torrent-added": {"hashString": HASH, "name": "x"}}
+            return httpx.Response(200, json={"result": "success", "arguments": added})
+        if body["method"] == "torrent-set":
+            for infohash in args["ids"]:
+                self.torrents[infohash].update(
+                    {k: v for k, v in args.items() if k.startswith("seedRatio")}
+                )
+        return httpx.Response(200, json={"result": "success", "arguments": {}})
+
+
 @respx.mock
-async def test_add_magnet_sets_seed_ratio_zero_to_stop_seeding() -> None:
-    """The add sets seedRatioMode=1 / limit=0 so a finished torrent stops
-    uploading immediately (we're not a seedbox)."""
-    add_ok = {
-        "result": "success",
-        "arguments": {"torrent-added": {"hashString": HASH, "name": "x"}},
-    }
-    route = respx.post(TRANSMISSION).mock(
-        side_effect=[
-            httpx.Response(409, headers={"X-Transmission-Session-Id": "s"}),
-            httpx.Response(200, json=add_ok),
-        ]
-    )
+async def test_a21_seed_limit_actually_reaches_the_torrent() -> None:
+    """A finished torrent has to stop uploading (we're not a seedbox). Seed limits on
+    ``torrent-add`` are silently dropped, so they have to go through ``torrent-set``."""
+    rules = _TransmissionRules()
+    respx.post(TRANSMISSION).mock(side_effect=rules)
     async with httpx.AsyncClient() as http:
         await TransmissionClient(TRANSMISSION, http).add_magnet(
             "magnet:?xt=urn:btih:" + HASH, download_dir=None, seed_ratio_limit=0.0
         )
-    import json as _json
 
-    body = _json.loads(route.calls[1].request.content)["arguments"]
-    assert body["seedRatioMode"] == 1 and body["seedRatioLimit"] == 0.0
+    assert rules.torrents[HASH]["seedRatioMode"] == 1
+    assert rules.torrents[HASH]["seedRatioLimit"] == 0.0
 
 
 @respx.mock
-async def test_add_magnet_seeds_indefinitely_when_ratio_negative() -> None:
-    add_ok = {
-        "result": "success",
-        "arguments": {"torrent-added": {"hashString": HASH, "name": "x"}},
-    }
-    route = respx.post(TRANSMISSION).mock(
-        side_effect=[
-            httpx.Response(409, headers={"X-Transmission-Session-Id": "s"}),
-            httpx.Response(200, json=add_ok),
-        ]
-    )
+async def test_a21_negative_ratio_means_seed_indefinitely() -> None:
+    rules = _TransmissionRules()
+    respx.post(TRANSMISSION).mock(side_effect=rules)
     async with httpx.AsyncClient() as http:
         await TransmissionClient(TRANSMISSION, http).add_magnet(
             "magnet:?xt=urn:btih:" + HASH, download_dir=None, seed_ratio_limit=-1.0
         )
-    import json as _json
 
-    body = _json.loads(route.calls[1].request.content)["arguments"]
-    assert "seedRatioLimit" not in body  # left to Transmission's global setting
+    assert rules.torrents[HASH]["seedRatioMode"] == 2
+    assert "seedRatioLimit" not in rules.torrents[HASH]
+
+
+@respx.mock
+async def test_a21_failed_seed_limit_still_returns_the_added_torrent() -> None:
+    """The torrent is in the client by then: losing track of it is worse."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if b'"torrent-set"' in request.content:
+            return httpx.Response(500)
+        added = {"torrent-added": {"hashString": HASH, "name": "x"}}
+        return httpx.Response(200, json={"result": "success", "arguments": added})
+
+    respx.post(TRANSMISSION).mock(side_effect=respond)
+    async with httpx.AsyncClient() as http:
+        got = await TransmissionClient(TRANSMISSION, http).add_magnet(
+            "magnet:?xt=urn:btih:" + HASH, download_dir=None, seed_ratio_limit=0.0
+        )
+
+    assert got.infohash == HASH
 
 
 @respx.mock
@@ -1465,14 +1538,16 @@ def test_select_require_hd_rejects_cam_sd_and_unknown_resolution() -> None:
     from homeTheater.acquisition.torrent.select import select_release
 
     good = TorrentRelease(
-        "pb", "Bad Apples 2025 1080p WEB-DL x265-BONE", 1500, 1, 1, infohash="a" * 40
+        "pb", "Bad Apples 2025 1080p WEB-DL x265-BONE", 1500, 1, None, infohash="a" * 40
     )
     junk = [
-        TorrentRelease("pb", "Bad Apples 2025 HDTS x264", 9000, 1, 1, infohash="b" * 40),
-        TorrentRelease("pb", "Bad Apples 2025 TELESYNC 720p", 9000, 1, 1, infohash="c" * 40),
-        TorrentRelease("pb", "Bad.Apples.2025.HDRip.XviD.AC3", 9000, 1, 1, infohash="d" * 40),
-        TorrentRelease("pb", "Bad Apples (2026) WEB-DL [Ukr Dub]", 9000, 1, 1, infohash="e" * 40),
-        TorrentRelease("pb", "Bad Apples 2025 CAM", 9000, 1, 1, infohash="f" * 40),
+        TorrentRelease("pb", "Bad Apples 2025 HDTS x264", 9000, 1, None, infohash="b" * 40),
+        TorrentRelease("pb", "Bad Apples 2025 TELESYNC 720p", 9000, 1, None, infohash="c" * 40),
+        TorrentRelease("pb", "Bad.Apples.2025.HDRip.XviD.AC3", 9000, 1, None, infohash="d" * 40),
+        TorrentRelease(
+            "pb", "Bad Apples (2026) WEB-DL [Ukr Dub]", 9000, 1, None, infohash="e" * 40
+        ),
+        TorrentRelease("pb", "Bad Apples 2025 CAM", 9000, 1, None, infohash="f" * 40),
     ]
     picked = select_release(
         [*junk, good], allowed_resolutions=["1080p", "2160p"], min_seeders=1, require_hd=True
@@ -1489,7 +1564,7 @@ def test_select_require_hd_false_keeps_unknown_resolution() -> None:
     """With require_hd off, an unlabeled release is still a (last-ranked) option."""
     from homeTheater.acquisition.torrent.select import select_release
 
-    rel = TorrentRelease("pb", "Some Movie WEB-DL", 50, 1, 1, infohash="a" * 40)
+    rel = TorrentRelease("pb", "Some Movie WEB-DL", 50, 1, None, infohash="a" * 40)
     assert (
         select_release([rel], allowed_resolutions=["1080p"], min_seeders=1, require_hd=True) is None
     )
@@ -1501,7 +1576,7 @@ def test_low_quality_tag_not_matched_inside_words() -> None:
     """Short tags (ts/tc) must not fire inside real words."""
     from homeTheater.acquisition.torrent.select import select_release
 
-    rel = TorrentRelease("pb", "Guts 2025 1080p WEB-DL x265", 100, 1, 1, infohash="a" * 40)
+    rel = TorrentRelease("pb", "Guts 2025 1080p WEB-DL x265", 100, 1, None, infohash="a" * 40)
     picked = select_release([rel], allowed_resolutions=["1080p"], min_seeders=1, require_hd=True)
     assert picked is not None  # "Guts" is not a telesync
 
@@ -1601,7 +1676,7 @@ def _row_q(name: str, infohash: str, seeders: int = 100) -> dict:
         "info_hash": infohash,
         "seeders": str(seeders),
         "leechers": "1",
-        "size": "1000000",
+        "size": "1500000000",
     }
 
 
@@ -1644,10 +1719,12 @@ def test_select_movie_rejects_tv_episode_matches() -> None:
         "Moonshiners S16E04 Digger Knows Best 1080p WEB-DL H264-RAWR",
         900,
         1,
-        1,
+        None,
         infohash="a" * 40,
     )
-    real = TorrentRelease("pb", "Digger 2026 1080p WEB-DL x265-BONE", 50, 1, 1, infohash="b" * 40)
+    real = TorrentRelease(
+        "pb", "Digger 2026 1080p WEB-DL x265-BONE", 50, 1, None, infohash="b" * 40
+    )
 
     # Without movie=, the high-seeded episode would win.
     assert (
@@ -1670,15 +1747,24 @@ def test_select_movie_title_and_year_guards() -> None:
             "OnlyTarts.24.06.28.Era.Queen.Gold.Digger.XXX.1080p",
             9000,
             1,
-            1,
+            None,
             infohash="a" * 40,
         ),
         TorrentRelease(
-            "pb", "Moonshiners S16E04 Digger Knows Best 1080p WEB-DL", 9000, 1, 1, infohash="b" * 40
+            "pb",
+            "Moonshiners S16E04 Digger Knows Best 1080p WEB-DL",
+            9000,
+            1,
+            None,
+            infohash="b" * 40,
         ),
-        TorrentRelease("pb", "Digger 2020 1080p AMZN WEB-DL x264", 9000, 1, 1, infohash="c" * 40),
+        TorrentRelease(
+            "pb", "Digger 2020 1080p AMZN WEB-DL x264", 9000, 1, None, infohash="c" * 40
+        ),
     ]
-    real = TorrentRelease("pb", "Digger 2026 1080p WEB-DL x265-BONE", 20, 1, 1, infohash="d" * 40)
+    real = TorrentRelease(
+        "pb", "Digger 2026 1080p WEB-DL x265-BONE", 20, 1, None, infohash="d" * 40
+    )
 
     # All the high-seeded junk is rejected; only the real 2026 Digger qualifies.
     assert (
@@ -1703,7 +1789,7 @@ def test_select_movie_title_and_year_guards() -> None:
     assert picked is not None and picked.infohash == "d" * 40
 
     # ±1 year drift (Bad Apples TMDb 2026 vs release 2025) is still accepted.
-    ba = TorrentRelease("pb", "Bad Apples 2025 1080p WEB-DL x265", 100, 1, 1, infohash="e" * 40)
+    ba = TorrentRelease("pb", "Bad Apples 2025 1080p WEB-DL x265", 100, 1, None, infohash="e" * 40)
     assert (
         select_release(
             [ba],

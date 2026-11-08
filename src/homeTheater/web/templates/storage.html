@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Storage · my-home-theater{% endblock %}
+{% block content %}
+<h1>Storage</h1>
+
+<section class="cards">
+  {% if plan.capacity.free is not none %}
+  <div class="card"><span class="num">{{ plan.capacity.free | human_size }}</span><span class="lbl">free of {{ plan.capacity.total | human_size }}{% if plan.capacity.stale %} (earlier reading){% endif %}</span></div>
+  {% else %}
+  <div class="card"><span class="num">?</span><span class="lbl">NAS free space</span></div>
+  {% endif %}
+  <div class="card">
+    <span class="num">{% if plan.growth.bytes_per_day is none %}?{% else %}{{ (plan.growth.bytes_per_day * 7) | int | human_size }}{% endif %}</span>
+    <span class="lbl">a week{% if plan.growth.source == 'catalog' %}, from what the catalog added{% elif plan.growth.source == 'nas' %}, measured on the NAS{% else %} (needs a week of history){% endif %}</span>
+  </div>
+  <div class="card">
+    <span class="num">{% if plan.days_to_full is none %}?{% else %}{{ plan.days_to_full }}{% endif %}</span>
+    <span class="lbl">days to full</span>
+  </div>
+  <div class="card">
+    <span class="num">{{ plan.in_flight.bytes | human_size }}</span>
+    <span class="lbl">on the way, {{ plan.in_flight.downloads }} grab(s){% if plan.in_flight.estimated %}, {{ plan.in_flight.estimated }} estimated{% endif %}</span>
+  </div>
+</section>
+{% for note in plan.notes %}<p class="muted small">{{ note }}</p>{% endfor %}
+{% if plan.capacity.used_percent is not none %}
+<div class="coverage">
+  <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ plan.capacity.used_percent }}" aria-label="NAS used"><div class="fill" style="width:{{ plan.capacity.used_percent }}%"></div></div>
+</div>
+{% endif %}
+
+<h2>By root</h2>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Root</th><th>Kind</th><th class="r">Files</th><th class="r">Size</th></tr></thead>
+  <tbody>
+  {% for r in plan.roots %}
+    <tr><td>{{ r.root }}</td><td>{{ r.kind }}</td><td class="r">{{ r.files }}</td><td class="r">{{ r.bytes | human_size }}{% if r.unsized %} + {{ r.unsized }} unsized{% endif %}</td></tr>
+  {% else %}
+    <tr><td colspan="4" class="muted">Nothing cataloged yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h2>Largest titles</h2>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Title</th><th>Kind</th><th class="r">Files</th><th class="r">Size</th></tr></thead>
+  <tbody>
+  {% for t in plan.titles %}
+    <tr><td>{{ t.title }}{% if t.year %} ({{ t.year }}){% endif %}</td><td>{{ t.kind }}</td><td class="r">{{ t.files }}</td><td class="r">{{ t.bytes | human_size }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h2>Could go</h2>
+<p class="muted small">Suggestions only: nothing on this page deletes anything. Followed titles and anything in the pipeline are left out.{% if plan.reclaimable %} All of it adds up to {{ plan.reclaimable | human_size }}.{% endif %}{% if not plan.watch_data %} No watch history yet, so "watched" isn't judged.{% endif %}</p>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Title</th><th>Why</th><th class="r">Frees</th></tr></thead>
+  <tbody>
+  {% for s in plan.suggestions %}
+    <tr>
+      <td>{{ s.title }}{% if s.year %} ({{ s.year }}){% endif %} <span class="pill">{{ s.kind }}</span>
+        {% if s.files %}<ul class="storage-files mono">{% for f in s.files %}<li>{{ f }}</li>{% endfor %}</ul>{% endif %}
+      </td>
+      <td>{{ s.reasons | join(", ") }}</td>
+      <td class="r">{{ s.bytes | human_size }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="3" class="muted">Nothing stands out.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

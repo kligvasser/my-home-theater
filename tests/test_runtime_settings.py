@@ -63,6 +63,120 @@ def test_overrides_reject_forbidden_and_invalid(config_file: Path) -> None:
         save_overrides({"thresholds": {"min_imdb_rating": 42}})  # > 10
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "library_base_dir",
+        "backend",
+        "sources",
+        "opensubtitles_user_agent",
+        "opensubtitles_org_user_agent",
+        "request_timeout",
+    ],
+)
+def test_subtitles_override_keeps_paths_and_backends_out(config_file: Path, key: str) -> None:
+    _reset()
+    from homeTheater.config import OverrideError, save_overrides
+    from homeTheater.db import init_db
+
+    init_db()
+    with pytest.raises(OverrideError, match=f"subtitles.{key} cannot be overridden"):
+        save_overrides({"subtitles": {key: "/tmp/x"}})
+
+
+def test_subtitles_override_allows_the_tuning_keys(config_file: Path) -> None:
+    _reset()
+    from homeTheater.config import effective_config, save_overrides
+    from homeTheater.db import init_db
+
+    init_db()
+    save_overrides(
+        {
+            "subtitles": {
+                "languages": ["he"],
+                "max_searches_per_sweep": 5,
+                "hearing_impaired": True,
+            }
+        }
+    )
+    subs = effective_config().subtitles
+    assert subs.languages == ["he"] and subs.max_searches_per_sweep == 5 and subs.hearing_impaired
+
+
+def test_stored_override_that_is_no_longer_allowed_is_dropped_alone(config_file: Path) -> None:
+    """Saved before the allow-list existed. It must stop applying, and must not take
+    the owner's other overrides down with it."""
+
+    _reset()
+    import json
+
+    from homeTheater.config import effective_config
+    from homeTheater.config.runtime import SETTING_KEY
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Setting
+
+    init_db()
+    blob = {
+        "thresholds": {"min_imdb_rating": 6.5, "not_a_key": 1},
+        "subtitles": {"library_base_dir": "/tmp/evil", "max_searches_per_sweep": 9},
+        "schedule": {"enabled": True},
+    }
+    with session_scope() as s:
+        s.add(Setting(key=SETTING_KEY, value=json.dumps(blob)))
+
+    eff = effective_config()
+    assert eff.thresholds.min_imdb_rating == 6.5
+    assert eff.subtitles.max_searches_per_sweep == 9
+    assert eff.subtitles.library_base_dir is None
+    assert eff.schedule.enabled is False
+
+
+def test_effective_config_survives_an_unreadable_settings_table(config_file: Path) -> None:
+    _reset()
+    from homeTheater.config import effective_config, get_config
+
+    # No init_db: the table doesn't exist. Jobs must fall back, not fail.
+    assert effective_config() == get_config()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"features": 5},
+        {"acquisition": 5},
+        {"subtitles": "x"},
+        {"thresholds": 5},
+        {"discovery": {"trendng": True}},  # typo
+        {"thresholds": {"minimum": 1}},
+        {"thresholds": {"series": {"votes": 1}}},
+        {"acquisition": {"window": {"start": 1}}},
+        {"taste": {"wieght": 1}},
+    ],
+)
+def test_malformed_overrides_are_a_422_not_a_500_or_a_silent_drop(
+    config_file: Path, body: dict[str, object]
+) -> None:
+    _reset()
+    from homeTheater.api import create_app
+    from homeTheater.db import init_db
+
+    init_db()
+    with TestClient(create_app()) as client:
+        r = client.put("/api/settings", json=body, headers=TOKEN)
+    assert r.status_code == 422
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_blank_require_auth_means_off(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("DASHBOARD_REQUIRE_AUTH", value)
+    _reset()
+    from homeTheater.config import get_config
+
+    assert get_config().secrets.dashboard_require_auth is False
+
+
 def test_settings_api(config_file: Path) -> None:
     _reset()
     from homeTheater.api import create_app

@@ -5,18 +5,117 @@ real local directory (used in tests and for local media), and
 :class:`SMBFileSystem` walks the NAS over SMB2/3. Both yield the same
 :class:`FileEntry` records, and both skip NAS/OS junk (thumbnail trees, recycle
 bins, AppleDouble ``._*`` forks) that would otherwise pollute the catalog.
+
+A walk that could not read a directory must never look like a walk that found
+nothing there: the scanner prunes catalog rows for files it did not see. Both
+``os.walk`` and ``smbclient.walk`` ignore ``scandir`` errors unless given an
+``onerror`` callback, so both implementations pass :func:`_raise_walk_error`.
+
+The SMB side has to survive a Mac that sleeps between scans: a connection pooled
+before the sleep is dead, ``.local`` names stop resolving for a while, and a dropped
+session comes back without credentials unless every call carries them. So each
+walk owns a private connection pool, re-registers its session, dials a resolved
+address and retries transient failures from the top. Whatever finally fails still
+raises, so the scanner never reads a failed walk as deleted files.
 """
 
 from __future__ import annotations
 
+import errno
 import os
-from collections.abc import Iterator
+import socket
+import sys
+import threading
+import time
+import weakref
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
+
+from ..errors import redact_exc
+from ..logging_setup import get_logger
+
+log = get_logger(__name__)
 
 # Junk directories NAS appliances and OSes sprinkle around media trees
 # (Synology @eaDir thumbnails, recycle bins, ...). They never hold real media.
 IGNORED_DIRS = frozenset({"@eaDir", "@Recycle", "#recycle", "$RECYCLE.BIN"})
+
+
+# Waits between attempts at a walk that failed transiently (3 attempts in all).
+SMB_RETRY_DELAYS: tuple[float, ...] = (5.0, 20.0)
+# Closing a pool talks to the server, so it can hang on the wedge it's clearing.
+_POOL_RESET_TIMEOUT_SECONDS = 10.0
+
+# socket-level errors that say "not now" rather than "no": NAS asleep, Wi-Fi coming
+# back after a wake. Access denied or a missing root must fail on the first try.
+_TRANSIENT_ERRNOS = frozenset(
+    {
+        errno.ETIMEDOUT,
+        errno.ECONNRESET,
+        errno.ECONNREFUSED,
+        errno.ECONNABORTED,
+        errno.EPIPE,
+        errno.EHOSTUNREACH,
+        errno.EHOSTDOWN,
+        errno.ENETUNREACH,
+        errno.ENETDOWN,
+    }
+)
+# smbprotocol and pyspnego use plain exception classes for these; the message is
+# the only thing that tells them apart. All four are in the production failures.
+_TRANSIENT_MESSAGES = (
+    "socket was closed",  # SMBConnectionClosed
+    "failed to connect to",  # ValueError from smbprotocol.transport
+    "no username or password",  # SpnegoError: a session re-opened without creds
+    "credits",  # "Request requires 1 credits but only 0 credits are available"
+)
+
+# Last address each ``.local`` name resolved to, for when mDNS drops out mid-run.
+_last_resolved: dict[str, str] = {}
+_active_walks: weakref.WeakSet[SMBFileSystem] = weakref.WeakSet()
+
+
+def is_transient_smb_error(exc: BaseException) -> bool:
+    """True if retrying the walk on a fresh connection could plausibly work."""
+
+    if isinstance(exc, socket.gaierror | ConnectionError | TimeoutError):
+        return True
+    if isinstance(exc, OSError):
+        return exc.errno in _TRANSIENT_ERRNOS
+    text = str(exc).lower()
+    return any(marker in text for marker in _TRANSIENT_MESSAGES)
+
+
+def _bounded(action: Callable[[], None], timeout: float = _POOL_RESET_TIMEOUT_SECONDS) -> None:
+    """Run a pool reset on a daemon thread; give up waiting after ``timeout``."""
+
+    def run() -> None:
+        try:
+            action()
+        except Exception as exc:  # two resets racing, or a server already gone
+            log.warning("scan.smb_reset_failed", error=redact_exc(exc))
+
+    thread = threading.Thread(target=run, name="smb-pool-reset", daemon=True)
+    thread.start()
+    thread.join(timeout)
+
+
+def reset_smb_pool() -> None:
+    """Close the process-wide smbclient pool (the importer's SMB connections), so a
+    thread blocked on one of its sockets gets an error instead of hanging on."""
+
+    smbclient = sys.modules.get("smbclient")
+    if smbclient is not None:
+        _bounded(lambda: smbclient.reset_connection_cache(fail_on_error=False))
+
+
+def abort_active_walks() -> None:
+    """Stop every SMB walk in progress: the cooperative cancel for a scan that ran
+    past its deadline. Each one raises :class:`WalkAbortedError`, so it fails closed."""
+
+    for fs in list(_active_walks):
+        fs.abort()
 
 
 def is_ignored_dir(name: str) -> bool:
@@ -29,6 +128,16 @@ def is_hidden_file(name: str) -> bool:
     """Dotfiles, including macOS AppleDouble ``._*`` resource forks."""
 
     return name.startswith(".")
+
+
+class WalkAbortedError(RuntimeError):
+    """The walk was stopped before it finished. Its listing is not usable."""
+
+
+def _raise_walk_error(error: OSError) -> None:
+    """``onerror`` for a walk: abort it instead of silently dropping the subtree."""
+
+    raise error
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,7 +163,12 @@ class FileSystem(Protocol):
         ...
 
     def walk(self, root: str) -> Iterator[FileEntry]:
-        """Recursively yield files (not directories) under ``root``."""
+        """Recursively yield files (not directories) under ``root``.
+
+        Must raise if ``root`` or any directory below it cannot be read, including
+        a read that fails part-way through a listing: a partial result is taken as
+        proof that the unlisted files are gone.
+        """
         ...
 
 
@@ -73,7 +187,7 @@ class LocalFileSystem:
 
     def walk(self, root: str) -> Iterator[FileEntry]:
         start = self.resolve(root)
-        for dirpath, dirnames, filenames in os.walk(start):
+        for dirpath, dirnames, filenames in os.walk(start, onerror=_raise_walk_error):
             dirnames[:] = [d for d in dirnames if not is_ignored_dir(d)]
             for name in filenames:
                 if is_hidden_file(name):
@@ -89,64 +203,180 @@ class LocalFileSystem:
 class SMBFileSystem:
     """Walk the NAS over SMB via ``smbclient`` (from the ``smbprotocol`` package).
 
-    Paths are UNC (``\\\\host\\share\\root\\...``). Supports connecting by IP as a
-    fallback for flaky ``.local`` mDNS (plan §5.2). Read-only: never writes.
+    Paths are UNC. Two hosts are in play: :attr:`host` names the file, so it is in
+    every :attr:`FileEntry.path` and therefore in ``OwnedFile.path``, and must not
+    change; the connect host is where the socket goes (``connect_host`` if given,
+    else a fresh resolve of a ``.local`` name). Read-only: never writes.
     """
 
     def __init__(
-        self, host: str, share: str, username: str | None = None, password: str | None = None
+        self,
+        host: str,
+        share: str,
+        username: str | None = None,
+        password: str | None = None,
+        *,
+        connect_host: str | None = None,
+        walk_timeout: float | None = None,
+        retry_delays: tuple[float, ...] = SMB_RETRY_DELAYS,
     ) -> None:
         self.host = host
         self.share = share
         self._username = username
         self._password = password
-        self._registered = False
+        self._connect_host = connect_host
+        self._walk_timeout = walk_timeout
+        self._retry_delays = retry_delays
+        self._aborted = threading.Event()
+        # Private, so resetting it per walk can't cut off an import that is using
+        # smbclient's global pool on another thread.
+        self._pool: dict[str, Any] = {}
 
-    def _ensure_session(self) -> None:
-        if self._registered:
-            return
-        import smbclient  # imported lazily so tests don't require smbprotocol
+    def _session_args(self) -> dict[str, Any]:
+        """Passed to EVERY smbclient call. A call that finds its connection gone
+        opens a new one from these arguments alone; without them a dropped session
+        comes back as ``SpnegoError: No username or password``."""
 
         if self._username and self._password:
             # Authenticated session: keep SMB signing on (the secure default).
-            smbclient.register_session(self.host, username=self._username, password=self._password)
-        else:
-            # Guest / password-less share — the same access Kodi/Finder use for a
-            # public NAS share. Guest sessions have no signing key, so many NAS
-            # (e.g. WD MyCloud) reject them unless signing and secure-negotiate
-            # are relaxed. Safe here: there are no credentials to protect and the
-            # walk is read-only over a LAN share.
-            smbclient.ClientConfig(require_secure_negotiate=False)
-            smbclient.register_session(
-                self.host,
-                username=self._username or "guest",
-                password=self._password or "",
-                require_signing=False,
-            )
-        self._registered = True
+            return {
+                "username": self._username,
+                "password": self._password,
+                "connection_cache": self._pool,
+            }
+        # Guest / password-less share — the same access Kodi/Finder use for a public
+        # NAS share. Guest sessions have no signing key, so many NAS (e.g. WD
+        # MyCloud) reject them unless signing and secure-negotiate are relaxed. Safe
+        # here: there are no credentials to protect and the walk is read-only.
+        return {
+            "username": self._username or "guest",
+            "password": self._password or "",
+            "require_signing": False,
+            "connection_cache": self._pool,
+        }
 
-    def _unc(self, *parts: str) -> str:
+    def _ensure_session(self, server: str) -> None:
+        import smbclient  # imported lazily so tests don't require smbprotocol
+
+        args = self._session_args()
+        if "require_signing" in args:
+            smbclient.ClientConfig(require_secure_negotiate=False)
+        smbclient.register_session(server, **args)
+
+    def _reset_pool(self) -> None:
+        import smbclient
+
+        pool = self._pool
+        _bounded(lambda: smbclient.reset_connection_cache(False, connection_cache=pool))
+
+    def _resolve_connect_host(self) -> str:
+        """The address to dial. Only ``.local`` names are resolved here: mDNS is
+        what fails after a wake, and unicast names resolve fine inside smbclient."""
+
+        if self._connect_host:
+            return self._connect_host
+        host = self.host
+        if not host.lower().endswith(".local"):
+            return host
+        try:
+            infos = socket.getaddrinfo(host, 445, socket.AF_INET, socket.SOCK_STREAM)
+            address = str(infos[0][4][0])
+        except socket.gaierror:
+            known = _last_resolved.get(host.lower())
+            if known is None:
+                raise
+            log.warning("scan.smb_dns_fallback", host=host, address=known)
+            return known
+        _last_resolved[host.lower()] = address
+        return address
+
+    def _unc(self, *parts: str, server: str | None = None) -> str:
         cleaned = [p.strip("\\/").replace("/", "\\") for p in parts if p]
-        return "\\\\" + "\\".join([self.host, self.share, *cleaned])
+        return "\\\\" + "\\".join([server or self.host, self.share, *cleaned])
 
     def resolve(self, root: str) -> str:
         return self._unc(root)
 
-    def walk(self, root: str) -> Iterator[FileEntry]:
+    def abort(self) -> None:
+        """Stop this filesystem's walks from any thread. Closing the pool is what
+        reaches a walk blocked inside a socket read; the flag stops it retrying."""
+
+        self._aborted.set()
+        self._reset_pool()
+
+    def _check_aborted(self) -> None:
+        if self._aborted.is_set():
+            raise WalkAbortedError(f"SMB walk of {self.share} was aborted")
+
+    def _walk_once(self, root: str) -> list[FileEntry]:
+        """One complete pass on a fresh connection, listed in full before anything
+        is yielded so a retry can't hand the scanner a file twice."""
+
         import smbclient
 
-        self._ensure_session()
-        start = self.resolve(root)
-        for dirpath, dirnames, filenames in smbclient.walk(start):
+        self._reset_pool()
+        server = self._resolve_connect_host()
+        self._ensure_session(server)
+        args = self._session_args()
+        start = self._unc(root, server=server)
+        identity = self.resolve(root)
+        entries: list[FileEntry] = []
+        for dirpath, dirnames, filenames in smbclient.walk(
+            start, onerror=_raise_walk_error, **args
+        ):
+            self._check_aborted()
             # smbclient.walk mirrors os.walk: pruning dirnames in place skips
             # those subtrees (saves SMB round-trips on @eaDir thumbnail forests).
             dirnames[:] = [d for d in dirnames if not is_ignored_dir(d)]
+            parent = identity + dirpath[len(start) :]
             for name in filenames:
                 if is_hidden_file(name):
                     continue
                 full = dirpath.rstrip("\\") + "\\" + name
                 try:
-                    size = smbclient.stat(full).st_size
+                    size = smbclient.stat(full, **args).st_size
                 except OSError:
                     size = 0
-                yield FileEntry(path=full, name=name, parent=dirpath, size=size)
+                entries.append(
+                    FileEntry(
+                        path=parent.rstrip("\\") + "\\" + name,
+                        name=name,
+                        parent=parent,
+                        size=size,
+                    )
+                )
+        return entries
+
+    def _walk_with_retries(self, root: str) -> list[FileEntry]:
+        delays = iter(self._retry_delays)
+        while True:
+            self._check_aborted()
+            try:
+                return self._walk_once(root)
+            except Exception as exc:
+                self._check_aborted()  # the abort is the story, not the closed socket
+                delay = next(delays, None)
+                if delay is None or not is_transient_smb_error(exc):
+                    raise
+                log.warning("scan.smb_retry", delay=delay, error_type=type(exc).__name__)
+                if self._aborted.wait(delay):
+                    self._check_aborted()
+
+    def walk(self, root: str) -> Iterator[FileEntry]:
+        _active_walks.add(self)
+        watchdog: threading.Timer | None = None
+        if self._walk_timeout:
+            # A stuck socket read never returns to check a deadline in a loop.
+            watchdog = threading.Timer(self._walk_timeout, self.abort)
+            watchdog.daemon = True
+            watchdog.start()
+        started = time.time()
+        try:
+            entries = self._walk_with_retries(root)
+        finally:
+            if watchdog is not None:
+                watchdog.cancel()
+            _active_walks.discard(self)
+            self._reset_pool()
+        log.info("scan.smb_walked", files=len(entries), seconds=round(time.time() - started, 1))
+        yield from entries

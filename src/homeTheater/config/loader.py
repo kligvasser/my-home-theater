@@ -10,6 +10,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
+from ..errors import redact_exc
 from .settings import AppConfig, Secrets
 
 DEFAULT_CONFIG_PATH = "config.yaml"
@@ -27,7 +28,7 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     try:
         data = yaml.safe_load(path.read_text()) or {}
     except yaml.YAMLError as exc:  # pragma: no cover - passthrough of parser message
-        raise ConfigError(f"Could not parse YAML at {path}: {exc}") from exc
+        raise ConfigError(f"Could not parse YAML at {path}: {redact_exc(exc)}") from exc
     if not isinstance(data, dict):
         raise ConfigError(f"Config at {path} must be a mapping, got {type(data).__name__}.")
     return data
@@ -49,7 +50,7 @@ def load_config(config_path: str | os.PathLike[str] | None = None) -> AppConfig:
         secrets = Secrets()
         config = AppConfig(secrets=secrets, **raw)
     except ValidationError as exc:
-        raise ConfigError(f"Invalid configuration:\n{exc}") from exc
+        raise ConfigError(f"Invalid configuration:\n{redact_exc(exc)}") from exc
     return config
 
 

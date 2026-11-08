@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import exists, select
+from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.orm import Session
 
 from ..config import AppConfig
@@ -37,7 +38,7 @@ from ..metadata.omdb import OMDbClient
 from ..metadata.service import apply_tmdb_details
 from ..metadata.tmdb import TMDbClient
 from .filters import evaluate, score
-from .sources import Discovered, build_sources
+from .sources import CandidateSource, Discovered, build_sources
 
 log = get_logger(__name__)
 
@@ -54,8 +55,23 @@ LIVE_STATUSES = (
 )
 
 # A rejected title stays rejected: trending will resurface it forever otherwise,
-# and the rejection is a training label we must not bury under duplicates.
-BLOCKING_STATUSES = (*LIVE_STATUSES, CandidateStatus.rejected)
+# and the rejection is a training label we must not bury under duplicates. A
+# cancelled one (you stopped it, or unfollowed the show) is no label, but it isn't
+# an invitation to suggest the same thing again either.
+BLOCKING_STATUSES = (*LIVE_STATUSES, CandidateStatus.rejected, CandidateStatus.cancelled)
+
+# A whole-title candidate still being worked on covers every season of the show.
+IN_FLIGHT = (
+    CandidateStatus.new,
+    CandidateStatus.approved,
+    CandidateStatus.queued,
+    CandidateStatus.downloading,
+)
+
+# A failed candidate is retried by reusing its row, after 1, 2, 4... days.
+RETRY_BASE_DAYS = 1
+RETRY_MAX_DAYS = 14
+_RETRIES_KEY = "discovery_retries"
 
 _Key = tuple[TitleKind, int]
 
@@ -68,8 +84,11 @@ class DiscoveryStats:
     owned_skipped: int = 0
     live_skipped: int = 0
     rejected_skipped: int = 0
+    backoff_skipped: int = 0
+    sources_failed: int = 0
     considered: int = 0
     created: int = 0
+    retried: int = 0
     filtered: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -106,7 +125,8 @@ def _owned_live_rejected() -> tuple[set[_Key], set[_Key], set[_Key]]:
         )
         rejected = _ids(
             exists().where(
-                (Candidate.title_id == Title.id) & (Candidate.status == CandidateStatus.rejected)
+                (Candidate.title_id == Title.id)
+                & (Candidate.status.in_((CandidateStatus.rejected, CandidateStatus.cancelled)))
             )
         )
         return owned, live, rejected
@@ -145,20 +165,58 @@ def _upsert_title(session: Session, kind: TitleKind, t: TmdbTitle) -> Title:
     return title
 
 
-def _blocked_in_db(session: Session, title_id: int, season: int | None = None) -> str | None:
+def retry_due(failed: Candidate, now: datetime | None = None) -> bool:
+    """Has a failed candidate waited out its backoff?"""
+
+    retries = int((failed.features or {}).get(_RETRIES_KEY, 0))
+    days = min(RETRY_BASE_DAYS * 2**retries, RETRY_MAX_DAYS)
+    failed_at = failed.updated_at
+    if failed_at.tzinfo is None:  # SQLite hands back naive UTC
+        failed_at = failed_at.replace(tzinfo=UTC)
+    return (now or utcnow()) - failed_at >= timedelta(days=days)
+
+
+def _latest_failed(session: Session, title_id: int, season: int | None) -> Candidate | None:
+    """The newest failed row for (title, season). Older ones are left as history."""
+
+    return session.scalar(
+        select(Candidate)
+        .where(
+            Candidate.title_id == title_id,
+            Candidate.status == CandidateStatus.failed,
+            Candidate.season.is_(None) if season is None else Candidate.season == season,
+        )
+        .order_by(Candidate.id.desc())
+    )
+
+
+def _blocked_in_db(
+    session: Session, title_id: int, season: int | None = None, *, top_up: bool = False
+) -> str | None:
     """Re-check owned/live/rejected inside the write transaction (TOCTOU guard).
 
     Season-scoped candidates check per (title, season): the title itself is
     owned by definition, and rejecting S3 must not block a future S4 (each
-    season decision is its own training label).
+    season decision is its own training label). A whole-title candidate still in
+    flight covers the season too. ``top_up`` is a partly owned season: owning some
+    of it, or an import that finished before these episodes aired, is the point.
     """
 
-    cand_where = [Candidate.title_id == title_id, Candidate.status.in_(BLOCKING_STATUSES)]
+    statuses = tuple(s for s in BLOCKING_STATUSES if not (top_up and s is CandidateStatus.imported))
+    cand_where = [Candidate.title_id == title_id, Candidate.status.in_(statuses)]
     if season is not None:
-        cand_where.append(Candidate.season == season)
+        cand_where = [
+            Candidate.title_id == title_id,
+            or_(
+                and_(Candidate.season == season, Candidate.status.in_(statuses)),
+                and_(Candidate.season.is_(None), Candidate.status.in_(IN_FLIGHT)),
+            ),
+        ]
     status = session.scalar(select(Candidate.status).where(*cand_where))
     if status is not None:
         return f"candidate already {status.value}"
+    if top_up:
+        return None
     owned_where = [OwnedFile.title_id == title_id]
     if season is not None:
         owned_where.append(OwnedFile.season == season)
@@ -168,114 +226,174 @@ def _blocked_in_db(session: Session, title_id: int, season: int | None = None) -
     return None
 
 
-def _persist(enriched: list[_Enriched], config: AppConfig, stats: DiscoveryStats) -> None:
-    excluded = config.discovery.excluded_genres
-    auto = config.features.auto_approve
+class _Scorers:
+    """Taste index + preference model. Both only improve the ranking, so a broken
+    one means ranking without it, never a failed run."""
+
+    def __init__(self, config: AppConfig) -> None:
+        self._config = config
+        self._indexes: dict[TitleKind, Any] = {}
+
+    def taste_index(self, kind: TitleKind) -> Any:
+        """Lazy per-kind index over the owned library (content similarity — sklearn
+        import deferred so discovery without taste stays light)."""
+
+        taste = self._config.taste
+        if kind not in self._indexes:
+            self._indexes[kind] = None
+            if taste.enabled:
+                try:
+                    from ..taste import build_index
+
+                    self._indexes[kind] = build_index(kind, min_library=taste.min_library)
+                except Exception as exc:
+                    log.warning("discovery.taste_failed", kind=kind, error=redact_exc(exc))
+        return self._indexes[kind]
+
+    def p_like(self, feats: dict[str, Any]) -> float | None:
+        """P(you'd approve this) from the trained model, if a usable one exists."""
+
+        from ..preferences import predict
+
+        return predict(self._config, feats)
+
+
+def _persist_one(
+    item: _Enriched, config: AppConfig, scorers: _Scorers, stats: DiscoveryStats
+) -> None:
+    """Write one discovered item in its own transaction."""
+
+    details = item.details
+    assert details is not None
     taste_cfg = config.taste
-
-    # Lazy per-kind taste index over the owned library (content similarity —
-    # sklearn import deferred so discovery without taste stays light).
-    indexes: dict[TitleKind, Any] = {}
-
-    def _taste_index(kind: TitleKind) -> Any:
-        if kind not in indexes:
-            if taste_cfg.enabled:
-                from ..taste import build_index
-
-                indexes[kind] = build_index(kind, min_library=taste_cfg.min_library)
-            else:
-                indexes[kind] = None
-        return indexes[kind]
+    disc = item.disc
+    auto = config.features.auto_approve or disc.auto_grab
+    imdb_rating = item.ratings.imdb_rating if item.ratings else None
+    imdb_votes = item.ratings.imdb_votes if item.ratings else None
 
     with session_scope() as session:
-        for item in enriched:
-            if item.error or item.details is None:
-                if item.error:
-                    stats.errors.append(f"{item.disc.tmdb.title}: {item.error}")
-                continue
+        title = _upsert_title(session, disc.kind, details)
+        if imdb_rating is not None:
+            title.imdb_rating = imdb_rating
+        if imdb_votes is not None:
+            title.imdb_votes = imdb_votes
 
-            details = item.details
-            imdb_rating = item.ratings.imdb_rating if item.ratings else None
-            imdb_votes = item.ratings.imdb_votes if item.ratings else None
+        blocked = _blocked_in_db(session, title.id, disc.season, top_up=disc.top_up)
+        if blocked is not None:
+            stats.live_skipped += 1
+            return
 
-            title = _upsert_title(session, item.disc.kind, details)
-            if imdb_rating is not None:
-                title.imdb_rating = imdb_rating
-            if imdb_votes is not None:
-                title.imdb_votes = imdb_votes
+        failed = _latest_failed(session, title.id, disc.season)
+        if failed is not None and not retry_due(failed):
+            stats.backoff_skipped += 1
+            return
 
-            blocked = _blocked_in_db(session, title.id, item.disc.season)
-            if blocked is not None:
-                stats.live_skipped += 1
-                continue
-
-            if item.disc.skip_filter:
-                # Watchlist / new season: the human already chose it — no threshold gate.
-                base_reason = item.disc.reason or "on your watchlist"
-            else:
-                outcome = evaluate(
-                    imdb_rating=imdb_rating,
-                    imdb_votes=imdb_votes,
-                    tmdb_rating=details.tmdb_rating,
-                    tmdb_votes=details.tmdb_votes,
-                    genres=details.genres,
-                    thresholds=config.thresholds.for_kind(item.disc.kind.value),
-                    excluded_genres=excluded,
-                )
-                if not outcome.passed:
-                    stats.filtered += 1
-                    continue
-                base_reason = outcome.reason
-
-            feats = extract_features(title)
-            quality = score(
-                imdb_rating,
-                imdb_votes,
-                details.popularity,
+        if disc.skip_filter:
+            # Watchlist / new season: the human already chose it — no threshold gate.
+            base_reason = disc.reason or "on your watchlist"
+        else:
+            outcome = evaluate(
+                imdb_rating=imdb_rating,
+                imdb_votes=imdb_votes,
                 tmdb_rating=details.tmdb_rating,
                 tmdb_votes=details.tmdb_votes,
+                genres=details.genres,
+                thresholds=config.thresholds.for_kind(disc.kind.value),
+                excluded_genres=config.discovery.excluded_genres,
             )
-            reason = f"{base_reason}; via {item.disc.source}"
+            if not outcome.passed:
+                stats.filtered += 1
+                return
+            base_reason = outcome.reason
 
-            index = _taste_index(item.disc.kind)
-            if index is not None:
-                sim = index.similarity(feats, k=taste_cfg.neighbors)
-                feats["taste"] = {"score": sim.score, "like": sim.like}
-                quality = round(quality + taste_cfg.weight * 10 * sim.score, 3)
-                if sim.like:
-                    reason += f"; taste {sim.score:.2f} (like: {', '.join(sim.like[:3])})"
+        feats = extract_features(title)
+        quality = score(
+            imdb_rating,
+            imdb_votes,
+            details.popularity,
+            tmdb_rating=details.tmdb_rating,
+            tmdb_votes=details.tmdb_votes,
+        )
+        reason = f"{base_reason}; via {disc.source}"
 
-            # Trained preference model (if any): P(you'd approve this).
-            from ..preferences import predict
+        index = scorers.taste_index(disc.kind)
+        if index is not None:
+            sim = index.similarity(feats, k=taste_cfg.neighbors)
+            feats["taste"] = {"score": sim.score, "like": sim.like}
+            quality = round(quality + taste_cfg.weight * 10 * sim.score, 3)
+            if sim.like:
+                reason += f"; taste {sim.score:.2f} (like: {', '.join(sim.like[:3])})"
 
-            p_like = predict(config, feats)
-            if p_like is not None:
-                feats["model"] = {"p_like": p_like}
-                quality = round(quality + taste_cfg.model_weight * 10 * p_like, 3)
-                reason += f"; model {p_like:.0%}"
+        p_like = scorers.p_like(feats)
+        if p_like is not None:
+            feats["model"] = {"p_like": p_like}
+            quality = round(quality + taste_cfg.model_weight * 10 * p_like, 3)
+            reason += f"; model {p_like:.0%}"
 
-            if item.disc.season is not None:
-                feats["season"] = item.disc.season
-                if item.disc.season_episodes:
-                    feats["season_episodes"] = item.disc.season_episodes
+        if disc.season is not None:
+            feats["season"] = disc.season
+            if disc.season_episodes:
+                feats["season_episodes"] = disc.season_episodes
+        if auto:
+            feats["auto"] = True  # approved by rule: no label for the preference model
 
-            session.add(
-                Candidate(
-                    title_id=title.id,
-                    season=item.disc.season,
-                    source=item.disc.origin,
-                    status=(
-                        CandidateStatus.approved
-                        if (auto or item.disc.auto_grab)
-                        else CandidateStatus.new
-                    ),
-                    reason=reason,
-                    score=quality,
-                    features=feats,
-                    decided_at=utcnow() if (auto or item.disc.auto_grab) else None,
-                )
+        status = CandidateStatus.approved if auto else CandidateStatus.new
+        decided_at = utcnow() if auto else None
+        if failed is not None:
+            retries = int((failed.features or {}).get(_RETRIES_KEY, 0)) + 1
+            feats[_RETRIES_KEY] = retries
+            failed.status = status
+            failed.reason = reason
+            failed.score = quality
+            failed.features = feats
+            failed.decided_at = decided_at
+            stats.retried += 1
+            return
+
+        session.add(
+            Candidate(
+                title_id=title.id,
+                season=disc.season,
+                source=disc.origin,
+                status=status,
+                reason=reason,
+                score=quality,
+                features=feats,
+                decided_at=decided_at,
             )
-            stats.created += 1
+        )
+        stats.created += 1
+
+
+def _persist(enriched: list[_Enriched], config: AppConfig, stats: DiscoveryStats) -> None:
+    scorers = _Scorers(config)
+    for item in enriched:
+        if item.error or item.details is None:
+            if item.error:
+                stats.errors.append(f"{item.disc.tmdb.title}: {item.error}")
+            continue
+        try:
+            _persist_one(item, config, scorers, stats)
+        except Exception as exc:  # one bad row must not lose the others
+            log.warning(
+                "discovery.persist_failed", title=item.disc.tmdb.title, error=redact_exc(exc)
+            )
+            stats.errors.append(f"{item.disc.tmdb.title}: {redact_exc(exc)}")
+
+
+async def _fetch_source(
+    source: CandidateSource, tmdb: TMDbClient, limit: int, stats: DiscoveryStats
+) -> list[Discovered]:
+    """One source's items. A source that fails costs only its own items."""
+
+    try:
+        return await source.fetch(tmdb, limit)
+    except Exception as exc:
+        error = redact_exc(exc)
+        log.warning("discovery.source_failed", source=source.name, error=error)
+        stats.errors.append(f"{source.name}: {error}")
+        stats.sources_failed += 1
+        return []
 
 
 async def run_discovery(config: AppConfig) -> DiscoveryStats:
@@ -335,7 +453,10 @@ async def _run_discovery(config: AppConfig) -> DiscoveryStats:
                     )
 
                 fetched_lists = await asyncio.gather(
-                    *(s.fetch(tmdb, config.discovery.max_per_source) for s in sources)
+                    *(
+                        _fetch_source(s, tmdb, config.discovery.max_per_source, stats)
+                        for s in sources
+                    )
                 )
                 discovered = [d for lst in fetched_lists for d in lst]
                 stats.fetched = len(discovered)
@@ -367,6 +488,10 @@ async def _run_discovery(config: AppConfig) -> DiscoveryStats:
 
                 enriched = await asyncio.gather(*(_enrich(d, tmdb, omdb, sem) for d in to_consider))
             _persist(list(enriched), config, stats)
+            if stats.sources_failed == len(sources):
+                status = RunStatus.failed
+            elif stats.errors:
+                status = RunStatus.partial
         log.info("discovery.done", **stats.as_dict())
     except Exception as exc:
         status = RunStatus.failed
@@ -382,5 +507,5 @@ async def _run_discovery(config: AppConfig) -> DiscoveryStats:
         clear_run()
 
     if status is RunStatus.failed:
-        raise RuntimeError(f"Discovery failed: {stats.errors}")
+        raise RuntimeError(f"Discovery failed: {stats.errors[:3]}")
     return stats

@@ -9,12 +9,77 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
+import traceback
+from collections.abc import MutableMapping
 from typing import Any
 
 import structlog
 
+from .errors import redact, redact_exc
+
 _configured = False
+_record_factory_installed = False
+
+# An event field whose NAME says secret is dropped whatever its value looks like.
+_SECRET_FIELD_RE = re.compile(r"(?i)(token|secret|password|api_?key)$")
+
+
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, BaseException):
+        return redact_exc(value)
+    if isinstance(value, dict):
+        return {k: _redact_value(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return type(value)(_redact_value(v) for v in value)
+    return value
+
+
+def redact_event(
+    _logger: Any, _method: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
+    """Structlog processor; runs after ``format_exc_info`` so the rendered
+    traceback, whose last line is the exception message, is covered too."""
+
+    for key, value in event_dict.items():
+        if _SECRET_FIELD_RE.search(key) and value is not None:
+            event_dict[key] = "REDACTED"
+        else:
+            event_dict[key] = _redact_value(value)
+    return event_dict
+
+
+def _install_record_redaction() -> None:
+    """Redact stdlib log records as they are created.
+
+    A record factory rather than a filter because uvicorn installs its own
+    handlers and loggers: this is the one hook all of them pass through. It covers
+    "Exception in ASGI application" tracebacks and access-log lines, where a
+    webhook's ``?token=`` would otherwise be written out. ``args`` keeps its shape
+    because uvicorn's access formatter unpacks it.
+    """
+
+    global _record_factory_installed
+    if _record_factory_installed:
+        return
+    _record_factory_installed = True
+    make_record = logging.getLogRecordFactory()
+
+    def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = make_record(*args, **kwargs)
+        if isinstance(record.msg, str):
+            record.msg = redact(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(_redact_value(a) for a in record.args)
+        if record.exc_info and record.exc_info[1] is not None:
+            record.exc_text = redact("".join(traceback.format_exception(*record.exc_info)))
+            record.exc_info = None
+        return record
+
+    logging.setLogRecordFactory(factory)
 
 
 def ensure_logging_configured() -> None:
@@ -38,6 +103,7 @@ def configure_logging(level: str = "INFO", json_logs: bool = False) -> None:
 
     global _configured
     _configured = True
+    _install_record_redaction()
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,
@@ -55,6 +121,7 @@ def configure_logging(level: str = "INFO", json_logs: bool = False) -> None:
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
+        redact_event,
     ]
     renderer: Any = (
         structlog.processors.JSONRenderer()

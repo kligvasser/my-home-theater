@@ -8,7 +8,7 @@ import httpx
 import pytest
 import respx
 
-from homeTheater.db.models import TitleKind
+from homeTheater.db.models import RunStatus, TitleKind
 
 BZ = "http://bazarr.local"
 
@@ -119,3 +119,80 @@ async def test_sweep_requires_bazarr_config(
     init_db()
     with pytest.raises(ValueError, match="BAZARR_URL"):
         await sweep_missing(get_config())
+
+
+async def _sweep_with_bazarr(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[object, object]:
+    _env(monkeypatch)
+    _reset()
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db
+    from homeTheater.subtitles import sweep_missing
+
+    init_db()
+    respx.get(f"{BZ}/api/movies/wanted").mock(return_value=httpx.Response(200, json=WANTED_MOVIES))
+    respx.get(f"{BZ}/api/episodes/wanted").mock(
+        return_value=httpx.Response(200, json=WANTED_EPISODES)
+    )
+    return get_config(), sweep_missing
+
+
+def _last_status() -> RunStatus:
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import JobRun
+
+    with session_scope() as s:
+        return s.query(JobRun).order_by(JobRun.id.desc()).first().status
+
+
+@respx.mock
+async def test_bazarr_all_searches_failing_is_failed(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, sweep = await _sweep_with_bazarr(config_file, monkeypatch)
+    respx.patch(f"{BZ}/api/movies").mock(return_value=httpx.Response(500))
+    respx.patch(f"{BZ}/api/episodes").mock(return_value=httpx.Response(500))
+
+    with pytest.raises(RuntimeError, match="sweep failed"):
+        await sweep(config)  # type: ignore[operator]
+
+    assert _last_status() is RunStatus.failed
+
+
+@respx.mock
+async def test_bazarr_some_searches_failing_is_partial(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, sweep = await _sweep_with_bazarr(config_file, monkeypatch)
+    respx.patch(f"{BZ}/api/movies").mock(return_value=httpx.Response(204))
+    respx.patch(f"{BZ}/api/episodes").mock(return_value=httpx.Response(500))
+
+    await sweep(config)  # type: ignore[operator]
+
+    assert _last_status() is RunStatus.partial
+
+
+async def test_bazarr_cancelled_sweep_is_failed(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from homeTheater.subtitles.bazarr import BazarrClient
+
+    _env(monkeypatch)
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db
+    from homeTheater.subtitles import sweep_missing
+
+    init_db()
+
+    async def hang(_self: object) -> list[object]:
+        await asyncio.sleep(3600)
+        return []
+
+    monkeypatch.setattr(BazarrClient, "wanted_movies", hang)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(sweep_missing(get_config()), 0.2)
+
+    assert _last_status() is RunStatus.failed

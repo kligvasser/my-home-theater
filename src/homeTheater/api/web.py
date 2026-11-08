@@ -10,7 +10,7 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse
 
 from .. import __version__
-from ..config import get_config, load_overrides
+from ..config import effective_config, get_config, load_overrides
 from ..dashboard import (
     CANDIDATE_SORTS,
     TITLE_SORTS,
@@ -25,15 +25,19 @@ from ..dashboard import (
 )
 from ..dashboard.queries import CANDIDATE_PAGE_SIZE, PAGE_SIZE, TITLE_DIRS, default_dir
 from ..db.models import CandidateStatus
+from ..errors import redact_exc
+from ..logging_setup import get_logger
+from ..trash import list_trash
+from ..upgrades import list_proposals
 from .templates import templates
+
+log = get_logger(__name__)
 
 router = APIRouter(include_in_schema=False)
 
 
 @router.get("/", response_class=HTMLResponse)
 def dashboard(request: Request) -> HTMLResponse:
-    from ..config import effective_config
-
     return templates.TemplateResponse(
         request,
         "dashboard.html",
@@ -77,7 +81,7 @@ def library(
             "dir": effective_dir,
             "page": page,
             "pages": pages,
-            "sub_langs": get_config().subtitles.languages,
+            "sub_langs": effective_config().subtitles.languages,
             "active": "library",
             "version": __version__,
         },
@@ -101,14 +105,20 @@ def candidates(
         sort = "score"
     if kind not in ("movie", "series"):
         kind = None
-    rows, total = list_candidates(status=shown, kind=kind, sort=sort, page=page)
+    # Proposed upgrades get their own panel: with no score they'd sort to the last page.
+    pending = shown is CandidateStatus.new
+    rows, total = list_candidates(
+        status=shown, kind=kind, sort=sort, page=page, hide_upgrades=pending
+    )
     pages = max(1, ceil(total / CANDIDATE_PAGE_SIZE))
     return templates.TemplateResponse(
         request,
         "candidates.html",
         {
             "candidates": rows,
+            "upgrades": list_proposals() if pending else [],
             "counts": candidate_counts(),
+            "statuses": [str(st) for st in CandidateStatus],
             "followed": list_followed(),
             "status": str(shown),
             "kind": kind or "",
@@ -135,8 +145,6 @@ def activity_page(request: Request) -> HTMLResponse:
 
 @router.get("/subtitles", response_class=HTMLResponse)
 def subtitles(request: Request, lang: str | None = None) -> HTMLResponse:
-    from ..config import effective_config
-
     langs = effective_config().subtitles.languages or ["he"]
     shown = lang if lang in langs else langs[0]
     stats = get_stats(sub_langs=langs)
@@ -157,20 +165,28 @@ def subtitles(request: Request, lang: str | None = None) -> HTMLResponse:
 async def status_page(request: Request) -> HTMLResponse:
     from ..dashboard import candidate_counts, get_stats
     from ..health import check_all
+    from ..scheduler import job_freshness
 
-    cfg = get_config()
+    cfg = await asyncio.to_thread(effective_config)
     # sync SQLAlchemy — keep off the event loop.
     runs = await asyncio.to_thread(recent_runs, 20)
+    jobs = await asyncio.to_thread(job_freshness, cfg)
     counts = await asyncio.to_thread(candidate_counts)
     stats = await asyncio.to_thread(get_stats, cfg.subtitles.primary, cfg.subtitles.languages)
     window = cfg.acquisition.window
+    trash_items = await asyncio.to_thread(list_trash, cfg)
     return templates.TemplateResponse(
         request,
         "status.html",
         {
+            "trash_items": trash_items,
+            "trash_enabled": cfg.trash.enabled,
+            "trash_days": cfg.trash.retention_days,
             "providers": await check_all(cfg),
             "runs": runs,
+            "jobs": jobs,
             "counts": counts,
+            "statuses": [str(st) for st in CandidateStatus],
             "stats": stats,
             "acq_backend": cfg.acquisition.backend,
             "sub_backend": cfg.subtitles.backend,
@@ -185,12 +201,23 @@ async def status_page(request: Request) -> HTMLResponse:
     )
 
 
+def _parse_decade(value: str | None) -> int | None:
+    """``decade=`` from the filter form: "Any decade" submits it empty, so the
+    parameter can't be typed as an int. Anything unusable just means no filter."""
+
+    try:
+        decade = int(value or "")
+    except ValueError:
+        return None
+    return decade if 1900 <= decade <= 2030 else None
+
+
 @router.get("/gaps", response_class=HTMLResponse)
 async def gaps(
     request: Request,
     kind: str | None = None,
     min_rating: float = Query(0, ge=0, le=10),
-    decade: int | None = Query(None, ge=1900, le=2030),
+    decade: str | None = None,
     q: str | None = None,
 ) -> HTMLResponse:
     """'Why not owned?' — top-rated titles above your thresholds that you don't
@@ -198,13 +225,14 @@ async def gaps(
 
     import httpx
 
-    from ..config import effective_config
     from ..db.models import TitleKind
     from ..discovery.filters import evaluate
     from ..discovery.service import _owned_live_rejected
+    from ..metadata.dto import TmdbTitle
     from ..metadata.tmdb import TMDbClient
 
-    cfg = effective_config()
+    cfg = await asyncio.to_thread(effective_config)
+    start_decade = _parse_decade(decade)
     kinds = (
         [TitleKind(kind)]
         if kind in (TitleKind.movie, TitleKind.series)
@@ -212,6 +240,7 @@ async def gaps(
     )
     rows: list[dict[str, object]] = []
     error: str | None = None
+    status_code = 200
     if cfg.secrets.tmdb_api_key is None:
         error = "TMDB_API_KEY is not configured."
     else:
@@ -225,8 +254,17 @@ async def gaps(
                 language=cfg.metadata.language,
                 cache_days=cfg.metadata.cache_days,
             )
-            for k in kinds:
-                for t in await tmdb.top_rated(k, limit=60):
+            lists: list[tuple[TitleKind, list[TmdbTitle]]] = []
+            try:
+                for k in kinds:
+                    lists.append((k, await tmdb.top_rated(k, limit=60)))
+            except (httpx.HTTPError, ValueError) as exc:
+                log.warning("gaps.tmdb_failed", error=redact_exc(exc))
+                error = "TMDb is unavailable right now. Try again in a few minutes."
+                status_code = 502
+                lists = []
+            for k, titles in lists:
+                for t in titles:
                     if (k, t.tmdb_id) in taken:
                         continue
                     outcome = evaluate(
@@ -242,7 +280,7 @@ async def gaps(
                         continue
                     if min_rating and (t.tmdb_rating or 0) < min_rating:
                         continue
-                    if decade and not (t.year and decade <= t.year < decade + 10):
+                    if start_decade and not (t.year and start_decade <= t.year < start_decade + 10):
                         continue
                     if needle and needle not in t.title.lower():
                         continue
@@ -275,12 +313,13 @@ async def gaps(
             "error": error,
             "kind": kind if kind in ("movie", "series") else "",
             "min_rating": min_rating,
-            "decade": decade,
+            "decade": start_decade,
             "decades": decades,
             "q": q or "",
             "active": "gaps",
             "version": __version__,
         },
+        status_code=status_code,
     )
 
 
@@ -316,8 +355,9 @@ def insights(request: Request) -> HTMLResponse:
     from ..preferences import model_info
     from ..taste import build_index
 
-    model = model_info(get_config())
-    cfg = get_config().taste
+    effective = effective_config()
+    model = model_info(effective)
+    cfg = effective.taste
     sections = []
     for kind_label, kind in (("Movies", "movie"), ("Series", "series")):
         from ..db.models import TitleKind

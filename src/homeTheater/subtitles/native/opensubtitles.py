@@ -16,14 +16,24 @@ import httpx
 
 from ...db.models import TitleKind
 from ...logging_setup import get_logger
-from .base import SubtitleQuery, SubtitleResult
+from .base import (
+    SourceAuthError,
+    SourceQuotaError,
+    SubtitleQuery,
+    SubtitleResult,
+    SubtitleSourceError,
+    raise_for_http,
+)
+from .payload import fetch_capped, unpack_subtitle
 
 log = get_logger(__name__)
 
 _BASE = "https://api.opensubtitles.com/api/v1"
+# 406 on /download: the account's daily allowance is used up.
+_QUOTA_CODES = (406, 429)
 
 
-class OpenSubtitlesError(RuntimeError):
+class OpenSubtitlesError(SubtitleSourceError):
     pass
 
 
@@ -47,6 +57,7 @@ class OpenSubtitlesSource:
         self._ua = user_agent
         self._timeout = timeout
         self._token: str | None = None
+        self._quota_spent = False
 
     def supports(self, lang: str) -> bool:
         return True  # OpenSubtitles covers a broad language set
@@ -71,10 +82,19 @@ class OpenSubtitlesSource:
             headers=self._headers(),
             timeout=self._timeout,
         )
-        resp.raise_for_status()
+        raise_for_http(resp, self.name)
         self._token = resp.json().get("token")
+        if not self._token:
+            raise SourceAuthError("opensubtitles: login returned no token")
+
+    def _require_quota(self) -> None:
+        if self._quota_spent:
+            raise SourceQuotaError("opensubtitles: daily download quota is used up")
 
     async def search(self, query: SubtitleQuery) -> list[SubtitleResult]:
+        self._require_quota()  # no point searching for what can't be downloaded
+        if not query.searchable:
+            return []
         params: dict[str, Any] = {"languages": query.lang}
         if query.moviehash:
             params["moviehash"] = query.moviehash
@@ -85,10 +105,8 @@ class OpenSubtitlesSource:
                 params["parent_imdb_id"] = _imdb_num(query.imdb_id)
             else:
                 params["query"] = query.title
-            if query.season is not None:
-                params["season_number"] = query.season
-            if query.episode is not None:
-                params["episode_number"] = query.episode
+            params["season_number"] = query.season
+            params["episode_number"] = query.episode
         elif query.imdb_id:
             params["imdb_id"] = _imdb_num(query.imdb_id)
         else:
@@ -104,10 +122,16 @@ class OpenSubtitlesSource:
             timeout=self._timeout,
             follow_redirects=True,
         )
-        resp.raise_for_status()
+        raise_for_http(resp, self.name)
         out: list[SubtitleResult] = []
         for item in resp.json().get("data", []):
             attrs = item.get("attributes", {})
+            if (
+                attrs.get("ai_translated")
+                or attrs.get("machine_translated")
+                or attrs.get("foreign_parts_only")
+            ):
+                continue
             files = attrs.get("files") or []
             if not files:
                 continue
@@ -115,22 +139,25 @@ class OpenSubtitlesSource:
             if file_id is None:
                 continue
             # Rank: a hash match is decisive; otherwise popularity.
-            score = (1_000_000 if attrs.get("moviehash_match") else 0) + float(
-                attrs.get("download_count", 0) or 0
-            )
+            hash_match = bool(attrs.get("moviehash_match"))
+            score = (1_000_000 if hash_match else 0) + float(attrs.get("download_count", 0) or 0)
             out.append(
                 SubtitleResult(
                     source=self.name,
                     lang=str(attrs.get("language", query.lang)).lower(),
-                    name=str(attrs.get("release", "") or attrs.get("feature_details", {})),
+                    name=str(attrs.get("release") or files[0].get("file_name") or ""),
                     score=score,
                     ref={"file_id": file_id},
                     hearing_impaired=bool(attrs.get("hearing_impaired")),
+                    hash_match=hash_match,
+                    season=query.season,
+                    episode=query.episode,
                 )
             )
         return out
 
     async def download(self, result: SubtitleResult) -> bytes:
+        self._require_quota()
         await self._login()
         resp = await self._client.post(
             f"{_BASE}/download",
@@ -138,13 +165,19 @@ class OpenSubtitlesSource:
             headers=self._headers(auth=True),
             timeout=self._timeout,
         )
-        resp.raise_for_status()
-        link = resp.json().get("link")
+        raise_for_http(resp, self.name, quota_codes=_QUOTA_CODES)
+        body = resp.json()
+        remaining = body.get("remaining")
+        if isinstance(remaining, int) and remaining <= 0:
+            self._quota_spent = True  # this one is the last; the link is still good
+            log.info("opensubtitles.quota_spent", reset=body.get("reset_time"))
+        link = body.get("link")
         if not link:
-            raise OpenSubtitlesError("OpenSubtitles returned no download link (quota reached?)")
-        got = await self._client.get(link, timeout=self._timeout)
-        got.raise_for_status()
-        return got.content
+            if self._quota_spent:
+                raise SourceQuotaError("opensubtitles: daily download quota is used up")
+            raise OpenSubtitlesError("opensubtitles: no download link in the response")
+        data = await fetch_capped(self._client, link, source=self.name, timeout=self._timeout)
+        return unpack_subtitle(data, result.season, result.episode)
 
 
 def _imdb_num(imdb_id: str) -> int:

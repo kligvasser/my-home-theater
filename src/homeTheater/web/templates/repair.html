@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Repair · my-home-theater{% endblock %}
+{% block content %}
+<h1>Catalog repair</h1>
+<p class="muted">Every change takes a database backup first and runs while no scan or
+enrichment is going. Nothing on the NAS is touched.</p>
+
+<h2>Split titles</h2>
+<div id="repair-splits"><p class="muted">Loading…</p></div>
+
+<h2>Find a title</h2>
+<form id="repair-find" class="filters">
+  <input id="repair-q" type="search" placeholder="Title name" aria-label="Title name" />
+  <button type="submit">Find</button>
+</form>
+<div id="repair-found"></div>
+
+<h2>This title is really…</h2>
+<form id="rematch-form" class="filters">
+  <input id="rematch-title" type="number" min="1" placeholder="Title id" aria-label="Title id" />
+  <input id="rematch-tmdb" type="number" min="1" placeholder="TMDb id" aria-label="TMDb id" />
+  <button type="submit">Preview</button>
+</form>
+<div id="rematch-review"></div>
+
+<h2>Merge two titles</h2>
+<form id="merge-form" class="filters">
+  <input id="merge-dup" type="number" min="1" placeholder="Fold this title id" aria-label="Title id to fold away" />
+  <input id="merge-keep" type="number" min="1" placeholder="Into this title id" aria-label="Title id to keep" />
+  <button type="submit">Preview</button>
+</form>
+<div id="merge-review"></div>
+
+<h2>Unmatched</h2>
+<div id="repair-unmatched"><p class="muted">Loading…</p></div>
+{% endblock %}

@@ -4,7 +4,7 @@
 <h1>Candidate queue</h1>
 
 <nav class="statusfilter">
-  {% for st in ["new", "approved", "rejected", "queued", "downloading", "imported", "failed"] %}
+  {% for st in statuses %}
     <a href="/candidates?status={{ st }}&kind={{ kind }}&sort={{ sort }}"
        class="{{ 'active' if status == st }}">
       {{ st }} <span class="count">{{ counts.get(st, 0) }}</span>
@@ -54,15 +54,7 @@
   {% if followed %}
   <div class="follow-list">
     {% for f in followed %}
-    <span class="follow-chip" data-tmdb="{{ f.tmdb_id }}">
-      {% if f.tmdb_url %}<a href="{{ f.tmdb_url }}" target="_blank" rel="noopener noreferrer">{{ f.title }}</a>{% else %}{{ f.title }}{% endif %}
-      <span class="muted small">
-        {%- if f.owned_seasons %} {{ f.owned_seasons }}/{{ f.seasons_count or '?' }} seasons{% else %} new{% endif -%}
-        {%- if f.series_status %} · {{ f.series_status }}{% endif -%}
-      </span>
-      <button type="button" class="unfollow" title="Stop following"
-              data-action="unfollow" data-tmdb="{{ f.tmdb_id }}" data-kind="series">✕</button>
-    </span>
+    {% include "_follow_chip.html" %}
     {% endfor %}
   </div>
   {% else %}
@@ -70,6 +62,32 @@
     or use <b>★ Follow</b> on a series card below.</p>
   {% endif %}
 </section>
+
+{% if upgrades %}
+<section id="upgrades">
+  <h2>⬆ Proposed quality upgrades</h2>
+  <p class="muted small">Movies only. Nothing downloads until you approve. The new file is
+    verified in the library first; the old one then goes to the trash, and stays restorable.
+    Rejecting one says nothing about the movie.</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Movie</th><th>Why</th><th></th></tr></thead>
+    <tbody>
+    {% for u in upgrades %}
+      <tr>
+        <td>{{ u.title }}{% if u.year %} <span class="muted">({{ u.year }})</span>{% endif %}</td>
+        <td class="small">{{ u.reason or "" }}</td>
+        <td>
+          <button type="button" class="mini" data-action="candidate" data-verb="approve" data-id="{{ u.id }}">✓ Approve</button>
+          <button type="button" class="mini danger" data-action="candidate" data-verb="reject" data-id="{{ u.id }}">✗ Reject</button>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endif %}
 
 {% if candidates %}
 <div class="candidate-grid">
@@ -84,6 +102,7 @@
         {% if c.year %}<span class="muted">({{ c.year }})</span>{% endif %}</h3>
       <div class="cmeta">
         <span class="pill">{{ c.kind }}</span>
+        {% if c.source == "upgrade" %}<span class="pill">⬆ upgrade</span>{% endif %}
         {% if c.imdb_rating is not none %}<span>⭐ {{ "%.1f"|format(c.imdb_rating) }}</span>{% endif %}
         {% if c.imdb_votes is not none %}<span class="muted">{{ "{:,}".format(c.imdb_votes) }} votes</span>{% endif %}
         {% if c.score is not none %}<span class="muted" title="Ranking score: rating &amp; votes blended with your taste match and the learned preference model. Higher = better fit; used only to order the queue.">score {{ c.score }}</span>{% endif %}

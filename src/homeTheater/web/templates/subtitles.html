@@ -20,6 +20,31 @@
   </div>
 </section>
 
+<section id="sub-review" class="sub-review" hidden>
+  <h2>Chosen subtitles</h2>
+  <p id="sub-review-note" class="muted" hidden></p>
+  <div class="pipeline-controls">
+    <label class="small">Show
+      <select id="sub-review-state">
+        <option value="">Needs a look</option>
+        <option value="all">All</option>
+        <option value="pending">Unchecked</option>
+        <option value="in_sync">In time</option>
+        <option value="approved">Approved</option>
+        <option value="reverted">Reverted</option>
+      </select>
+    </label>
+    <label class="small">Title <input id="sub-review-q" type="search" /></label>
+    <button type="button" data-action="sub-sync-now">⏱ Check timing now</button>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>File</th><th>Lang</th><th>Source</th><th>State</th><th></th></tr></thead>
+      <tbody id="sub-review-rows"></tbody>
+    </table>
+  </div>
+</section>
+
 <nav class="statusfilter">
   {% for c in coverages %}
   <a href="/subtitles?lang={{ c.lang }}" class="{{ 'active' if shown == c.lang }}">

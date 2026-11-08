@@ -20,7 +20,9 @@ from typing import Any
 
 from .db.models import Title, TitleKind
 
-FEATURES_VERSION = 1
+# Bump when the shape of these features, or how preferences.featurize reads them,
+# changes: a saved model is refused unless it was trained on the current version.
+FEATURES_VERSION = 2
 
 
 def extract_features(title: Title) -> dict[str, Any]:

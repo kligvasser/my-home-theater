@@ -19,6 +19,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -46,6 +47,7 @@ class CandidateSource(enum.StrEnum):
     discovery = "discovery"
     watchlist = "watchlist"
     manual = "manual"
+    upgrade = "upgrade"  # a better copy of a movie you own (F4): never a training label
 
 
 class CandidateStatus(enum.StrEnum):
@@ -56,6 +58,35 @@ class CandidateStatus(enum.StrEnum):
     imported = "imported"
     rejected = "rejected"
     failed = "failed"
+    # The owner stopped the work (Cancel, Unfollow). Not a dislike: never a training
+    # label, unlike ``rejected``. Discovery still won't re-suggest it; following the
+    # show again reopens its seasons.
+    cancelled = "cancelled"
+
+
+# No download work may go on for these. Only ``rejected`` is a label.
+STOPPED_STATUSES = frozenset({CandidateStatus.rejected, CandidateStatus.cancelled})
+
+# Download.state values still in the pipeline. "completed" is a torrent that finished
+# downloading but hasn't imported yet, so it stays live until it has.
+LIVE_DOWNLOAD_STATES = ("queued", "downloading", "importing", "completed")
+
+# Download.error markers. They live in the error column so a parked download keeps its
+# state: the sweep, cleanup and the dashboard all treat "completed" as "local data still
+# needed", which is exactly right for a download waiting on a person.
+#
+# ``removed:``: ban record of a release thrown out as malware or junk (any state).
+# ``stalled:``: failed row whose hash went dead; re-selected only as a last resort.
+# ``held:``: completed, but a real video wasn't imported; local data is kept and every
+#   sweep looks again.
+# ``needs_attention:``: completed, import gave up (attempt cap, or a library conflict);
+#   sweeps skip it until someone resolves it and calls retry_import.
+# REMOVAL_PENDING (exact match, not a prefix): imported, torrent removal still to do.
+MARKER_REMOVED = "removed:"
+MARKER_STALLED = "stalled:"
+MARKER_HELD = "held:"
+MARKER_NEEDS_ATTENTION = "needs_attention:"
+MARKER_REMOVAL_PENDING = "local copy removal pending"
 
 
 class ProviderKind(enum.StrEnum):
@@ -68,6 +99,7 @@ class ProviderKind(enum.StrEnum):
 class RunStatus(enum.StrEnum):
     running = "running"
     success = "success"
+    partial = "partial"  # finished, but some of the work failed
     failed = "failed"
 
 
@@ -188,6 +220,10 @@ class Candidate(Base, TimestampMixin):
 
 class Download(Base, TimestampMixin):
     __tablename__ = "download"
+    # NULLs stay distinct, so rows without a handle (or unlinked ones) can coexist.
+    __table_args__ = (
+        Index("uq_download_candidate_external", "candidate_id", "external_id", unique=True),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     candidate_id: Mapped[int] = mapped_column(ForeignKey("candidate.id"), index=True)
@@ -203,8 +239,44 @@ class Download(Base, TimestampMixin):
     candidate: Mapped[Candidate] = relationship(back_populates="downloads")
 
 
+class DownloadTracking(Base):
+    """What the sweep has seen of one download.
+
+    A table of its own, not columns on ``download``: ``create_all`` makes a missing
+    table but can't alter one, so this works on a database that hasn't run the
+    migration yet.
+    """
+
+    __tablename__ = "download_tracking"
+
+    download_id: Mapped[int] = mapped_column(
+        ForeignKey("download.id", ondelete="CASCADE"), primary_key=True
+    )
+    last_progress: Mapped[float] = mapped_column(Float, default=0.0)
+    last_progress_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Separates "no progress" from "nobody was looking" (app down, host asleep).
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    import_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_import_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class GrabRetry(Base):
+    """Backoff for a season whose last download died: the scheduled acquire leaves it
+    alone until ``next_attempt_at``. Same reason for being a table as above."""
+
+    __tablename__ = "grab_retry"
+
+    candidate_id: Mapped[int] = mapped_column(
+        ForeignKey("candidate.id", ondelete="CASCADE"), primary_key=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class Subtitle(Base, TimestampMixin):
     __tablename__ = "subtitle"
+    # NULLs stay distinct, so rows the scanner unlinked (owned_file_id=NULL) coexist.
+    __table_args__ = (Index("uq_subtitle_file_lang", "owned_file_id", "lang", unique=True),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     title_id: Mapped[int] = mapped_column(ForeignKey("title.id"), index=True)
@@ -213,6 +285,27 @@ class Subtitle(Base, TimestampMixin):
     provider: Mapped[str | None] = mapped_column(String(64))
     path: Mapped[str | None] = mapped_column(String(2048))
     status: Mapped[str | None] = mapped_column(String(32))
+
+
+class SubtitleAttempt(Base):
+    """Negative cache for the native sweep: one failed (file, language) pair.
+
+    A row exists only while the pair is unsatisfied; success deletes it.
+    ``ondelete=CASCADE`` because the scanner bulk-deletes pruned ``owned_file``
+    rows with foreign keys enforced.
+    """
+
+    __tablename__ = "subtitle_attempt"
+    __table_args__ = (
+        UniqueConstraint("owned_file_id", "lang", name="uq_subtitle_attempt_file_lang"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owned_file_id: Mapped[int] = mapped_column(ForeignKey("owned_file.id", ondelete="CASCADE"))
+    lang: Mapped[str] = mapped_column(String(8))
+    last_tried: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fail_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_outcome: Mapped[str | None] = mapped_column(String(32))
 
 
 class ProviderSetting(Base, TimestampMixin):
@@ -259,3 +352,100 @@ class MetadataCache(Base):
     cache_key: Mapped[str] = mapped_column(String(512), index=True)
     payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class WatchState(Base):
+    """What Kodi and Trakt agree has been watched, one row per owned file.
+
+    ``source`` names whoever supplied the newest ``last_played_at``. A missing row
+    means nobody reported a play; the storage planner reads this table too.
+    """
+
+    __tablename__ = "watch_state"
+
+    owned_file_id: Mapped[int] = mapped_column(
+        ForeignKey("owned_file.id", ondelete="CASCADE"), primary_key=True
+    )
+    play_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_played_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source: Mapped[str] = mapped_column(String(16))  # kodi | trakt
+    # The last_played_at Trakt is known to hold, so a push is never sent twice.
+    trakt_pushed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class SubtitleSync(Base):
+    """Timing state of the subtitle chosen for one (file, language) pair."""
+
+    __tablename__ = "subtitle_sync"
+    __table_args__ = (UniqueConstraint("owned_file_id", "lang", name="uq_subtitle_sync_file_lang"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owned_file_id: Mapped[int] = mapped_column(ForeignKey("owned_file.id", ondelete="CASCADE"))
+    lang: Mapped[str] = mapped_column(String(8))
+    state: Mapped[str] = mapped_column(String(16), default="pending")
+    source: Mapped[str | None] = mapped_column(String(64))
+    release: Mapped[str | None] = mapped_column(String(512))
+    result_key: Mapped[str | None] = mapped_column(String(64))
+    hash_match: Mapped[bool] = mapped_column(Boolean, default=False)
+    offset_seconds: Mapped[float | None] = mapped_column(Float)
+    # The backup left beside the subtitle, and what it was.
+    original_path: Mapped[str | None] = mapped_column(String(2048))
+    original_source: Mapped[str | None] = mapped_column(String(64))
+    original_release: Mapped[str | None] = mapped_column(String(512))
+    original_key: Mapped[str | None] = mapped_column(String(64))
+    fail_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    detail: Mapped[str | None] = mapped_column(Text)
+
+
+class SubtitleReject(Base):
+    """A subtitle the owner threw out for one file: never choose it again.
+
+    ``result_key`` catches it in search results, before a download is spent;
+    ``content_sha256`` catches it under a new id, and covers subtitles chosen before
+    their key was recorded.
+    """
+
+    __tablename__ = "subtitle_reject"
+    __table_args__ = (Index("ix_subtitle_reject_file_lang", "owned_file_id", "lang"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owned_file_id: Mapped[int] = mapped_column(ForeignKey("owned_file.id", ondelete="CASCADE"))
+    lang: Mapped[str] = mapped_column(String(8))
+    result_key: Mapped[str | None] = mapped_column(String(64))
+    content_sha256: Mapped[str | None] = mapped_column(String(64))
+    label: Mapped[str | None] = mapped_column(String(512))
+    rejected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class TrashItem(Base):
+    """One file the app moved to the NAS trash, and how to put it back (F1).
+
+    Both paths are relative, so a row can never name anything outside the library:
+    ``original_path`` to ``torrent.library_base_dir``, ``trash_path`` to the trash root.
+    """
+
+    __tablename__ = "trash_item"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    original_path: Mapped[str] = mapped_column(String(2048))
+    trash_path: Mapped[str] = mapped_column(String(2048))
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    reason: Mapped[str | None] = mapped_column(Text)
+    # pending (rename not confirmed) | trashed | restored | purged
+    state: Mapped[str] = mapped_column(String(16), index=True)
+    trashed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class UpgradeCheck(Base):
+    """When a movie was last looked at for a better copy: the per-title cooldown (F4)."""
+
+    __tablename__ = "upgrade_check"
+
+    title_id: Mapped[int] = mapped_column(
+        ForeignKey("title.id", ondelete="CASCADE"), primary_key=True
+    )
+    last_checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

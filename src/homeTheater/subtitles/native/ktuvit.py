@@ -10,19 +10,19 @@ identifier, and fetch the file from ``DownloadFile.ashx``.
 
 Hebrew-only. Supports both movies (subtitle ids off ``MovieInfo.aspx``) and
 series per-episode (ids off ``GetModuleAjax.ashx`` for a given season/episode).
-Every step is defensive — any failure yields an empty result, so a ktuvit outage
-or a salt/format change never sinks a sweep (OpenSubtitles still covers Hebrew).
-Needs a ktuvit.me account (``KTUVIT_*`` in .env).
+A failure raises (see :class:`SubtitleSourceError`) rather than looking like "no
+subtitles": the sweep falls through to OpenSubtitles and disables ktuvit if it keeps
+failing. A title is matched by imdb id or by name + year; anything less returns
+nothing. Needs a ktuvit.me account (``KTUVIT_*`` in .env).
 """
 
 from __future__ import annotations
 
 import base64
 import hashlib
-import io
 import json
 import re
-import zipfile
+import unicodedata
 from typing import Any
 
 import httpx
@@ -30,7 +30,14 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from ...db.models import TitleKind
 from ...logging_setup import get_logger
-from .base import SubtitleQuery, SubtitleResult
+from .base import (
+    SourceAuthError,
+    SubtitleQuery,
+    SubtitleResult,
+    SubtitleSourceError,
+    raise_for_http,
+)
+from .payload import fetch_capped, unpack_subtitle
 
 log = get_logger(__name__)
 
@@ -42,6 +49,16 @@ _BROWSER_UA = (
 _SUBTITLE_ID_RE = re.compile(r'data-subtitle-id="([^"]+)"')
 _SUB_ID_RE = re.compile(r'data-sub-id="([^"]+)"')
 _SALT_RE = re.compile(r"encryptionSalt\s*=\s*'([0-9A-Za-z]+)'")
+_ROW_RE = re.compile(r"<tr\b.*?</tr>", re.DOTALL | re.IGNORECASE)
+_CELL_RE = re.compile(r"<td\b[^>]*>(.*?)</td>", re.DOTALL | re.IGNORECASE)
+_TAG_RE = re.compile(r"<[^>]+>")
+_IMDB_RE = re.compile(r"tt\d+", re.IGNORECASE)
+_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+# Search-result fields, as far as the site exposes them; see _match_film.
+_NAME_FIELDS = ("EngName", "HebName", "Name", "FilmName")
+_YEAR_FIELDS = ("Year", "ReleaseDate", "ReleaseYear")
+_IMDB_FIELDS = ("IMDB_Link", "ImdbID", "IMDB_ID", "ImdbId", "IMDBID")
+_YEAR_TOLERANCE = 1  # sites disagree by a year around a January release
 
 
 class KtuvitSource:
@@ -80,19 +97,19 @@ class KtuvitSource:
         home = await self._client.get(
             self._base + "/", headers={"User-Agent": _BROWSER_UA}, timeout=self._timeout
         )
-        home.raise_for_status()
+        raise_for_http(home, self.name)
         m = _SALT_RE.search(home.text)
         if not m:
-            raise ValueError("could not find encryptionSalt on the ktuvit homepage")
+            raise SubtitleSourceError("ktuvit: no encryptionSalt on the homepage")
         salt = m.group(1).encode()
         key = hashlib.pbkdf2_hmac("sha1", salt, self._email.encode(), 3000, 16)
         encryptor = Cipher(algorithms.AES(key), modes.CBC(_iv_from_email(self._email))).encryptor()
         data = encryptor.update(_pkcs7(self._password.encode())) + encryptor.finalize()
         return base64.b64encode(hashlib.sha256(data).digest()).decode()
 
-    async def _login(self) -> bool:
+    async def _login(self) -> None:
         if self._logged_in:
-            return True
+            return
         password = await self._encrypted_password()
         resp = await self._client.post(
             f"{self._base}/Services/MembershipService.svc/Login",
@@ -100,55 +117,51 @@ class KtuvitSource:
             headers=self._svc_headers(),
             timeout=self._timeout,
         )
-        resp.raise_for_status()
+        raise_for_http(resp, self.name)
         # A successful login sets the ``Login`` session cookie. Don't fall back to
-        # "any non-empty body" — a failed login returns a non-empty error payload,
-        # which would look like success and then silently return no results.
+        # "any non-empty body" — a failed login returns a non-empty error payload.
         self._logged_in = "Login" in resp.cookies
         if not self._logged_in:
-            log.warning("ktuvit.login_failed", detail="no session cookie (check credentials)")
-        return self._logged_in
+            raise SourceAuthError("ktuvit: login set no session cookie (check credentials)")
 
     async def search(self, query: SubtitleQuery) -> list[SubtitleResult]:
-        is_series = query.kind is TitleKind.series
-        if is_series and (query.season is None or query.episode is None):
+        if not query.searchable:
             return []  # can't target an episode without season/episode
+        is_series = query.kind is TitleKind.series
+        await self._login()
         try:
-            if not await self._login():
-                return []
-            content_id = await self._find_content(
-                query.title, query.year, search_type="1" if is_series else "0"
-            )
+            content_id = await self._find_content(query, search_type="1" if is_series else "0")
             if content_id is None:
                 return []
             if is_series:
-                sub_ids = await self._episode_subtitle_ids(content_id, query.season, query.episode)
+                rows = await self._episode_subtitles(content_id, query.season, query.episode)
             else:
-                sub_ids = await self._movie_subtitle_ids(content_id)
-        except (httpx.HTTPError, ValueError, KeyError) as exc:
-            log.warning("ktuvit.search_failed", title=query.title, detail=str(exc))
-            return []
+                rows = await self._movie_subtitles(content_id)
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise SubtitleSourceError("ktuvit: unexpected response format") from exc
         return [
             SubtitleResult(
                 source=self.name,
                 lang="he",
-                name=f"ktuvit:{content_id}:{sid}",
-                score=float(len(sub_ids) - i),  # ktuvit lists best first
+                name=release or f"ktuvit:{content_id}:{sid}",
+                score=float(len(rows) - i),  # ktuvit lists best first
                 ref={"film_id": content_id, "subtitle_id": sid},
+                season=query.season,
+                episode=query.episode,
             )
-            for i, sid in enumerate(sub_ids)
+            for i, (sid, release) in enumerate(rows)
         ]
 
-    async def _find_content(self, title: str, year: int | None, *, search_type: str) -> str | None:
+    async def _find_content(self, query: SubtitleQuery, *, search_type: str) -> str | None:
         req: dict[str, Any] = {
-            "FilmName": title,
+            "FilmName": query.title,
             "Actors": [],
             "Studios": None,
             "Directors": [],
             "Genres": [],
             "Countries": [],
             "Languages": [],
-            "Year": str(year) if year else "",
+            "Year": str(query.year) if query.year else "",
             "Rating": [],
             "Page": 1,
             "SearchType": search_type,  # 0 = movies, 1 = series
@@ -162,23 +175,23 @@ class KtuvitSource:
             headers=self._svc_headers(),
             timeout=self._timeout,
         )
-        resp.raise_for_status()
+        raise_for_http(resp, self.name)
         films = _unwrap(resp.json()).get("Films") or []
-        return str(films[0]["ID"]) if films else None
+        return _match_film(films, query)
 
-    async def _movie_subtitle_ids(self, film_id: str) -> list[str]:
+    async def _movie_subtitles(self, film_id: str) -> list[tuple[str, str]]:
         resp = await self._client.get(
             f"{self._base}/MovieInfo.aspx",
             params={"ID": film_id},
             headers={"User-Agent": _BROWSER_UA},
             timeout=self._timeout,
         )
-        resp.raise_for_status()
-        return _dedupe(_SUBTITLE_ID_RE.findall(resp.text))
+        raise_for_http(resp, self.name)
+        return _subtitle_rows(resp.text, _SUBTITLE_ID_RE)
 
-    async def _episode_subtitle_ids(
+    async def _episode_subtitles(
         self, series_id: str, season: int | None, episode: int | None
-    ) -> list[str]:
+    ) -> list[tuple[str, str]]:
         resp = await self._client.get(
             f"{self._base}/Services/GetModuleAjax.ashx",
             params={
@@ -190,8 +203,8 @@ class KtuvitSource:
             headers={"User-Agent": _BROWSER_UA},
             timeout=self._timeout,
         )
-        resp.raise_for_status()
-        return _dedupe(_SUB_ID_RE.findall(resp.text))
+        raise_for_http(resp, self.name)
+        return _subtitle_rows(resp.text, _SUB_ID_RE)
 
     async def download(self, result: SubtitleResult) -> bytes:
         await self._login()
@@ -208,18 +221,88 @@ class KtuvitSource:
             headers=self._svc_headers(),
             timeout=self._timeout,
         )
-        resp.raise_for_status()
+        raise_for_http(resp, self.name)
         identifier = _unwrap(resp.json()).get("DownloadIdentifier")
         if not identifier:
-            raise ValueError("ktuvit returned no DownloadIdentifier")
-        got = await self._client.get(
+            raise SubtitleSourceError("ktuvit: no DownloadIdentifier in the response")
+        data = await fetch_capped(
+            self._client,
             f"{self._base}/Services/DownloadFile.ashx",
+            source=self.name,
+            timeout=self._timeout,
             params={"DownloadIdentifier": identifier},
             headers={"User-Agent": _BROWSER_UA},
-            timeout=self._timeout,
         )
-        got.raise_for_status()
-        return _extract_srt(got.content)
+        return unpack_subtitle(data, result.season, result.episode)
+
+
+def _normalise_name(name: str) -> str:
+    """Compare names without case, accents, niqqud or punctuation."""
+
+    decomposed = unicodedata.normalize("NFKD", name.casefold().replace("&", " and "))
+    kept = [
+        c if c.isalnum() else " " for c in decomposed if not unicodedata.category(c).startswith("M")
+    ]
+    return " ".join("".join(kept).split())
+
+
+def _first_match(film: dict[str, Any], fields: tuple[str, ...], pattern: re.Pattern[str]) -> str:
+    for field in fields:
+        found = pattern.search(str(film.get(field) or ""))
+        if found:
+            return found.group(0).lower()
+    return ""
+
+
+def _match_film(films: list[dict[str, Any]], query: SubtitleQuery) -> str | None:
+    """The search hit that is really this title, or ``None``.
+
+    An imdb id on both sides settles it either way. Otherwise a normalised English
+    or Hebrew name must match and the year must be within tolerance; several such
+    hits, or a missing year, mean we would be guessing.
+
+    ktuvit's field names aren't documented. If a response has hits but none of the
+    expected fields, that is a format change and raises, instead of quietly
+    finding nothing for every title.
+    """
+
+    if films and not any(
+        film.get(f) for film in films for f in (*_NAME_FIELDS, *_YEAR_FIELDS, *_IMDB_FIELDS)
+    ):
+        raise SubtitleSourceError("ktuvit: search results have no recognisable fields")
+
+    wanted_imdb = (query.imdb_id or "").lower()
+    wanted_name = _normalise_name(query.title)
+    close: list[str] = []
+    for film in films:
+        imdb = _first_match(film, _IMDB_FIELDS, _IMDB_RE)
+        if wanted_imdb and imdb:
+            if imdb == wanted_imdb:
+                return str(film["ID"])
+            continue
+        names = {_normalise_name(str(film.get(f) or "")) for f in _NAME_FIELDS}
+        year = _first_match(film, _YEAR_FIELDS, _YEAR_RE)
+        near = bool(query.year and year) and abs(int(year) - (query.year or 0)) <= _YEAR_TOLERANCE
+        if wanted_name in names and near:
+            close.append(str(film["ID"]))
+    return close[0] if len(set(close)) == 1 else None
+
+
+def _subtitle_rows(html: str, id_re: re.Pattern[str]) -> list[tuple[str, str]]:
+    """``(subtitle id, release name)`` in page order, best first, de-duplicated.
+
+    The release name is the first line of the row's first cell; it is empty when
+    the markup doesn't have that shape, which only costs the release-match bonus.
+    """
+
+    releases: dict[str, str] = {}
+    for row in _ROW_RE.findall(html):
+        sid = id_re.search(row)
+        cell = _CELL_RE.search(row)
+        if sid and cell:
+            lines = _TAG_RE.sub("\n", cell.group(1)).splitlines()
+            releases.setdefault(sid.group(1), next((x.strip() for x in lines if x.strip()), ""))
+    return [(sid, releases.get(sid, "")) for sid in _dedupe(id_re.findall(html))]
 
 
 def _dedupe(ids: list[str]) -> list[str]:
@@ -264,17 +347,3 @@ def _unwrap(body: Any) -> dict[str, Any]:
         except json.JSONDecodeError:
             return {}
     return inner if isinstance(inner, dict) else {}
-
-
-def _extract_srt(data: bytes) -> bytes:
-    """ktuvit hands back either a raw subtitle or a zip; return the .srt bytes."""
-
-    if data[:2] == b"PK":
-        with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            names = [n for n in zf.namelist() if n.lower().endswith((".srt", ".sub", ".ass"))]
-            if not names:
-                # A zip with no recognizable subtitle — don't write the raw archive
-                # bytes as a ".srt" (that would look "fetched" and never retry).
-                raise ValueError("ktuvit zip contained no subtitle file")
-            return zf.read(names[0])
-    return data

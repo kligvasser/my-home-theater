@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 
+from ...errors import redact_exc
 from ...logging_setup import get_logger
 from .base import AddedTorrent, TorrentStatus
 
@@ -20,9 +21,20 @@ log = get_logger(__name__)
 
 _SESSION_HEADER = "X-Transmission-Session-Id"
 
-# torrent-get "status" enum (rpc-spec §3.2). 6 == seeding, i.e. done downloading.
+# torrent-get "status" enum (rpc-spec §3.2). 0 == stopped, 6 == seeding.
+_STATUS_CHECK_WAIT = 1
+_STATUS_CHECK = 2
 _STATUS_DOWNLOAD_WAIT = 3
 _STATUS_DOWNLOADING = 4
+_STATUS_QUEUED = (_STATUS_CHECK_WAIT, _STATUS_CHECK, _STATUS_DOWNLOAD_WAIT)
+
+# torrent-get "error" enum: 1/2 are tracker trouble (other peers may be fine), 3 is
+# Transmission itself failing on this torrent.
+_ERROR_LOCAL = 3
+
+# seedRatioMode: 1 = use this torrent's limit, 2 = seed regardless of the global limit.
+_SEED_MODE_OWN_LIMIT = 1
+_SEED_MODE_UNLIMITED = 2
 
 _FIELDS = [
     "hashString",
@@ -32,6 +44,7 @@ _FIELDS = [
     "downloadDir",
     "error",
     "errorString",
+    "leftUntilDone",
     "rateDownload",
     "peersSendingToUs",
     "eta",
@@ -87,11 +100,6 @@ class TransmissionClient:
         arguments: dict[str, Any] = {"filename": magnet, "paused": False}
         if download_dir:
             arguments["download-dir"] = download_dir
-        if seed_ratio_limit is not None and seed_ratio_limit >= 0:
-            # seedRatioMode 1 = honor this per-torrent limit; 0.0 = stop seeding
-            # as soon as the download completes (we're not a seedbox).
-            arguments["seedRatioMode"] = 1
-            arguments["seedRatioLimit"] = seed_ratio_limit
         args = await self._rpc("torrent-add", arguments)
         # Transmission returns torrent-added, or torrent-duplicate if the hash is
         # already present; both carry hashString/name.
@@ -99,11 +107,33 @@ class TransmissionClient:
         infohash = str(info.get("hashString", "")).lower()
         if not infohash:
             raise RuntimeError("Transmission accepted the magnet but returned no hash")
+        if seed_ratio_limit is not None:
+            await self._apply_seed_limit(infohash, seed_ratio_limit)
         return AddedTorrent(
             infohash=infohash,
             name=str(info.get("name", "")),
             already_existed="torrent-duplicate" in args,
         )
+
+    async def _apply_seed_limit(self, infohash: str, limit: float) -> None:
+        """Set a torrent's seed limit. ``torrent-add`` has no such arguments and
+        ignores them, so this has to be its own ``torrent-set`` call.
+
+        The torrent is already in the client by now: failing here would lose track of
+        it, while the cost of not limiting it is some upload.
+        """
+
+        arguments: dict[str, Any] = {"ids": [infohash]}
+        if limit >= 0:
+            # 0.0 = stop seeding as soon as the download completes (we're not a seedbox).
+            arguments["seedRatioMode"] = _SEED_MODE_OWN_LIMIT
+            arguments["seedRatioLimit"] = limit
+        else:
+            arguments["seedRatioMode"] = _SEED_MODE_UNLIMITED
+        try:
+            await self._rpc("torrent-set", arguments)
+        except Exception as exc:
+            log.warning("torrent.seed_limit_failed", infohash=infohash, detail=redact_exc(exc))
 
     async def status(self, infohash: str) -> TorrentStatus | None:
         args = await self._rpc("torrent-get", {"ids": [infohash], "fields": _FIELDS})
@@ -111,6 +141,17 @@ class TransmissionClient:
         if not torrents:
             return None
         return self._to_status(torrents[0], infohash)
+
+    async def statuses(self, infohashes: list[str]) -> dict[str, TorrentStatus]:
+        """Live state of many torrents in one call, keyed by lower-case hash, without
+        the file lists (large, and only the safety scan needs them). A hash the
+        client doesn't know is simply absent."""
+
+        fields = [f for f in _FIELDS if f != "files"]
+        args = await self._rpc("torrent-get", {"ids": infohashes, "fields": fields})
+        rows = args.get("torrents") or []
+        found = [self._to_status(t, str(t.get("hashString", ""))) for t in rows]
+        return {st.infohash: st for st in found}
 
     async def list_torrents(self) -> list[TorrentStatus]:
         """Every torrent the client currently holds (for cleanup/orphan checks)."""
@@ -123,10 +164,10 @@ class TransmissionClient:
         progress = float(t.get("percentDone", 0.0) or 0.0)
         state = int(t.get("status", 0) or 0)
         complete = progress >= 1.0
-        downloading = not complete and (
-            state in (_STATUS_DOWNLOAD_WAIT, _STATUS_DOWNLOADING) or progress > 0.0
-        )
+        queued = not complete and state in _STATUS_QUEUED
+        downloading = queued or (not complete and state == _STATUS_DOWNLOADING)
         error = t.get("errorString") or None if t.get("error") else None
+        left = t.get("leftUntilDone")
         eta = t.get("eta")
         # Empty until magnet metadata resolves — report None so callers treat the
         # file list as unknown rather than "no files".
@@ -143,6 +184,10 @@ class TransmissionClient:
             seeders=int(t.get("peersSendingToUs", 0) or 0),
             eta_seconds=int(eta) if isinstance(eta, int | float) and eta >= 0 else None,
             files=file_names,
+            left_bytes=int(left) if isinstance(left, int | float) else None,
+            queued=queued,
+            paused=not complete and state == 0 and error is None,
+            error_is_local=error is not None and t.get("error") == _ERROR_LOCAL,
         )
 
     async def remove(self, infohash: str, *, delete_data: bool) -> None:

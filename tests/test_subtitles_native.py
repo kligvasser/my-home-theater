@@ -293,7 +293,9 @@ async def test_ktuvit_login_search_download_zip() -> None:
         return_value=httpx.Response(200, json={"d": "ok"}, headers={"Set-Cookie": "Login=tok"})
     )
     respx.post(f"{KTUVIT}/Services/ContentProvider.svc/SearchPage_search").mock(
-        return_value=httpx.Response(200, json={"d": '{"Films":[{"ID":"F1"}]}'})
+        return_value=httpx.Response(
+            200, json={"d": '{"Films":[{"ID":"F1","EngName":"The Matrix","Year":"1999"}]}'}
+        )
     )
     respx.get(f"{KTUVIT}/MovieInfo.aspx").mock(
         return_value=httpx.Response(200, text='<a data-subtitle-id="S9">heb</a>')
@@ -355,7 +357,9 @@ async def test_ktuvit_series_episode_lists_subs() -> None:
         return_value=httpx.Response(200, json={"d": "ok"}, headers={"Set-Cookie": "Login=tok"})
     )
     search = respx.post(f"{KTUVIT}/Services/ContentProvider.svc/SearchPage_search").mock(
-        return_value=httpx.Response(200, json={"d": '{"Films":[{"ID":"SER1"}]}'})
+        return_value=httpx.Response(
+            200, json={"d": '{"Films":[{"ID":"SER1","EngName":"Show","Year":"2020"}]}'}
+        )
     )
     module = respx.get(f"{KTUVIT}/Services/GetModuleAjax.ashx").mock(
         return_value=httpx.Response(200, text='<input data-sub-id="E5"><input data-sub-id="E5">')
@@ -367,7 +371,7 @@ async def test_ktuvit_series_episode_lists_subs() -> None:
             kind=TitleKind.series,
             title="Show",
             year=2020,
-            imdb_id="tt1",
+            imdb_id=None,
             release_name="Show.S02E07",
             season=2,
             episode=7,

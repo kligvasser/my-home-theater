@@ -6,6 +6,7 @@ touch detached ORM objects or trigger lazy loads after the session closes.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,6 +15,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from ..db.models import (
     Candidate,
+    CandidateSource,
     CandidateStatus,
     Genre,
     JobRun,
@@ -80,6 +82,12 @@ class TitleRow:
 
 
 @dataclass(frozen=True, slots=True)
+class RunStat:
+    text: str
+    trouble: bool = False  # worth the owner's eye, as opposed to routine
+
+
+@dataclass(frozen=True, slots=True)
 class RunRow:
     id: int
     kind: str
@@ -87,6 +95,8 @@ class RunRow:
     started_at: str | None
     finished_at: str | None
     stats: dict[str, Any] | None
+    summary: list[RunStat] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -408,6 +418,7 @@ def list_candidates(
     sort: str = "score",
     page: int = 1,
     page_size: int = CANDIDATE_PAGE_SIZE,
+    hide_upgrades: bool = False,
 ) -> tuple[list[CandidateRow], int]:
     """Ranked candidate queue (defaults to the pending ``new`` queue).
 
@@ -422,6 +433,8 @@ def list_candidates(
             stmt = stmt.where(Candidate.status == status)
         if kind in (TitleKind.movie, TitleKind.series):
             stmt = stmt.where(Title.kind == kind)
+        if hide_upgrades:
+            stmt = stmt.where(Candidate.source != CandidateSource.upgrade)
         rows: list[CandidateRow] = []
         for cand, title in s.execute(stmt).all():
             taste = (cand.features or {}).get("taste") or {}
@@ -458,6 +471,10 @@ def list_candidates(
     return ordered[start : start + page_size], total
 
 
+# The candidates ``POST /api/candidates/unfollow`` cancels.
+UNFOLLOW_STOPS = (CandidateStatus.approved, CandidateStatus.queued, CandidateStatus.downloading)
+
+
 @dataclass(frozen=True, slots=True)
 class FollowedRow:
     tmdb_id: int
@@ -467,6 +484,7 @@ class FollowedRow:
     seasons_count: int | None
     series_status: str | None
     owned_seasons: int  # how many distinct seasons are on the NAS
+    active: int = 0  # grabs that unfollowing would stop
 
     @property
     def tmdb_url(self) -> str | None:
@@ -476,13 +494,25 @@ class FollowedRow:
 
 
 def list_followed() -> list[FollowedRow]:
-    """Followed series, with how many seasons are already owned — for the
-    'Following' panel. Alphabetical."""
+    """Followed series, with how many seasons are already owned and how many grabs
+    are live — for the 'Following' panel. Alphabetical."""
 
     with session_scope() as s:
         titles = s.scalars(
             select(Title).where(Title.followed.is_(True)).order_by(func.lower(Title.title))
         ).all()
+        active = dict(
+            s.execute(
+                select(Candidate.title_id, func.count())
+                .where(
+                    Candidate.title_id.in_([t.id for t in titles]),
+                    Candidate.status.in_(UNFOLLOW_STOPS),
+                )
+                .group_by(Candidate.title_id)
+            )
+            .tuples()
+            .all()
+        )
         rows: list[FollowedRow] = []
         for t in titles:
             owned = (
@@ -502,6 +532,7 @@ def list_followed() -> list[FollowedRow]:
                     seasons_count=t.seasons_count,
                     series_status=t.series_status,
                     owned_seasons=owned,
+                    active=active.get(t.id, 0),
                 )
             )
         return rows
@@ -517,17 +548,64 @@ def candidate_counts() -> dict[str, int]:
         }
 
 
+# Counters whose name doesn't read well on its own, and those that mean something
+# needs a look. Any other key is shown under its own name, so a new one still appears.
+_STAT_LABELS = {
+    "adopted": "adopted from disk",
+    "not_found": "not found",
+    "invalid": "invalid only",
+    "capped": "over the cap",
+    "cooling_down": "cooling down",
+    "absent": "files missing",
+    "unidentified": "unidentified",
+    "source_down": "source down",
+    "unsupported": "no source for language",
+}
+_STAT_TROUBLE = frozenset({"failed", "invalid", "absent", "source_down", "unsupported"})
+
+
+def _pretty_run_stats(stats: Mapping[str, Any]) -> tuple[list[RunStat], list[str]]:
+    """A job's raw stats as short readable lines, zeros dropped, plus its errors."""
+
+    summary: list[RunStat] = []
+    errors: list[str] = []
+    for key, value in stats.items():
+        label = _STAT_LABELS.get(key, key.replace("_", " "))
+        trouble = key in _STAT_TROUBLE
+        if key == "errors" and isinstance(value, list):
+            errors = [str(e) for e in value]
+        elif key == "disabled_sources" and isinstance(value, Mapping):
+            summary += [RunStat(f"{n} disabled: {why}", True) for n, why in value.items()]
+        elif isinstance(value, bool):
+            if value:
+                summary.append(RunStat(label, trouble))
+        elif isinstance(value, int | float):
+            if value:
+                summary.append(RunStat(f"{value} {label}", trouble))
+        elif isinstance(value, list | tuple | Mapping):
+            if value:
+                summary.append(RunStat(f"{len(value)} {label}", trouble))
+        elif value:
+            summary.append(RunStat(f"{label}: {value}", trouble))
+    return summary, errors
+
+
 def recent_runs(limit: int = 25) -> list[RunRow]:
     with session_scope() as s:
         runs = s.scalars(select(JobRun).order_by(JobRun.started_at.desc()).limit(limit)).all()
-        return [
-            RunRow(
-                id=r.id,
-                kind=r.kind,
-                status=str(r.status),
-                started_at=r.started_at.isoformat() if r.started_at else None,
-                finished_at=r.finished_at.isoformat() if r.finished_at else None,
-                stats=r.stats,
+        rows = []
+        for r in runs:
+            summary, errors = _pretty_run_stats(r.stats or {})
+            rows.append(
+                RunRow(
+                    id=r.id,
+                    kind=r.kind,
+                    status=str(r.status),
+                    started_at=r.started_at.isoformat() if r.started_at else None,
+                    finished_at=r.finished_at.isoformat() if r.finished_at else None,
+                    stats=r.stats,
+                    summary=summary,
+                    errors=errors,
+                )
             )
-            for r in runs
-        ]
+        return rows

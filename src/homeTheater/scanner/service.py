@@ -3,7 +3,8 @@
 Read-only against the NAS. Idempotent: identity is the file ``path`` and the
 title natural key ``(normalized title, year, kind)``, so re-scans update in
 place rather than duplicating, and files that vanished from a successfully
-walked root are pruned. Each root is walked completely *before* any DB write,
+walked root are pruned, within the limits in :class:`Scanner` settings. Each root
+is walked completely *before* any DB write,
 and each file is committed in its own short transaction, so no transaction is
 held open across slow NAS I/O and one poisoned entry (e.g. a non-UTF-8
 filename) cannot sink the rest of the run. Every run is recorded as a
@@ -12,15 +13,18 @@ filename) cannot sink the rest of the run. Every run is recorded as a
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
+from ..config.settings import Scanner
 from ..db.base import utcnow
 from ..db.models import JobRun, OwnedFile, RunStatus, Subtitle, Title, TitleKind
 from ..db.session import session_scope
@@ -43,8 +47,14 @@ SUBS_DIR_NAMES = frozenset({"subs", "sub", "subtitles"})
 
 # SQLite's bound-parameter limit is comfortably above this.
 _PRUNE_CHUNK = 500
+# How many of a refused prune's paths the job_run keeps, for the inbox to show.
+_PRUNE_SAMPLE = 10
 
 _NON_WORD_RE = re.compile(r"[^\w\s]+")
+
+
+class PruneRefusedError(RuntimeError):
+    """A walk would remove too much of a root to be believed. Its rows are kept."""
 
 
 @dataclass
@@ -58,6 +68,8 @@ class ScanStats:
     files_pruned: int = 0
     subtitles_found: int = 0
     errors: list[str] = field(default_factory=list)
+    # What each refused prune would have removed, for the inbox's review.
+    prune_refused: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -93,21 +105,54 @@ def normalize_title(title: str) -> str:
     return " ".join(_NON_WORD_RE.sub(" ", title.lower()).split())
 
 
-def _get_or_create_title(session: Session, parsed: ParsedMedia) -> tuple[Title, bool]:
+def _show_folder_title(session: Session, prefix: str) -> Title | None:
+    """The title most files under a show folder already belong to.
+
+    The folder decides identity, but its name need not match the catalog: enrichment
+    renames titles to TMDb's spelling (folder ``Better Call Soul`` is ``Better Call
+    Saul`` here), so a natural-key lookup would split the show's next episode off.
+    """
+
+    title_id = session.scalar(
+        select(OwnedFile.title_id)
+        .where(OwnedFile.path.startswith(prefix, autoescape=True))
+        .group_by(OwnedFile.title_id)
+        .order_by(func.count().desc(), OwnedFile.title_id)
+        .limit(1)
+    )
+    return None if title_id is None else session.get(Title, title_id)
+
+
+def _get_or_create_title(
+    session: Session, parsed: ParsedMedia, folder_prefix: str | None = None
+) -> tuple[Title, bool]:
     """Resolve a Title by its natural key; returns ``(title, created)``.
 
     TMDb/IMDb ids are backfilled in Phase 2. Matching is on the normalized
     title (plus year and kind) so case/punctuation variants of the same film
     across files don't create duplicate rows.
+
+    ``folder_prefix`` is the path of the series folder that named this file; files
+    already under it settle the question. A series name otherwise ignores a missing
+    year on either side, as folders usually have none and enrichment fills it in
+    (the year can still tell ``Battlestar Galactica (2004)`` from its 1978 namesake).
     """
 
+    if folder_prefix is not None:
+        owner = _show_folder_title(session, folder_prefix)
+        if owner is not None:
+            return owner, False
+
     wanted = normalize_title(parsed.title)
-    existing = session.scalars(
-        select(Title).where(Title.year == parsed.year, Title.kind == parsed.kind)
-    )
-    for candidate in existing:
-        if normalize_title(candidate.title) == wanted:
+    same_kind = session.scalars(select(Title).where(Title.kind == parsed.kind)).all()
+    named = [t for t in same_kind if normalize_title(t.title) == wanted]
+    for candidate in named:
+        if candidate.year == parsed.year:
             return candidate, False
+    if parsed.kind is TitleKind.series:
+        undated = [t for t in named if parsed.year is None or t.year is None]
+        if len(undated) == 1:
+            return undated[0], False
 
     title = Title(title=parsed.title, year=parsed.year, kind=parsed.kind)
     session.add(title)
@@ -121,6 +166,9 @@ def _upsert_owned_file(
     size: int,
     parsed: ParsedMedia,
     subtitle_langs: list[str] | None,
+    *,
+    walk_started: datetime | None = None,
+    folder_prefix: str | None = None,
 ) -> tuple[bool, bool]:
     """Insert or refresh the row for ``path``; returns (added, title_created).
 
@@ -128,33 +176,114 @@ def _upsert_owned_file(
     titles to their canonical TMDb form, so re-resolving by parsed filename
     would repoint files onto fresh duplicate titles and orphan the enriched
     rows. Only genuinely new paths resolve (or create) a title.
+
+    ``subtitle_langs`` is what the walk saw, which can already be out of date: a
+    subtitle stored since ``walk_started`` keeps its language.
     """
 
     owned = session.scalar(select(OwnedFile).where(OwnedFile.path == path))
     added = owned is None
     created = False
     if owned is None:
-        title, created = _get_or_create_title(session, parsed)
+        title, created = _get_or_create_title(session, parsed, folder_prefix)
         owned = OwnedFile(path=path, title_id=title.id, kind=parsed.kind)
         session.add(owned)
 
     owned.kind = parsed.kind
     owned.season = parsed.season
     owned.episode = parsed.episode
+    owned.episode_end = parsed.episode_end
     owned.resolution = parsed.resolution
     owned.codec = parsed.codec
     owned.container = parsed.container
     owned.size_bytes = size
+    if not added and walk_started is not None:
+        stored_since = session.scalars(
+            select(Subtitle.lang).where(
+                Subtitle.owned_file_id == owned.id, Subtitle.updated_at >= walk_started
+            )
+        ).all()
+        subtitle_langs = sorted({*(subtitle_langs or []), *stored_since}) or None
     owned.subtitle_langs = subtitle_langs
     return added, created
 
 
-def _prune_missing(start: str, seen_paths: set[str], stats: ScanStats) -> None:
+def _check_prune_allowed(*, stale: int, total: int, walked: int, limits: Scanner) -> None:
+    """Raise :class:`PruneRefusedError` if removing ``stale`` of ``total`` rows
+    looks like a NAS problem rather than files someone really deleted.
+
+    ``walked`` is how many files the walk saw: nothing at all under a root with
+    catalog rows is what a dropped mount looks like, so it refuses at any size.
+    Otherwise ``max_prune_rows`` always applies, and ``max_prune_percent`` applies
+    above ``prune_floor_rows``, so a small library can still lose a file or two.
+    """
+
+    hint = "Rows kept. If this is real, run `home-theater scan --force-prune`."
+    if walked == 0:
+        raise PruneRefusedError(
+            f"root reads as empty but {stale} catalog row(s) sit under it. {hint}"
+        )
+    percent = stale * 100 / total
+    over_rows = stale > limits.max_prune_rows
+    over_percent = stale > limits.prune_floor_rows and percent > limits.max_prune_percent
+    if over_rows or over_percent:
+        raise PruneRefusedError(
+            f"refusing to prune {stale} of {total} catalog rows ({percent:.1f}%): over the "
+            f"limit of {limits.max_prune_percent:g}% or {limits.max_prune_rows} rows. {hint}"
+        )
+
+
+def prune_fingerprint(paths: Iterable[str]) -> str:
+    """Identifies one exact set of rows, so accepting a refused prune can't turn into
+    accepting whatever a later walk happens to miss."""
+
+    digest = hashlib.sha256("\n".join(sorted(paths)).encode("utf-8", "surrogateescape"))
+    return digest.hexdigest()[:32]
+
+
+def _refusal(
+    root: str, prefix: str, stale: list[str], *, total: int, walked: int, limits: Scanner
+) -> dict[str, Any]:
+    """What a person needs to judge a refused prune. Paths are relative to the root:
+    this lands in job_run, which the Runs page and API show to the whole LAN."""
+
+    return {
+        "root": root,
+        "stale": len(stale),
+        "total": total,
+        "walked": walked,
+        "percent": round(len(stale) * 100 / total, 1),
+        "max_percent": limits.max_prune_percent,
+        "max_rows": limits.max_prune_rows,
+        "sample": [_safe_text(p.removeprefix(prefix)) for p in sorted(stale)[:_PRUNE_SAMPLE]],
+        "fingerprint": prune_fingerprint(stale),
+    }
+
+
+def _prune_missing(
+    start: str,
+    seen_paths: set[str],
+    stats: ScanStats,
+    *,
+    walk_started: datetime,
+    limits: Scanner,
+    force: bool = False,
+    root: str | None = None,
+    accepted: Mapping[str, str] | None = None,
+) -> None:
     """Delete owned_file rows under ``start`` whose file was not seen this walk.
 
-    Only called after a *successful* walk, so an SMB outage never wipes the
-    catalog. Titles are kept even when their last file goes away — they hold
-    metadata and candidate history. Referencing subtitle rows are unlinked
+    The caller must only get here after a walk that raised nothing: both
+    filesystems raise on any unreadable directory. That alone doesn't prove the
+    files are gone, so a prune that fails :func:`_check_prune_allowed` raises and
+    deletes nothing unless ``force`` is set. ``accepted`` narrows ``force`` to the
+    exact reviewed set: root -> :func:`prune_fingerprint`. Any other root, or a walk
+    that now misses different files, goes through the usual check.
+
+    Only rows created before ``walk_started`` are considered: a row added since
+    (an import finishing mid-scan) describes a file this walk may have passed
+    before it existed. Titles are kept even when their last file goes away — they
+    hold metadata and candidate history. Referencing subtitle rows are unlinked
     first (FK has no ON DELETE clause).
     """
 
@@ -163,10 +292,32 @@ def _prune_missing(start: str, seen_paths: set[str], stats: ScanStats) -> None:
     with session_scope() as session:
         rows = session.execute(
             select(OwnedFile.id, OwnedFile.path).where(
-                OwnedFile.path.startswith(prefix, autoescape=True)
+                OwnedFile.path.startswith(prefix, autoescape=True),
+                OwnedFile.created_at < walk_started,
             )
         ).all()
-        stale = [row_id for row_id, path in rows if path not in seen_paths]
+        stale_rows = [(row_id, path) for row_id, path in rows if path not in seen_paths]
+        stale = [row_id for row_id, _ in stale_rows]
+        stale_paths = [path for _, path in stale_rows]
+        if accepted is not None:
+            force = force and accepted.get(root or start) == prune_fingerprint(stale_paths)
+        if stale and not force:
+            try:
+                _check_prune_allowed(
+                    stale=len(stale), total=len(rows), walked=len(seen_paths), limits=limits
+                )
+            except PruneRefusedError:
+                stats.prune_refused.append(
+                    _refusal(
+                        root or start,
+                        prefix,
+                        stale_paths,
+                        total=len(rows),
+                        walked=len(seen_paths),
+                        limits=limits,
+                    )
+                )
+                raise
         for i in range(0, len(stale), _PRUNE_CHUNK):
             chunk = stale[i : i + _PRUNE_CHUNK]
             session.execute(
@@ -183,14 +334,24 @@ def _scan_root(
     kind: TitleKind,
     root: str,
     stats: ScanStats,
+    *,
+    limits: Scanner,
+    force_prune: bool = False,
+    accepted_prunes: Mapping[str, str] | None = None,
 ) -> None:
     """Walk ``root`` fully, upsert each media file in its own transaction, then
-    prune rows for files that disappeared. Raises if the walk itself fails;
-    per-file problems are recorded in ``stats.errors`` and skipped."""
+    prune rows for files that disappeared. Raises if the walk itself fails or the
+    prune is refused; per-file problems are recorded in ``stats.errors`` and
+    skipped, and never count as the file being gone."""
 
     start = fs.resolve(root)
+    sep = "\\" if "\\" in start else "/"
+    walk_started = utcnow()
     entries = list(fs.walk(root))  # finish the (slow) walk before any DB write
     stats.files_scanned += len(entries)
+    # Everything walked exists, whatever happens to it below: only "not walked"
+    # means gone. A file we can't parse or store must keep its row.
+    seen_paths = {entry.path for entry in entries}
 
     def _split_parent(path: str) -> tuple[str, str]:
         sep = "\\" if "\\" in path else "/"
@@ -229,7 +390,6 @@ def _scan_root(
                 langs.add(lang)
         return sorted(langs)
 
-    seen_paths: set[str] = set()
     for entry in entries:
         if not is_media_file(entry.name):
             continue
@@ -253,31 +413,63 @@ def _scan_root(
                 log.info("scan.extra_skipped", path=entry.path)
                 continue
             langs = _langs_for(entry.name, entry.parent)
+            folder_prefix = (
+                f"{start.rstrip(sep)}{sep}{parsed.show_folder}{sep}" if parsed.show_folder else None
+            )
             with session_scope() as session:  # short per-file transaction
                 added, created = _upsert_owned_file(
-                    session, entry.path, entry.size, parsed, langs or None
+                    session,
+                    entry.path,
+                    entry.size,
+                    parsed,
+                    langs or None,
+                    walk_started=walk_started,
+                    folder_prefix=folder_prefix,
                 )
             stats.titles_created += int(created)
             stats.files_added += int(added)
             stats.files_updated += int(not added)
             stats.subtitles_found += len(langs)
-            seen_paths.add(entry.path)
         except Exception as exc:  # keep scanning; record the bad file
             log.warning("scan.file_failed", path=entry.path, error=redact_exc(exc))
             stats.errors.append(f"{entry.path}: {redact_exc(exc)}")
 
-    _prune_missing(start, seen_paths, stats)
+    _prune_missing(
+        start,
+        seen_paths,
+        stats,
+        walk_started=walk_started,
+        limits=limits,
+        force=force_prune,
+        root=root,
+        accepted=accepted_prunes,
+    )
 
 
-def scan_library(fs: FileSystem, roots: Mapping[TitleKind, str]) -> ScanStats:
+def scan_library(
+    fs: FileSystem,
+    roots: Mapping[TitleKind, str],
+    *,
+    limits: Scanner | None = None,
+    force_prune: bool = False,
+    accepted_prunes: Mapping[str, str] | None = None,
+) -> ScanStats:
     """Scan the given roots and upsert the catalog. Returns run statistics.
 
     ``roots`` maps a :class:`TitleKind` to the root path for that kind, e.g.
     ``{TitleKind.movie: "Movies", TitleKind.series: "TV Shows"}``. A root whose
     walk fails (e.g. SMB outage) is skipped without pruning and the run is
     marked failed (raising at the end), but other roots still complete and
-    their results are kept.
+    their results are kept. The same goes for a root whose prune is refused
+    (see :func:`_prune_missing`); its new and updated files are still saved.
+    ``force_prune`` lifts that refusal, never the failure of a walk; with
+    ``accepted_prunes`` it lifts only the refusals someone reviewed (see
+    :func:`_prune_missing`).
+
+    Callers wanting the ``scan`` job lock should use :func:`homeTheater.scanner.run_scan`.
     """
+
+    limits = limits or Scanner()
 
     # 1. Open the run row (committed immediately so history reflects in-progress).
     with session_scope() as session:
@@ -293,7 +485,15 @@ def scan_library(fs: FileSystem, roots: Mapping[TitleKind, str]) -> ScanStats:
         log.info("scan.start", roots={k.value: v for k, v in roots.items()})
         for kind, root in roots.items():
             try:
-                _scan_root(fs, kind, root, stats)
+                _scan_root(
+                    fs,
+                    kind,
+                    root,
+                    stats,
+                    limits=limits,
+                    force_prune=force_prune,
+                    accepted_prunes=accepted_prunes,
+                )
             except Exception as exc:  # root-level walk/prune failure
                 status = RunStatus.failed
                 log.error("scan.root_failed", root=root, error=redact_exc(exc))

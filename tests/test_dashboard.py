@@ -243,3 +243,169 @@ def test_sync_endpoint_reports_already_running(
         assert r.status_code == 200
         body = r.json()
         assert body["started"] is False and "already running" in body["message"]
+
+
+# --- Runs: stats read as text, not as a JSON dump ---------------------------
+
+
+def test_subtitle_sweep_stats_read_sensibly() -> None:
+    from homeTheater.dashboard.queries import RunStat, _pretty_run_stats
+
+    summary, errors = _pretty_run_stats(
+        {
+            "considered": 12,
+            "downloaded": 0,
+            "adopted": 3,
+            "not_found": 1,
+            "invalid": 2,
+            "failed": 1,
+            "cooling_down": 4,
+            "absent": 5,
+            "unidentified": 6,
+            "source_down": 7,
+            "unsupported": 8,
+            "disabled_sources": {"ktuvit": "login failed"},
+            "errors": ["one", "two"],
+        }
+    )
+    assert errors == ["one", "two"]
+    assert RunStat("3 adopted from disk") in summary
+    assert RunStat("4 cooling down") in summary
+    assert RunStat("6 unidentified") in summary
+    assert RunStat("2 invalid only", True) in summary
+    assert RunStat("1 failed", True) in summary
+    assert RunStat("5 files missing", True) in summary
+    assert RunStat("7 source down", True) in summary
+    assert RunStat("8 no source for language", True) in summary
+    assert RunStat("ktuvit disabled: login failed", True) in summary
+    assert not any("downloaded" in s.text for s in summary)  # zeros are noise
+
+
+def test_unknown_run_stats_still_appear() -> None:
+    from homeTheater.dashboard.queries import _pretty_run_stats
+
+    summary, _ = _pretty_run_stats(
+        {"titles_new": 4, "dry_run": True, "skipped": [1, 2], "mode": "fast", "none": None}
+    )
+    assert [s.text for s in summary] == ["4 titles new", "dry run", "2 skipped", "mode: fast"]
+
+
+def _seed_run(status: object, stats: dict[str, object] | None) -> None:
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.base import utcnow
+    from homeTheater.db.models import JobRun
+
+    init_db()
+    with session_scope() as s:
+        s.add(JobRun(kind="subtitles", status=status, started_at=utcnow(), stats=stats))
+
+
+def test_runs_page_renders_a_partial_run(config_file: Path) -> None:
+    _reset()
+    from homeTheater.api import create_app
+    from homeTheater.db.models import RunStatus
+
+    _seed_run(
+        RunStatus.partial,
+        {"adopted": 2, "disabled_sources": {"ktuvit": "<b>down</b>"}, "errors": ["boom <i>"]},
+    )
+    with TestClient(create_app()) as client:
+        html = client.get("/runs").text
+    assert '<span class="pill partial">partial</span>' in html
+    assert "2 adopted from disk" in html
+    assert "1 error<" in html and "boom &lt;i&gt;" in html
+    assert "ktuvit disabled: &lt;b&gt;down&lt;/b&gt;" in html
+    assert '{"adopted"' not in html
+
+
+def test_run_with_no_stats_shows_a_dash(config_file: Path) -> None:
+    _reset()
+    from homeTheater.api import create_app
+    from homeTheater.db.models import RunStatus
+
+    _seed_run(RunStatus.success, None)
+    with TestClient(create_app()) as client:
+        assert '<td class="small run-stats">—' in client.get("/runs").text
+
+
+# --- Following: what unfollowing would stop ---------------------------------
+
+
+def _seed_followed() -> None:
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import (
+        Candidate,
+        CandidateSource,
+        CandidateStatus,
+        Title,
+        TitleKind,
+    )
+
+    init_db()
+    with session_scope() as s:
+        t = Title(tmdb_id=9, title='Show "<1>"', kind=TitleKind.series, followed=True)
+        s.add(t)
+        s.flush()
+        for st in (
+            CandidateStatus.queued,
+            CandidateStatus.downloading,
+            CandidateStatus.approved,
+            CandidateStatus.imported,
+            CandidateStatus.new,
+        ):
+            s.add(Candidate(title_id=t.id, source=CandidateSource.discovery, status=st))
+
+
+def test_followed_row_counts_the_grabs_unfollow_stops(config_file: Path) -> None:
+    _reset()
+    _seed_followed()
+    from homeTheater.dashboard import list_followed
+
+    assert list_followed()[0].active == 3
+
+
+@pytest.mark.parametrize("path", ["/", "/candidates"])
+def test_unfollow_button_has_a_name_and_the_count(config_file: Path, path: str) -> None:
+    _reset()
+    _seed_followed()
+    from homeTheater.api import create_app
+
+    with TestClient(create_app()) as client:
+        html = client.get(path).text
+    assert 'aria-label="Stop following Show &#34;&lt;1&gt;&#34;"' in html
+    assert 'data-name="Show &#34;&lt;1&gt;&#34;"' in html
+    assert 'data-active="3"' in html
+
+
+def test_cancelled_candidates_have_a_page(config_file: Path) -> None:
+    _reset()
+    from homeTheater.api import create_app
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate, CandidateSource, CandidateStatus, Title, TitleKind
+
+    init_db()
+    with session_scope() as s:
+        t = Title(tmdb_id=4, title="Stopped One", kind=TitleKind.movie)
+        s.add(t)
+        s.flush()
+        s.add(
+            Candidate(
+                title_id=t.id, source=CandidateSource.manual, status=CandidateStatus.cancelled
+            )
+        )
+    with TestClient(create_app()) as client:
+        html = client.get("/candidates?status=cancelled").text
+    assert "Stopped One" in html and '<span class="pill">cancelled</span>' in html
+
+
+def test_status_filters_cover_every_candidate_status(config_file: Path) -> None:
+    _reset()
+    from homeTheater.api import create_app
+    from homeTheater.db import init_db
+    from homeTheater.db.models import CandidateStatus
+
+    init_db()
+    with TestClient(create_app()) as client:
+        cand = client.get("/candidates").text
+    for status in CandidateStatus:
+        assert f"/candidates?status={status}&kind=" in cand.replace("&amp;", "&")

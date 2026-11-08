@@ -9,7 +9,15 @@
       <td><span class="pill {{ r.status }}">{{ r.status }}</span></td>
       <td class="mono">{{ r.started_at or "—" }}</td>
       <td class="mono">{{ r.finished_at or "—" }}</td>
-      <td class="mono small">{{ r.stats | tojson if r.stats else "—" }}</td>
+      <td class="small run-stats">
+        {%- for stat in r.summary %}<span class="stat{{ ' bad' if stat.trouble }}">{{ stat.text }}</span>{% else %}{{ "—" if not r.errors }}{% endfor -%}
+        {%- if r.errors %}
+        <details class="run-errors">
+          <summary>{{ r.errors | length }} error{{ "" if r.errors | length == 1 else "s" }}</summary>
+          <ul>{% for e in r.errors %}<li>{{ e }}</li>{% endfor %}</ul>
+        </details>
+        {%- endif -%}
+      </td>
     </tr>
   {% endfor %}
   </tbody>

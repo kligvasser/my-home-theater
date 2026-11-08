@@ -21,7 +21,7 @@
 next discovery run. Blank = inherit the file value (shown as placeholder).
 Saving requires the dashboard token (🔒 top-right).</p>
 
-<form id="settings-form" onsubmit="return false">
+<div id="settings-form">
   <div class="grid2">
     <section class="card settings-card">
       <h2>Thresholds — global</h2>
@@ -108,5 +108,5 @@ Saving requires the dashboard token (🔒 top-right).</p>
     <button type="button" class="danger" data-action="reset-settings">Reset all to config.yaml</button>
     {% if ov %}<span class="muted small">active overrides: {{ ov | tojson }}</span>{% endif %}
   </div>
-</form>
+</div>
 {% endblock %}

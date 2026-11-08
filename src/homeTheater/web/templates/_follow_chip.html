@@ -1,0 +1,11 @@
+<span class="follow-chip" data-tmdb="{{ f.tmdb_id }}">
+  {% if f.tmdb_url %}<a href="{{ f.tmdb_url }}" target="_blank" rel="noopener noreferrer">{{ f.title }}</a>{% else %}{{ f.title }}{% endif %}
+  <span class="muted small">
+    {%- if f.owned_seasons %} {{ f.owned_seasons }}/{{ f.seasons_count or '?' }} seasons{% else %} new{% endif -%}
+    {%- if f.series_status %} · {{ f.series_status }}{% endif -%}
+  </span>
+  <button type="button" class="unfollow" title="Stop following"
+          aria-label="Stop following {{ f.title }}" data-name="{{ f.title }}"
+          data-active="{{ f.active }}" data-action="unfollow"
+          data-tmdb="{{ f.tmdb_id }}" data-kind="series">✕</button>
+</span>

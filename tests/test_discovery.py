@@ -192,6 +192,34 @@ async def test_add_manual(config_file: Path, monkeypatch: pytest.MonkeyPatch) ->
 
 
 @respx.mock
+@pytest.mark.parametrize("status", [401, 503])
+async def test_add_manual_survives_an_omdb_failure(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """Ratings are a bonus: a spent quota or outage must not lose the add."""
+
+    _env(monkeypatch)
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate
+    from homeTheater.discovery.actions import add_manual
+
+    init_db()
+    respx.get(f"{TMDB}/movie/27205").mock(
+        return_value=httpx.Response(
+            200, json=_details(27205, "Inception", "tt1375666", 40000, ["Action"])
+        )
+    )
+    body = {"Response": "False", "Error": "Request limit reached!"}
+    respx.get(OMDB).mock(return_value=httpx.Response(status, json=body))
+
+    cid = await add_manual(get_config(), 27205, TitleKind.movie)
+
+    with session_scope() as s:
+        assert s.get(Candidate, cid) is not None
+
+
+@respx.mock
 async def test_rejected_candidate_not_resuggested(
     config_file: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -391,3 +419,326 @@ async def test_taste_similarity_blended_into_candidates(
         assert taste["score"] > 0  # Dark Knight is Action like the library
         assert len(taste["like"]) > 0
         assert "like:" in cand.reason
+
+
+# --- isolation (L14) ---
+
+
+@respx.mock
+async def test_one_failing_source_costs_only_its_items(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _env(monkeypatch)
+    from sqlalchemy import select
+
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate, JobRun, RunStatus
+    from homeTheater.discovery import run_discovery
+
+    init_db()
+    respx.get(f"{TMDB}/trending/tv/week").mock(
+        side_effect=httpx.ConnectError("api_key=SEKRET down")
+    )
+    respx.get(f"{TMDB}/trending/movie/week").mock(
+        return_value=httpx.Response(200, json={"results": [{"id": 155, "title": "Dark Knight"}]})
+    )
+    respx.get(f"{TMDB}/movie/155").mock(
+        return_value=httpx.Response(
+            200, json=_details(155, "The Dark Knight", "tt0468569", 30000, ["Action"])
+        )
+    )
+    respx.get(OMDB).mock(
+        return_value=httpx.Response(
+            200, json={"Response": "True", "imdbRating": "9.0", "imdbVotes": "3,000,000"}
+        )
+    )
+
+    monkeypatch.setattr("homeTheater.metadata.http.asyncio.sleep", _no_sleep)
+    stats = await run_discovery(get_config())
+
+    assert stats.created == 1 and stats.sources_failed == 1
+    assert not any("SEKRET" in e for e in stats.errors)
+    with session_scope() as s:
+        assert s.scalars(select(Candidate)).one() is not None
+        assert s.scalars(select(JobRun)).one().status is RunStatus.partial
+
+
+async def _no_sleep(_seconds: float) -> None:
+    return None
+
+
+@respx.mock
+async def test_every_source_failing_fails_the_run(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _env(monkeypatch)
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db
+    from homeTheater.discovery import run_discovery
+
+    init_db()
+    monkeypatch.setattr("homeTheater.metadata.http.asyncio.sleep", _no_sleep)
+    monkeypatch.setattr(
+        "homeTheater.discovery.service.build_sources", lambda *_a: [_Boom("a"), _Boom("b")]
+    )
+    with pytest.raises(RuntimeError, match="Discovery failed"):
+        await run_discovery(get_config())
+
+
+class _Boom:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    async def fetch(self, client: object, limit: int) -> list:
+        raise RuntimeError("source down")
+
+
+@respx.mock
+async def test_one_bad_item_does_not_lose_the_others(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """All items shared one transaction, so one failure rolled back the whole run."""
+
+    _env(monkeypatch)
+    from sqlalchemy import select
+
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate
+    from homeTheater.discovery import run_discovery
+    from homeTheater.discovery import service as svc
+
+    init_db()
+    _mock_common()
+    real_score = svc.score
+
+    def flaky_score(rating: float | None, *args: object, **kwargs: object) -> float:
+        if kwargs.get("tmdb_votes") == 30000:
+            raise RuntimeError("bad item")
+        return real_score(rating, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(svc, "score", flaky_score)
+    respx.get(f"{TMDB}/trending/movie/week").mock(
+        return_value=httpx.Response(
+            200,
+            json={"results": [{"id": 155, "title": "Dark Knight"}, {"id": 156, "title": "Other"}]},
+        )
+    )
+    for tmdb_id, votes, imdb in ((155, 30000, "tt1"), (156, 30001, "tt2")):
+        respx.get(f"{TMDB}/movie/{tmdb_id}").mock(
+            return_value=httpx.Response(200, json=_details(tmdb_id, "T", imdb, votes, ["Action"]))
+        )
+    respx.get(OMDB).mock(
+        return_value=httpx.Response(
+            200, json={"Response": "True", "imdbRating": "9.0", "imdbVotes": "3,000,000"}
+        )
+    )
+
+    stats = await run_discovery(get_config())
+
+    assert stats.created == 1 and len(stats.errors) == 1
+    with session_scope() as s:
+        assert len(s.scalars(select(Candidate)).all()) == 1
+
+
+@respx.mock
+async def test_corrupt_model_means_no_model(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _env(monkeypatch)
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db
+    from homeTheater.discovery import run_discovery
+    from homeTheater.preferences import model_path
+
+    init_db()
+    _mock_common()
+    respx.get(f"{TMDB}/trending/movie/week").mock(
+        return_value=httpx.Response(200, json={"results": [{"id": 155, "title": "Dark Knight"}]})
+    )
+    respx.get(f"{TMDB}/movie/155").mock(
+        return_value=httpx.Response(
+            200, json=_details(155, "The Dark Knight", "tt0468569", 30000, ["Action"])
+        )
+    )
+    respx.get(OMDB).mock(
+        return_value=httpx.Response(
+            200, json={"Response": "True", "imdbRating": "9.0", "imdbVotes": "3,000,000"}
+        )
+    )
+    path = model_path(get_config())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"not a model")
+
+    stats = await run_discovery(get_config())
+    assert stats.created == 1 and not stats.errors
+
+
+@respx.mock
+async def test_broken_taste_index_means_no_taste(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _env(monkeypatch)
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db
+    from homeTheater.discovery import run_discovery
+
+    init_db()
+    _mock_common()
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("sklearn fell over")
+
+    monkeypatch.setattr("homeTheater.taste.build_index", boom)
+    respx.get(f"{TMDB}/trending/movie/week").mock(
+        return_value=httpx.Response(200, json={"results": [{"id": 155, "title": "Dark Knight"}]})
+    )
+    respx.get(f"{TMDB}/movie/155").mock(
+        return_value=httpx.Response(
+            200, json=_details(155, "The Dark Knight", "tt0468569", 30000, ["Action"])
+        )
+    )
+    respx.get(OMDB).mock(
+        return_value=httpx.Response(
+            200, json={"Response": "True", "imdbRating": "9.0", "imdbVotes": "3,000,000"}
+        )
+    )
+    stats = await run_discovery(get_config())
+    assert stats.created == 1 and not stats.errors
+
+
+# --- cancelled and failed title-level candidates (contract, L18) ---
+
+
+async def _discover_dark_knight(monkeypatch: pytest.MonkeyPatch, seed: object) -> list[tuple]:
+    from sqlalchemy import select
+
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate, Title
+    from homeTheater.discovery import run_discovery
+
+    _env(monkeypatch)
+    init_db()
+    with session_scope() as s:
+        title = Title(tmdb_id=155, title="The Dark Knight", kind=TitleKind.movie)
+        s.add(title)
+        s.flush()
+        seed(s, title.id)  # type: ignore[operator]
+    _mock_common()
+    respx.get(f"{TMDB}/trending/movie/week").mock(
+        return_value=httpx.Response(200, json={"results": [{"id": 155, "title": "Dark Knight"}]})
+    )
+    respx.get(f"{TMDB}/movie/155").mock(
+        return_value=httpx.Response(
+            200, json=_details(155, "The Dark Knight", "tt0468569", 30000, ["Action"])
+        )
+    )
+    respx.get(OMDB).mock(
+        return_value=httpx.Response(
+            200, json={"Response": "True", "imdbRating": "9.0", "imdbVotes": "3,000,000"}
+        )
+    )
+    stats = await run_discovery(get_config())
+    with session_scope() as s:
+        return [(c.status.value, stats.considered) for c in s.scalars(select(Candidate))]
+
+
+@respx.mock
+async def test_cancelled_title_blocks_rediscovery(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from homeTheater.db.models import Candidate, CandidateSource, CandidateStatus
+
+    def seed(s: object, title_id: int) -> None:
+        s.add(  # type: ignore[attr-defined]
+            Candidate(
+                title_id=title_id,
+                source=CandidateSource.discovery,
+                status=CandidateStatus.cancelled,
+            )
+        )
+
+    # Skipped before enrichment too: considered stays 0.
+    assert await _discover_dark_knight(monkeypatch, seed) == [("cancelled", 0)]
+
+
+def test_cancelled_is_blocking() -> None:
+    from homeTheater.db.models import CandidateStatus
+    from homeTheater.discovery.service import BLOCKING_STATUSES
+
+    assert CandidateStatus.cancelled in BLOCKING_STATUSES
+
+
+@respx.mock
+async def test_failed_movie_reuses_its_row_after_backoff(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import timedelta
+
+    from homeTheater.db.base import utcnow
+    from homeTheater.db.models import Candidate, CandidateSource, CandidateStatus
+
+    def seed(s: object, title_id: int) -> None:
+        s.add(  # type: ignore[attr-defined]
+            Candidate(
+                title_id=title_id,
+                source=CandidateSource.discovery,
+                status=CandidateStatus.failed,
+                updated_at=utcnow() - timedelta(days=2),
+            )
+        )
+
+    assert await _discover_dark_knight(monkeypatch, seed) == [("new", 1)]
+
+
+@respx.mock
+async def test_failed_movie_waits_out_its_backoff(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from homeTheater.db.models import Candidate, CandidateSource, CandidateStatus
+
+    def seed(s: object, title_id: int) -> None:
+        s.add(  # type: ignore[attr-defined]
+            Candidate(
+                title_id=title_id, source=CandidateSource.discovery, status=CandidateStatus.failed
+            )
+        )
+
+    assert await _discover_dark_knight(monkeypatch, seed) == [("failed", 1)]
+
+
+@respx.mock
+async def test_auto_grab_is_marked_as_no_decision(
+    config_file: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The preference model must be able to tell a rule's yes from yours."""
+
+    (tmp_path / "config.yaml").open("a").write("features:\n  auto_approve: true\n")
+    _env(monkeypatch)
+    from sqlalchemy import select
+
+    from homeTheater.config import get_config
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate
+    from homeTheater.discovery import run_discovery
+
+    init_db()
+    _mock_common()
+    respx.get(f"{TMDB}/trending/movie/week").mock(
+        return_value=httpx.Response(200, json={"results": [{"id": 155, "title": "Dark Knight"}]})
+    )
+    respx.get(f"{TMDB}/movie/155").mock(
+        return_value=httpx.Response(
+            200, json=_details(155, "The Dark Knight", "tt0468569", 30000, ["Action"])
+        )
+    )
+    respx.get(OMDB).mock(
+        return_value=httpx.Response(
+            200, json={"Response": "True", "imdbRating": "9.0", "imdbVotes": "3,000,000"}
+        )
+    )
+    await run_discovery(get_config())
+    with session_scope() as s:
+        assert s.scalars(select(Candidate)).one().features["auto"] is True

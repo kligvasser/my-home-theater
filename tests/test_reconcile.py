@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from homeTheater.db.models import TitleKind
+from homeTheater.db.models import CandidateStatus, TitleKind
+from homeTheater.reconcile.events import ImportEvent
 
 RADARR_IMPORT = {
     "eventType": "Download",
@@ -330,3 +331,90 @@ def test_reconcile_import_marks_matching_season_candidate(config_file: Path) -> 
         by_season = {c.season: c.status for c in s.query(Candidate).all()}
         assert by_season[3] == CandidateStatus.imported  # the right one
         assert by_season[4] == CandidateStatus.queued  # untouched
+
+
+def _seed_candidates(*rows: tuple[int | None, CandidateStatus]) -> list[int]:
+    from homeTheater.db import init_db, session_scope
+    from homeTheater.db.models import Candidate, CandidateSource, Title
+
+    init_db()
+    with session_scope() as s:
+        t = Title(tmdb_id=1396, title="Silo", year=2023, kind=TitleKind.series)
+        s.add(t)
+        s.flush()
+        cands = [
+            Candidate(title_id=t.id, season=season, source=CandidateSource.discovery, status=status)
+            for season, status in rows
+        ]
+        s.add_all(cands)
+        s.flush()
+        return [c.id for c in cands]
+
+
+def _import_event(season: int | None) -> ImportEvent:
+    return ImportEvent(
+        kind=TitleKind.series,
+        title="Silo",
+        tmdb_id=1396,
+        season=season,
+        episode=1 if season else None,
+        path=f"/tv/silo/s{season}.mkv" if season else None,
+    )
+
+
+def _statuses(ids: list[int]) -> list[CandidateStatus]:
+    from homeTheater.db import session_scope
+    from homeTheater.db.models import Candidate
+
+    with session_scope() as s:
+        return [s.get(Candidate, i).status for i in ids]  # type: ignore[union-attr]
+
+
+def test_import_never_completes_another_seasons_candidate(config_file: Path) -> None:
+    """L12: an import for S3 used to fall through to any live candidate."""
+
+    _reset()
+    from homeTheater.reconcile import reconcile_import
+
+    ids = _seed_candidates((4, CandidateStatus.queued))
+    result = reconcile_import(_import_event(3))
+    assert result.candidate_imported is False
+    assert _statuses(ids) == [CandidateStatus.queued]
+
+
+def test_import_without_a_season_completes_only_a_whole_title_candidate(
+    config_file: Path,
+) -> None:
+    _reset()
+    from homeTheater.reconcile import reconcile_import
+
+    ids = _seed_candidates((4, CandidateStatus.queued), (None, CandidateStatus.approved))
+    assert reconcile_import(_import_event(None)).candidate_imported is True
+    assert _statuses(ids) == [CandidateStatus.queued, CandidateStatus.imported]
+
+
+def test_import_for_a_season_can_complete_a_whole_title_candidate(config_file: Path) -> None:
+    _reset()
+    from homeTheater.reconcile import reconcile_import
+
+    ids = _seed_candidates((None, CandidateStatus.queued))
+    assert reconcile_import(_import_event(3)).candidate_imported is True
+    assert _statuses(ids) == [CandidateStatus.imported]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [CandidateStatus.new, CandidateStatus.rejected, CandidateStatus.cancelled],
+)
+def test_import_never_touches_undecided_or_stopped_candidates(
+    config_file: Path, status: CandidateStatus
+) -> None:
+    """``new`` flipped to ``imported`` read as a yes nobody gave; rejected and
+    cancelled are decisions of their own."""
+
+    _reset()
+    from homeTheater.reconcile import reconcile_import
+
+    ids = _seed_candidates((None, status))
+    assert reconcile_import(_import_event(None)).candidate_imported is False
+    assert _statuses(ids) == [status]

@@ -17,6 +17,7 @@ from ..config import (
     load_overrides,
     save_overrides,
 )
+from ..errors import NotConfiguredError, redact_exc
 from .auth import require_token
 
 router = APIRouter(prefix="/api", tags=["settings"])
@@ -53,7 +54,7 @@ def api_settings_save(overrides: dict[str, Any]) -> dict[str, Any]:
     try:
         save_overrides(overrides)
     except OverrideError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=redact_exc(exc)) from exc
     return _snapshot()
 
 
@@ -62,10 +63,9 @@ async def api_apply_naming() -> dict[str, Any]:
     """Push the folder-structure policy to Radarr/Sonarr/Bazarr (idempotent)."""
 
     from ..acquisition.naming import apply_naming_policy
-    from ..errors import NotConfiguredError
 
     try:
         report = await apply_naming_policy(effective_config())
     except NotConfiguredError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        raise HTTPException(status_code=503, detail=redact_exc(exc)) from exc
     return report.as_dict()

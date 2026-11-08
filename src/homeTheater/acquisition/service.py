@@ -12,14 +12,22 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
+from sqlalchemy.orm import Session
 
 from ..config import AppConfig
 from ..db.base import utcnow
 from ..db.models import (
+    LIVE_DOWNLOAD_STATES,
+    MARKER_NEEDS_ATTENTION,
+    MARKER_REMOVED,
+    STOPPED_STATUSES,
     Candidate,
+    CandidateSource,
     CandidateStatus,
     Download,
+    DownloadTracking,
+    GrabRetry,
     JobRun,
     RunStatus,
     Title,
@@ -37,6 +45,19 @@ log = get_logger(__name__)
 # A download that is neither in the arr queue nor produced a file for this long
 # is considered failed (grab dropped, indexer dead, removed by hand in the arr).
 STALE_DOWNLOAD_AFTER = timedelta(hours=6)
+
+# What a grab may start from. Anything else is in the pipeline already, or stopped.
+_CLAIMABLE = (CandidateStatus.new, CandidateStatus.approved, CandidateStatus.failed)
+# Statuses restart wipes and re-grabs. Not ``imported``: that would throw away the
+# record of a finished title. Not rejected/cancelled: approve those first.
+_RESTARTABLE = (*_CLAIMABLE, CandidateStatus.queued, CandidateStatus.downloading)
+# Statuses cancel applies to. ``new`` isn't running, so there's nothing to stop.
+_CANCELLABLE = (
+    CandidateStatus.approved,
+    CandidateStatus.failed,
+    CandidateStatus.queued,
+    CandidateStatus.downloading,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +148,47 @@ def _load_snap(candidate_id: int) -> _Snap | None:
         )
 
 
+def claim_candidate(candidate_id: int) -> bool:
+    """Atomically take a candidate for a grab. False if something else got there
+    first, or it was stopped since it was last read."""
+
+    with session_scope() as s:
+        result = s.execute(
+            update(Candidate)
+            .where(Candidate.id == candidate_id, Candidate.status.in_(_CLAIMABLE))
+            .values(status=CandidateStatus.queued)
+        )
+        return bool(result.rowcount)  # type: ignore[attr-defined]
+
+
+def release_claim(candidate_id: int, previous: CandidateStatus) -> None:
+    """Give back a claim that didn't end up downloading anything."""
+
+    with session_scope() as s:
+        live = s.scalar(
+            select(Download.id).where(
+                Download.candidate_id == candidate_id, Download.state.in_(LIVE_DOWNLOAD_STATES)
+            )
+        )
+        if live is None:
+            s.execute(
+                update(Candidate)
+                .where(Candidate.id == candidate_id, Candidate.status == CandidateStatus.queued)
+                .values(status=previous)
+            )
+
+
+def _active_import(s: Session, candidate_id: int) -> bool:
+    return (
+        s.scalar(
+            select(Download.id).where(
+                Download.candidate_id == candidate_id, Download.state == "importing"
+            )
+        )
+        is not None
+    )
+
+
 async def _resolve_external_id(
     config: AppConfig, http: httpx.AsyncClient, snap: _Snap
 ) -> int | None:
@@ -161,11 +223,21 @@ def _profile_and_root(config: AppConfig, kind: TitleKind) -> tuple[str, str | No
 
 
 async def queue_candidate(config: AppConfig, candidate_id: int) -> QueueOutcome:
+    """Grab one candidate, under the job lock every acquire takes, so a manual grab
+    can't overlap the scheduled one. Raises JobBusyError if one is in progress."""
+
+    from ..locks import job_lock
+
+    with job_lock(config, "acquire"):
+        return await _queue_candidate(config, candidate_id)
+
+
+async def _queue_candidate(config: AppConfig, candidate_id: int) -> QueueOutcome:
     """Add one candidate to Radarr/Sonarr (or log intent in dry-run).
 
     Idempotent and state-guarded: queueing implies approval (new/approved/failed
     are queueable); an already-queued/downloading/imported candidate is a no-op;
-    a rejected candidate is an error.
+    a rejected or cancelled candidate is an error.
     """
 
     if config.acquisition.backend == "torrent":
@@ -177,6 +249,13 @@ async def queue_candidate(config: AppConfig, candidate_id: int) -> QueueOutcome:
     if snap is None:
         raise ValueError(f"candidate {candidate_id} not found")
 
+    if snap.status in STOPPED_STATUSES:
+        raise InvalidTransitionError(
+            f"candidate {candidate_id} was {snap.status.value}; approve it again before queueing"
+        )
+    if _is_upgrade(candidate_id):
+        # Radarr would call the owned movie "already added" and we'd mark it imported.
+        raise InvalidTransitionError("quality upgrades need acquisition.backend: torrent")
     if snap.status in (
         CandidateStatus.queued,
         CandidateStatus.downloading,
@@ -185,11 +264,6 @@ async def queue_candidate(config: AppConfig, candidate_id: int) -> QueueOutcome:
         return QueueOutcome(
             candidate_id, False, config.features.dry_run, None, f"already {snap.status.value}"
         )
-    if snap.status is CandidateStatus.rejected:
-        raise InvalidTransitionError(
-            f"candidate {candidate_id} was rejected; approve it again before queueing"
-        )
-
     async with httpx.AsyncClient(timeout=20.0) as http:
         client = _client_for(snap.kind, config, http)
         if client is None:
@@ -215,36 +289,66 @@ async def queue_candidate(config: AppConfig, candidate_id: int) -> QueueOutcome:
                 candidate_id, False, True, external_id, f"would add '{snap.title}' ({profile})"
             )
 
-        result = await client.add(
-            external_id,
-            quality_profile=profile,
-            root_folder=root,
-            search=config.acquisition.search_on_add,
+        if not claim_candidate(candidate_id):
+            return QueueOutcome(candidate_id, False, False, None, "already being handled elsewhere")
+        try:
+            result = await client.add(
+                external_id,
+                quality_profile=profile,
+                root_folder=root,
+                search=config.acquisition.search_on_add,
+            )
+            stopped = _record_arr_grab(config, candidate_id, snap.title, result.external_id)
+        finally:
+            release_claim(candidate_id, snap.status)
+
+    if stopped is not None:
+        # LibraryAutomation has no remove: only a person can take it out of the arr.
+        log.warning("acquire.stopped_during_add", candidate=candidate_id, status=stopped.value)
+        return QueueOutcome(
+            candidate_id, False, False, result.external_id, f"{stopped.value} during the add"
         )
+    message = "queued (already in arr)" if result.already_existed else "queued"
+    return QueueOutcome(candidate_id, True, False, result.external_id, message)
+
+
+def _is_upgrade(candidate_id: int) -> bool:
+    with session_scope() as s:
+        cand = s.get(Candidate, candidate_id)
+        return cand is not None and cand.source is CandidateSource.upgrade
+
+
+def _record_arr_grab(
+    config: AppConfig, candidate_id: int, release: str, external_id: int
+) -> CandidateStatus | None:
+    """Record an arr add. If the candidate was stopped while the add ran, its status
+    stays and the row is written ``cancelled``; returns that status."""
 
     with session_scope() as s:
+        cand = s.get(Candidate, candidate_id)
+        stopped = cand.status if cand is not None and cand.status in STOPPED_STATUSES else None
+        state = "downloading" if config.acquisition.search_on_add else "queued"
         existing = s.scalar(
             select(Download).where(
                 Download.candidate_id == candidate_id,
-                Download.external_id == str(result.external_id),
+                Download.external_id == str(external_id),
             )
         )
         if existing is None:
-            s.add(
-                Download(
-                    candidate_id=candidate_id,
-                    external_id=str(result.external_id),
-                    release=snap.title,
-                    state="downloading" if config.acquisition.search_on_add else "queued",
-                )
+            existing = Download(
+                candidate_id=candidate_id,
+                external_id=str(external_id),
+                release=release,
+                state=state,
             )
-        cand = s.get(Candidate, candidate_id)
-        if cand is not None:
+            s.add(existing)
+        if stopped is not None:
+            existing.state = "cancelled"
+        elif cand is not None:
             cand.status = CandidateStatus.queued
             if cand.decided_at is None:
                 cand.decided_at = utcnow()
-    message = "queued (already in arr)" if result.already_existed else "queued"
-    return QueueOutcome(candidate_id, True, False, result.external_id, message)
+        return stopped
 
 
 async def restart_candidate(config: AppConfig, candidate_id: int) -> QueueOutcome:
@@ -253,29 +357,43 @@ async def restart_candidate(config: AppConfig, candidate_id: int) -> QueueOutcom
     For a stuck item (e.g. marked ``downloading`` but gone from the client): drop
     its ``Download`` rows, remove any leftover torrent from the client, reset the
     candidate to ``approved``, then queue it again (a fresh search + grab).
+
+    Imported rows stay (a top-up season keeps what it already delivered), and so do
+    ban rows. Runs under the acquire lock; JobBusyError if an acquire is running.
     """
 
+    from ..locks import job_lock
+
+    with job_lock(config, "acquire"):
+        return await _restart_candidate(config, candidate_id)
+
+
+async def _restart_candidate(config: AppConfig, candidate_id: int) -> QueueOutcome:
     with session_scope() as s:
         cand = s.get(Candidate, candidate_id)
         if cand is None:
             raise ValueError(f"candidate {candidate_id} not found")
-        if cand.status is CandidateStatus.rejected:
+        if cand.status not in _RESTARTABLE:
             raise InvalidTransitionError(
-                f"candidate {candidate_id} was rejected; approve it before restarting"
+                f"candidate {candidate_id} is {cand.status.value}; it can't be restarted"
+            )
+        if _active_import(s, candidate_id):
+            raise InvalidTransitionError(
+                f"candidate {candidate_id} is copying to the library; try again when it's done"
             )
         downloads = s.scalars(select(Download).where(Download.candidate_id == candidate_id)).all()
         # Preserve quarantine ban records (a malware/junk torrent removed by the
         # screen or sync): deleting them would wipe the infohash ban and re-grab
         # would just pick the same fake again — the restart loop the user hit.
-        hashes = [
-            d.external_id
+        wiped = [
+            d
             for d in downloads
-            if d.external_id and not (d.error or "").startswith("removed:")
+            if d.state != "imported" and not (d.error or "").startswith(MARKER_REMOVED)
         ]
-        for d in downloads:
-            if (d.error or "").startswith("removed:"):
-                continue
+        hashes = [d.external_id for d in wiped if d.external_id]
+        for d in wiped:
             s.delete(d)
+        s.execute(delete(GrabRetry).where(GrabRetry.candidate_id == candidate_id))
         cand.status = CandidateStatus.approved
         cand.decided_at = utcnow()
 
@@ -284,15 +402,17 @@ async def restart_candidate(config: AppConfig, candidate_id: int) -> QueueOutcom
 
         await remove_torrents(config, hashes)
 
-    return await queue_candidate(config, candidate_id)
+    return await _queue_candidate(config, candidate_id)
 
 
 async def cancel_candidate(config: AppConfig, candidate_id: int) -> str:
     """Stop an in-flight item and remove it from the pipeline.
 
-    Removes its torrent (+ local data) from the client, marks the download
-    ``cancelled``, and rejects the candidate so it leaves the queue and isn't
-    re-discovered. Returns the title for the confirmation message.
+    Removes its torrent (+ local data) from the client, marks its live downloads
+    ``cancelled`` and sets the candidate ``cancelled``: it leaves the queue and isn't
+    re-discovered, but it's no dislike (see :class:`CandidateStatus`). What already
+    finished is history and stays as it is. Returns the title for the confirmation
+    message.
     """
 
     with session_scope() as s:
@@ -301,11 +421,25 @@ async def cancel_candidate(config: AppConfig, candidate_id: int) -> str:
             raise ValueError(f"candidate {candidate_id} not found")
         title = s.get(Title, cand.title_id)
         name = title.title if title is not None else str(candidate_id)
-        downloads = s.scalars(select(Download).where(Download.candidate_id == candidate_id)).all()
-        hashes = [d.external_id for d in downloads if d.external_id]
-        for d in downloads:
+        if cand.status is CandidateStatus.cancelled:
+            return name  # idempotent re-click
+        if cand.status not in _CANCELLABLE:
+            raise InvalidTransitionError(
+                f"candidate {candidate_id} is {cand.status.value}; there's nothing to cancel"
+            )
+        if _active_import(s, candidate_id):
+            raise InvalidTransitionError(
+                f"candidate {candidate_id} is copying to the library; try again when it's done"
+            )
+        live = s.scalars(
+            select(Download).where(
+                Download.candidate_id == candidate_id, Download.state.in_(LIVE_DOWNLOAD_STATES)
+            )
+        ).all()
+        hashes = [d.external_id for d in live if d.external_id]
+        for d in live:
             d.state = "cancelled"
-        cand.status = CandidateStatus.rejected
+        cand.status = CandidateStatus.cancelled
         cand.decided_at = utcnow()
 
     if config.acquisition.backend == "torrent" and hashes:
@@ -313,6 +447,27 @@ async def cancel_candidate(config: AppConfig, candidate_id: int) -> str:
 
         await remove_torrents(config, hashes)
     return name
+
+
+def retry_import(candidate_id: int) -> int:
+    """Put a candidate's parked imports back in line, once someone has dealt with
+    whatever stopped them. Only lifts the marker and the attempt count: nothing is
+    downloaded again and the local data is untouched. Returns how many were parked."""
+
+    with session_scope() as s:
+        if s.get(Candidate, candidate_id) is None:
+            raise ValueError(f"candidate {candidate_id} not found")
+        parked = s.scalars(
+            select(Download).where(
+                Download.candidate_id == candidate_id,
+                Download.state == "completed",
+                Download.error.like(f"{MARKER_NEEDS_ATTENTION}%"),
+            )
+        ).all()
+        for d in parked:
+            d.error = None
+            s.execute(delete(DownloadTracking).where(DownloadTracking.download_id == d.id))
+        return len(parked)
 
 
 async def queue_approved(config: AppConfig) -> AcquireStats:
@@ -333,9 +488,13 @@ async def _queue_approved(config: AppConfig) -> AcquireStats:
         s.add(run)
         s.flush()
         run_id = run.id
+        backing_off = select(GrabRetry.candidate_id).where(GrabRetry.next_attempt_at > utcnow())
         ids = list(
             s.scalars(
-                select(Candidate.id).where(Candidate.status == CandidateStatus.approved)
+                select(Candidate.id).where(
+                    Candidate.status == CandidateStatus.approved,
+                    Candidate.id.not_in(backing_off),
+                )
             ).all()
         )
 
@@ -345,7 +504,7 @@ async def _queue_approved(config: AppConfig) -> AcquireStats:
     try:
         for cid in ids:
             try:
-                outcome = await queue_candidate(config, cid)
+                outcome = await _queue_candidate(config, cid)
                 if outcome.dry_run:
                     stats.dry_run += 1
                 elif outcome.queued:
@@ -424,8 +583,8 @@ async def sync_downloads(config: AppConfig) -> SyncStats:
                 if dl is None:
                     continue
                 cand = s.get(Candidate, dl.candidate_id)
-                if cand is not None and cand.status is CandidateStatus.rejected:
-                    # The user rejected it after the grab; reflect that, don't
+                if cand is not None and cand.status in STOPPED_STATUSES:
+                    # The user stopped it after the grab; reflect that, don't
                     # silently flip the candidate back to imported.
                     dl.state = "cancelled"
                     continue

@@ -125,6 +125,34 @@ def _get_or_create_genre(session: Session, name: str) -> Genre:
     return genre
 
 
+# Filled from the duplicate when the surviving row has nothing. Ids and genres are
+# handled separately in merge_titles.
+_FILLED_ON_MERGE = (
+    "tvdb_id",
+    "year",
+    "runtime",
+    "imdb_rating",
+    "imdb_votes",
+    "tmdb_rating",
+    "tmdb_votes",
+    "popularity",
+    "poster_url",
+    "overview",
+    "original_language",
+    "origin_countries",
+    "release_date",
+    "certification",
+    "keywords",
+    "cast_top",
+    "directors",
+    "collection_tmdb_id",
+    "collection_name",
+    "seasons_count",
+    "episodes_count",
+    "series_status",
+)
+
+
 def apply_tmdb_details(session: Session, title: Title, t: TmdbTitle) -> None:
     """Copy TMDb details (including taste/ML features) onto a Title row.
 
@@ -179,8 +207,31 @@ def apply_tmdb_details(session: Session, title: Title, t: TmdbTitle) -> None:
         title.genres = [_get_or_create_genre(session, g) for g in t.genres]
 
 
-def _merge_title(session: Session, dup: Title, canonical: Title) -> None:
-    """Re-point a duplicate title's children to the canonical row and delete it."""
+def merge_titles(
+    session: Session, dup: Title, canonical: Title, *, fill_metadata: bool = True
+) -> None:
+    """Fold ``dup`` into ``canonical``: move its children, then delete it.
+
+    Flags are ORed, so a followed show stays followed. With ``fill_metadata``,
+    values only ``dup`` has fill ``canonical``'s gaps and nothing is overwritten;
+    pass False when ``dup``'s metadata may describe a different work. Candidates
+    move as they are: a rejection stays a rejection on the surviving row.
+    """
+
+    canonical.followed = bool(canonical.followed or dup.followed)
+    canonical.arr_has_file = bool(canonical.arr_has_file or dup.arr_has_file)
+    if fill_metadata:
+        for column in _FILLED_ON_MERGE:
+            if getattr(canonical, column) in (None, []):
+                setattr(canonical, column, getattr(dup, column))
+        if not canonical.genres:
+            canonical.genres = list(dup.genres)
+        # Unique per (tmdb_id, kind) and imdb_id, so dup gives them up first.
+        tmdb_id, imdb_id = dup.tmdb_id, dup.imdb_id
+        dup.tmdb_id = dup.imdb_id = None
+        session.flush()
+        canonical.tmdb_id = canonical.tmdb_id or tmdb_id
+        canonical.imdb_id = canonical.imdb_id or imdb_id
 
     for model in (OwnedFile, Candidate, Subtitle):
         session.execute(update(model).where(model.title_id == dup.id).values(title_id=canonical.id))
@@ -225,7 +276,7 @@ def _persist_one(res: _Result, stats: EnrichStats) -> None:
             )
         )
         if canonical is not None:
-            _merge_title(session, dup=title, canonical=canonical)
+            merge_titles(session, dup=title, canonical=canonical)
             apply_tmdb_details(session, canonical, t)
             _apply_ratings(canonical, res.ratings, stats)
             canonical.last_enriched_at = utcnow()
@@ -297,6 +348,10 @@ async def enrich_catalog(config: AppConfig, *, force: bool = False) -> EnrichSta
                     log.warning("enrich.no_omdb", detail="OMDB_API_KEY unset; skipping ratings")
                 results = await asyncio.gather(*(_enrich_one(s, tmdb, omdb, sem) for s in pending))
             _persist(list(results), stats)
+            # Every title failing is an outage or a bad key, not a clean run.
+            if stats.errors:
+                everything_failed = len(stats.errors) >= len(pending)
+                status = RunStatus.failed if everything_failed else RunStatus.partial
         log.info("enrich.done", **stats.as_dict())
     except Exception as exc:
         status = RunStatus.failed
@@ -312,5 +367,5 @@ async def enrich_catalog(config: AppConfig, *, force: bool = False) -> EnrichSta
         clear_run()
 
     if status is RunStatus.failed:
-        raise RuntimeError(f"Enrichment failed: {stats.errors}")
+        raise RuntimeError(f"Enrichment failed: {stats.errors[:3]}")
     return stats

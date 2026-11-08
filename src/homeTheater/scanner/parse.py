@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 # babelfish ships with guessit; untyped, hence the ignore (like guessit itself).
 from babelfish import (  # type: ignore[import-untyped]
@@ -17,6 +19,7 @@ from babelfish import (  # type: ignore[import-untyped]
 from guessit import guessit
 
 from ..db.models import TitleKind
+from ..metadata.names import names_match
 
 # Video containers we treat as media. Lowercased, with leading dot.
 MEDIA_EXTENSIONS = frozenset(
@@ -27,6 +30,22 @@ SUBTITLE_EXTENSIONS = frozenset({".srt", ".sub", ".ass", ".ssa", ".vtt", ".smi"}
 # Fallback language code when a sidecar has no language tag in its name.
 UNKNOWN_LANG = "und"
 
+# iw is what Hebrew was before ISO renamed it; old release tools still write it.
+_LANGUAGE_ALIASES = {"iw": "he"}
+# On a subtitle "hi" nearly always means hearing-impaired, not Hindi.
+_HEARING_IMPAIRED_TAG = "hi"
+
+_SEASON_DIR_RE = re.compile(r"(?i)^(season|series|s|עונה)[\s._-]*\d+$|^specials$|^extras$")
+# Where a release-style folder name stops being the show's name. Only tags no
+# show title ends in: "Charlotte's Web" and "Complete Unknown" are names.
+_RELEASE_TAG_RE = re.compile(
+    r"(?i)[\s._-]+(?:s\d{1,3}(?:e\d+)?|season[\s._-]*\d+|\d{3,4}p|4k|web[\s._-]?dl|webrip|"
+    r"bluray|blu-ray|brrip|hdtv|x26[45]|h[\s.]?26[45]|hevc)(?:[\s._-].*)?$"
+)
+# A year is a tag in brackets or scene dots. After a plain space it may be the name:
+# "Class of 2020".
+_FOLDER_YEAR_RE = re.compile(r"(?:\s*[(\[]((?:19|20)\d{2})[)\]]|[._]((?:19|20)\d{2}))$")
+
 
 @dataclass(frozen=True, slots=True)
 class ParsedMedia:
@@ -35,9 +54,11 @@ class ParsedMedia:
     year: int | None = None
     season: int | None = None
     episode: int | None = None
+    episode_end: int | None = None  # last episode of a multi-episode file
     resolution: str | None = None
     codec: str | None = None
     container: str | None = None
+    show_folder: str | None = None  # the folder that named this series, as on disk
 
 
 def is_media_file(name: str) -> bool:
@@ -56,6 +77,75 @@ def _first(value: object) -> object:
     return value
 
 
+def _last(value: object) -> object:
+    if isinstance(value, list):
+        return value[-1] if value else None
+    return value
+
+
+def series_identity(folder: str) -> tuple[str, int | None] | None:
+    """``(title, year)`` a show's top-level folder stands for, or ``None``.
+
+    Deliberately not guessit: it reads "The 100" as an episode, "9-1-1" as a title
+    of "1-1", "1923" as a year, and "Dexter - Resurrection" as plain "Dexter". The
+    folder is a name someone chose, so it's taken literally apart from the release
+    tags and year a folder can carry. A ``Season 01`` folder names no show.
+    """
+
+    name = folder.strip()
+    if not name or _SEASON_DIR_RE.match(name):
+        return None
+    name = _RELEASE_TAG_RE.sub("", name)
+    year: int | None = None
+    if (match := _FOLDER_YEAR_RE.search(name)) and match.start() > 0:
+        year = int(match.group(1) or match.group(2))
+        name = name[: match.start()]
+    if " " not in name:  # Dotted scene style: The.White.Lotus
+        name = name.replace(".", " ").replace("_", " ")
+    title = name.strip(" .-_")
+    return (title, year) if title else None
+
+
+def _int(value: object) -> int | None:
+    return value if isinstance(value, int) else None
+
+
+def _parsed(
+    info: Mapping[str, Any],
+    title: str,
+    year: object,
+    kind: TitleKind,
+    show_folder: str | None = None,
+) -> ParsedMedia:
+    season = episode = episode_end = None
+    if kind is TitleKind.series:
+        season = _int(_first(info.get("season")))
+        episode = _int(_first(info.get("episode")))
+        last = _int(_last(info.get("episode")))
+        episode_end = last if last is not None and last != episode else None
+        # Mini-series name their episodes "Part 2", with no season of their own.
+        if episode is None and (part := _int(_first(info.get("part")))) is not None:
+            episode = part
+            season = 1 if season is None else season
+    elif (part := _int(_first(info.get("part")))) is not None:
+        # "Dune Part Two" is a film of its own, not a second copy of "Dune".
+        title = f"{title} Part {part}"
+
+    container = info.get("container")
+    return ParsedMedia(
+        title=title,
+        kind=kind,
+        year=_int(year),
+        season=season,
+        episode=episode,
+        episode_end=episode_end,
+        resolution=info.get("screen_size"),
+        codec=info.get("video_codec"),
+        container=str(container) if container else None,
+        show_folder=show_folder,
+    )
+
+
 def parse_media(path: str, kind_hint: TitleKind | None = None) -> ParsedMedia | None:
     """Parse a media path (relative to its library root) into structured fields.
 
@@ -71,10 +161,29 @@ def parse_media(path: str, kind_hint: TitleKind | None = None) -> ParsedMedia | 
     ``kind_hint`` (from which NAS root the file lives under) is authoritative for
     movie vs. series, since the library is organized into ``Movies`` / ``TV Shows``
     and guessit defaults ambiguous names to "movie". When no hint is given we fall
-    back to guessit's own ``type``. Season/episode still come from guessit.
+    back to guessit's own ``type``.
+
+    A series file below a show folder takes its title and year from that top-level
+    folder alone, and only season/episode from the rest of the path. Filenames
+    disagree within one show (``bkd-tk.s01e06.mkv``, ``Severance (2021) - S02E01``,
+    an anime's romanized name under an English folder), and each disagreement used
+    to create a separate title.
     """
 
-    info = guessit(path.replace("\\", "/"))
+    normalized = path.replace("\\", "/").strip("/")
+    head, sep, rest = normalized.partition("/")
+    identity = series_identity(head) if sep and kind_hint is TitleKind.series else None
+    if identity is not None:
+        title, year = identity
+        info = dict(guessit(rest, {"type": "episode"}))
+        # "Part 2" counts as an episode only of this show: "Making Of Part 2" in a
+        # season folder is an extra.
+        file_title = _first(info.get("title"))
+        if file_title and not names_match(str(file_title), [title]):
+            info.pop("part", None)
+        return _parsed(info, title, year, TitleKind.series, show_folder=head)
+
+    info = guessit(normalized)
     if kind_hint is not None:
         kind = kind_hint
     else:
@@ -84,22 +193,7 @@ def parse_media(path: str, kind_hint: TitleKind | None = None) -> ParsedMedia | 
     title = str(raw_title).strip() if raw_title else ""
     if not title:
         return None
-
-    year = info.get("year")
-    season = _first(info.get("season")) if kind is TitleKind.series else None
-    episode = _first(info.get("episode")) if kind is TitleKind.series else None
-    container = info.get("container")
-
-    return ParsedMedia(
-        title=title,
-        kind=kind,
-        year=int(year) if isinstance(year, int) else None,
-        season=int(season) if isinstance(season, int) else None,
-        episode=int(episode) if isinstance(episode, int) else None,
-        resolution=info.get("screen_size"),
-        codec=info.get("video_codec"),
-        container=str(container) if container else None,
-    )
+    return _parsed(info, title, info.get("year"), kind)
 
 
 def _language_code(token: str) -> str | None:
@@ -110,7 +204,7 @@ def _language_code(token: str) -> str | None:
     (``heb`` -> ``he``) so coverage counting sees one code per language.
     """
 
-    code = token.lower()
+    code = _LANGUAGE_ALIASES.get(token.lower(), token.lower())
     try:
         if len(code) == 2:
             Language.fromalpha2(code)
@@ -121,6 +215,18 @@ def _language_code(token: str) -> str | None:
     except (ValueError, LanguageReverseError):
         return None
     return None
+
+
+def _language_named(token: str) -> str | None:
+    """Code for a language written out in full: ``Hebrew`` -> ``he``."""
+
+    if len(token) < 4:
+        return None
+    try:
+        lang = Language.fromname(token.capitalize())
+    except Exception:  # noqa: BLE001 - babelfish raises several exc types
+        return None
+    return str(getattr(lang, "alpha2", None) or lang.alpha3)
 
 
 _TOKEN_SPLIT_RE = re.compile(r"[._\-\s]+")
@@ -141,13 +247,10 @@ def subtitle_lang_standalone(sub_name: str) -> str | None:
     for token in _TOKEN_SPLIT_RE.split(stem):
         if not token or token.isdigit():
             continue
-        if (code := _language_code(token)) is not None:
-            return code
-        try:
-            lang = Language.fromname(token.capitalize())
-            return str(getattr(lang, "alpha2", None) or lang.alpha3)
-        except Exception:  # noqa: BLE001 - babelfish raises several exc types
+        if token.lower() == _HEARING_IMPAIRED_TAG:
             continue
+        if (code := _language_code(token) or _language_named(token)) is not None:
+            return code
     return UNKNOWN_LANG
 
 
@@ -172,6 +275,8 @@ def subtitle_lang_for(media_name: str, sub_name: str) -> str | None:
 
     tokens = [t for t in sub_stem[len(media_stem) + 1 :].split(".") if t]
     for token in tokens:
-        if (code := _language_code(token)) is not None:
+        if token.lower() == _HEARING_IMPAIRED_TAG:
+            continue
+        if (code := _language_code(token) or _language_named(token)) is not None:
             return code
     return UNKNOWN_LANG

@@ -83,7 +83,7 @@ def _row(name: str, infohash: str, seeders: int = 100) -> dict:
         "info_hash": infohash,
         "seeders": str(seeders),
         "leechers": "1",
-        "size": "1000000",
+        "size": "1500000000",
     }
 
 
@@ -126,11 +126,11 @@ def _transmission_accepts_adds() -> None:
 def test_select_verifies_season_and_rejects_other_packs() -> None:
     releases = [
         TorrentRelease(
-            "pb", "Silo (2023) Season 1 S01 (1080p WEB x265)", 900, 1, 1, infohash="a" * 40
+            "pb", "Silo (2023) Season 1 S01 (1080p WEB x265)", 900, 1, None, infohash="a" * 40
         ),
-        TorrentRelease("pb", "Silo S01-S03 Complete 1080p", 500, 1, 1, infohash="b" * 40),
-        TorrentRelease("pb", "Silo S03E01 1080p WEB h264", 400, 1, 1, infohash="c" * 40),
-        TorrentRelease("pb", "Silo S03 COMPLETE 1080p WEB H264", 50, 1, 1, infohash="d" * 40),
+        TorrentRelease("pb", "Silo S01-S03 Complete 1080p", 500, 1, None, infohash="b" * 40),
+        TorrentRelease("pb", "Silo S03E01 1080p WEB h264", 400, 1, None, infohash="c" * 40),
+        TorrentRelease("pb", "Silo S03 COMPLETE 1080p WEB H264", 50, 1, None, infohash="d" * 40),
     ]
     picked = select_release(releases, allowed_resolutions=["1080p"], min_seeders=1, season=3)
     assert picked is not None and picked.infohash == "d" * 40  # the actual S3 pack
@@ -141,8 +141,8 @@ def test_select_verifies_season_and_rejects_other_packs() -> None:
 
 def test_select_targets_specific_episode_including_multi_episode_files() -> None:
     releases = [
-        TorrentRelease("pb", "Silo S03E01 1080p WEB h264", 400, 1, 1, infohash="a" * 40),
-        TorrentRelease("pb", "Silo S03E01E02 1080p WEB", 300, 1, 1, infohash="b" * 40),
+        TorrentRelease("pb", "Silo S03E01 1080p WEB h264", 400, 1, None, infohash="a" * 40),
+        TorrentRelease("pb", "Silo S03E01E02 1080p WEB", 300, 1, None, infohash="b" * 40),
     ]
     picked = select_release(
         releases, allowed_resolutions=["1080p"], min_seeders=1, season=3, episode=2
@@ -423,7 +423,8 @@ async def test_sync_imports_season_pack_into_existing_series_folder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A pack fans out per-episode into the library, reusing a differently-styled
-    existing series folder, and completes the candidate (pack == full season)."""
+    existing series folder. It delivered 2 of 10 episodes, so whatever its name says
+    the candidate goes back to approved for the rest."""
 
     _write_config(tmp_path, monkeypatch, library=True)
     _reset()
@@ -461,8 +462,7 @@ async def test_sync_imports_season_pack_into_existing_series_folder(
     with session_scope() as s:
         episodes = {o.episode for o in s.query(OwnedFile).all()}
         assert episodes == {1, 2}
-        # a pack counts as the whole season regardless of announced count
-        assert s.get(Candidate, cid).status == CandidateStatus.imported
+        assert s.get(Candidate, cid).status == CandidateStatus.approved
 
 
 @respx.mock
@@ -684,8 +684,9 @@ async def test_sync_pack_skips_extras_no_junk_titles(
     (dl_dir / pack).mkdir(parents=True)
     (dl_dir / pack / "Silo.S02E01.1080p.WEB.mkv").write_bytes(b"e1" * 50)
     (dl_dir / pack / "Silo.S02E02.1080p.WEB.mkv").write_bytes(b"e2" * 50)
-    (dl_dir / pack / "The Cast Ask Each Other Anything - IMDB.mkv").write_bytes(b"x" * 50)
-    (dl_dir / pack / "Rebecca Ferguson on Silo.mkv").write_bytes(b"y" * 50)
+    # Well under an episode's size, so these read as featurettes, not lost episodes.
+    (dl_dir / pack / "The Cast Ask Each Other Anything - IMDB.mkv").write_bytes(b"x" * 20)
+    (dl_dir / pack / "Rebecca Ferguson on Silo.mkv").write_bytes(b"y" * 20)
     _transmission_statuses({"d" * 40: (True, pack)}, dl_dir=str(dl_dir))
 
     from homeTheater.acquisition import sync_downloads

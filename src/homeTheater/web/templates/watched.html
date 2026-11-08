@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Watched · my-home-theater{% endblock %}
+{% block content %}
+<h1>Watched</h1>
+
+<section class="watch-sources">
+  <h2>Kodi</h2>
+  {% if not kodi_enabled %}
+  <p class="muted">Off. Set <code>kodi.enabled</code> to read watch history and refresh Kodi after imports.</p>
+  {% elif not kodi_status %}
+  <p class="muted">No history read yet.</p>
+  {% else %}
+  <p class="muted">Last read {{ kodi_status.finished_at }}: {{ kodi_status.seen }} items,
+     {{ kodi_status.mapped }} matched, {{ kodi_status.updated }} updated.</p>
+  {% if kodi_status.unmapped %}
+  <p>{{ kodi_status.unmapped }} Kodi path(s) didn't match; they were left out. Check <code>kodi.path_map</code>.</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Kodi path</th><th>Why</th></tr></thead>
+    <tbody>
+    {% for u in kodi_status.unmapped_paths %}
+      <tr><td class="small mono">{{ u.path }}</td><td class="small">{{ u.reason }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+  {% endif %}
+
+  <h2>Trakt</h2>
+  {% if not trakt_enabled %}
+  <p class="muted">Off. Set <code>trakt.sync.enabled</code> to pull watched history.</p>
+  {% elif not trakt_status %}
+  <p class="muted">No sync yet.</p>
+  {% else %}
+  <p class="muted">Last sync {{ trakt_status.finished_at }}: {{ trakt_status.movies_seen }} movies,
+     {{ trakt_status.episodes_seen }} episodes, {{ trakt_status.updated }} updated.
+     {% if trakt_push %}Pushed {{ trakt_status.pushed }}, {{ trakt_status.already_on_trakt }} already there.
+     {% else %}Push is off.{% endif %}</p>
+  {% for e in trakt_status.errors %}<p class="small">{{ e }}</p>{% endfor %}
+  {% endif %}
+</section>
+
+<h2>Archive suggestions ({{ suggestions | length }})</h2>
+<p class="muted">Ended series with every episode owned and watched. Suggestions only: nothing here is deleted or unfollowed.</p>
+{% if suggestions %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Series</th><th>Year</th><th>Status</th><th>Episodes</th><th>Size</th><th>Followed</th></tr></thead>
+  <tbody>
+  {% for a in suggestions %}
+    <tr>
+      <td>{{ a.title }}</td>
+      <td>{{ a.year or "—" }}</td>
+      <td>{{ a.status }}</td>
+      <td class="r">{{ a.episodes }}</td>
+      <td class="r">{{ a.size_bytes | human_size }}</td>
+      <td>{{ "yes" if a.followed else "no" }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

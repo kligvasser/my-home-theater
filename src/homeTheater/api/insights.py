@@ -9,9 +9,9 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from ..config import get_config
+from ..config import effective_config
 from ..db.models import TitleKind
-from ..errors import NotConfiguredError
+from ..errors import NotConfiguredError, redact_exc
 from ..metadata.tmdb import TMDbClient
 from .auth import require_token
 
@@ -21,7 +21,7 @@ router = APIRouter(prefix="/api", tags=["insights"])
 def _clusters_payload() -> dict[str, Any]:
     from ..taste import build_index
 
-    cfg = get_config().taste
+    cfg = effective_config().taste
     out: dict[str, Any] = {}
     for kind in TitleKind:
         index = build_index(kind, min_library=cfg.min_library)
@@ -50,7 +50,8 @@ async def api_train() -> dict[str, Any]:
 
     from ..preferences import train
 
-    stats = await asyncio.to_thread(train, get_config())
+    config = await asyncio.to_thread(effective_config)
+    stats = await asyncio.to_thread(train, config)
     return stats.as_dict()
 
 
@@ -60,10 +61,9 @@ async def api_similarity(
 ) -> dict[str, Any]:
     """How close a TMDb title is to the owned library (0..1 + nearest titles)."""
 
-    from ..features import FEATURES_VERSION  # noqa: F401  (feature shape is canonical)
     from ..taste import build_index, tokens_from_features
 
-    cfg = get_config()
+    cfg = await asyncio.to_thread(effective_config)
     if cfg.secrets.tmdb_api_key is None:
         raise HTTPException(503, "TMDB_API_KEY is not configured")
 
@@ -84,8 +84,10 @@ async def api_similarity(
         if exc.response.status_code == 404:
             raise HTTPException(404, f"TMDb has no {kind.value} with id {tmdb_id}") from exc
         raise HTTPException(502, "TMDb request failed") from exc
+    except httpx.TransportError as exc:
+        raise HTTPException(502, "TMDb request failed") from exc
     except NotConfiguredError as exc:
-        raise HTTPException(503, str(exc)) from exc
+        raise HTTPException(503, redact_exc(exc)) from exc
 
     feats = {
         "genres": details.genres,

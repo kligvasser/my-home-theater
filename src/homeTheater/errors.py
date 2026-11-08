@@ -12,7 +12,18 @@ from __future__ import annotations
 
 import re
 
-_QUERY_SECRET_RE = re.compile(r"(?i)\b(api_?key|apikey|token|password|secret)=[^&\s'\"]+")
+# ``anything_token=…`` in a query string or message: api_key, apikey, access_token,
+# client_secret, session_key, password…
+_QUERY_SECRET_RE = re.compile(r"(?i)\b(\w*(?:token|secret|key|pass(?:word)?))=[^&\s'\"]+")
+# The same names as a repr'd dict or JSON body: {'password': 'x'}, "token": "x".
+_MAPPING_SECRET_RE = re.compile(
+    r"""(?i)(['"]\w*(?:token|secret|key|password)['"]\s*:\s*['"])[^'"]+"""
+)
+_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+# Up to the last @ before the path: a password can hold an @ of its own.
+_URL_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s'\"]+@")
+# opensubtitles.org puts the session id in the path of its download links.
+_SID_PATH_RE = re.compile(r"/sid-[^/\s'\"?&]+")
 _TELEGRAM_BOT_RE = re.compile(r"/bot[0-9]+:[A-Za-z0-9_-]+")
 
 
@@ -34,14 +45,29 @@ class InvalidTransitionError(ValueError):
     """The requested candidate status change is not allowed from its current state."""
 
 
-def redact(text: str) -> str:
-    """Strip API keys/tokens (query params, Telegram bot paths) from ``text``."""
+class JobDeadlineExceededError(RuntimeError):
+    """A scheduled job ran past its wall-clock deadline and was cancelled.
 
-    text = _QUERY_SECRET_RE.sub(lambda m: m.group(0).split("=")[0] + "=REDACTED", text)
+    Deliberately not a :class:`TimeoutError`: ``OSError(ETIMEDOUT)`` from the NAS
+    *is* one, and that is an ordinary job failure, not this job being cut off."""
+
+
+def redact(text: str) -> str:
+    """Strip credentials from ``text``: secret-named params and mapping values,
+    bearer tokens, URL userinfo, session-id path segments and Telegram bot paths."""
+
+    text = _URL_USERINFO_RE.sub(r"\1REDACTED@", text)
+    text = _QUERY_SECRET_RE.sub(lambda m: m.group(1) + "=REDACTED", text)
+    text = _MAPPING_SECRET_RE.sub(lambda m: m.group(1) + "REDACTED", text)
+    text = _BEARER_RE.sub("Bearer REDACTED", text)
+    text = _SID_PATH_RE.sub("/sid-REDACTED", text)
     return _TELEGRAM_BOT_RE.sub("/botREDACTED", text)
 
 
 def redact_exc(exc: BaseException) -> str:
-    """``str(exc)`` with secrets stripped — the only safe way to persist/display one."""
+    """``str(exc)`` with secrets stripped — the only safe way to persist/display one.
 
-    return redact(str(exc))
+    Falls back to the type name: ``str(httpx.ReadTimeout(""))`` is empty, which
+    would otherwise reach the dashboard as a blank error."""
+
+    return redact(str(exc)).strip() or type(exc).__name__

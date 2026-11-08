@@ -12,6 +12,8 @@ Everything the rest of the app sees is a :class:`TorrentRelease` /
 
 from __future__ import annotations
 
+import base64
+import re
 from dataclasses import dataclass
 from typing import Protocol
 from urllib.parse import quote
@@ -31,6 +33,9 @@ DEFAULT_TRACKERS: tuple[str, ...] = (
 )
 
 
+_MAGNET_BTIH = re.compile(r"(?i)urn:btih:([0-9a-f]{40}|[a-z2-7]{32})(?![0-9a-z])")
+
+
 @dataclass(frozen=True, slots=True)
 class TorrentRelease:
     """One search hit from an indexer."""
@@ -42,6 +47,19 @@ class TorrentRelease:
     size_bytes: int | None
     infohash: str | None = None  # 40-hex btih; enough to build a magnet
     magnet: str | None = None  # some sources hand back a full magnet directly
+
+    def btih(self) -> str | None:
+        """Lower-case hex infohash, from the magnet if the source gave only that."""
+
+        if self.infohash:
+            return self.infohash.lower()
+        match = _MAGNET_BTIH.search(self.magnet or "")
+        if match is None:
+            return None
+        found = match.group(1)
+        if len(found) == 40:
+            return found.lower()
+        return base64.b32decode(found.upper()).hex()  # magnets may carry base32
 
     def magnet_uri(self) -> str | None:
         """A usable magnet, built from the infohash if the source gave only that."""
@@ -86,6 +104,14 @@ class TorrentStatus:
     # File names inside the torrent, once magnet metadata resolves. None while
     # unknown — the safety scan (executables / no media) waits for a real list.
     files: list[str] | None = None
+    # Bytes still to download once metadata is in, for the free-space check.
+    left_bytes: int | None = None
+    # Parked by the client (its queue, or verifying): not a stall.
+    queued: bool = False
+    # Stopped in the client with no error: someone paused it on purpose.
+    paused: bool = False
+    # ``error`` is the client's own failure (disk, missing data), not a tracker hiccup.
+    error_is_local: bool = False
 
     def content_path(self) -> str | None:
         """Local path to the downloaded file/folder (``save_path`` joined to

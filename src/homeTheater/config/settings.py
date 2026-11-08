@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,10 +19,22 @@ class NASPaths(BaseModel):
     movies_root: str = Field(..., description="SMB path or share subpath for movies")
     tv_root: str = Field(..., description="SMB path or share subpath for TV shows")
     share: str | None = Field(None, description="SMB share name if paths are relative")
+    # Address to dial for scans when SMB_HOST is a flaky ``.local`` name, e.g. the
+    # NAS's IP. Catalog paths keep SMB_HOST either way: it only changes where the
+    # socket goes, never OwnedFile.path. None -> resolve SMB_HOST at each walk.
+    connect_host: str | None = None
+
+
+# Models a dashboard override can reach. A typo'd key is rejected rather than
+# dropped, so a setting can't look saved while nothing changed. These also read
+# config.yaml, so an unknown key in those sections fails at startup.
+_STRICT = ConfigDict(extra="forbid")
 
 
 class KindThresholds(BaseModel):
     """Optional per-kind overrides; ``None`` falls back to the global value."""
+
+    model_config = _STRICT
 
     min_imdb_rating: float | None = Field(None, ge=0, le=10)
     min_imdb_votes: int | None = Field(None, ge=0)
@@ -47,6 +59,8 @@ class Thresholds(BaseModel):
     the IMDb votes of an equally-loved series), so each kind can override the
     global bars via ``movie:`` / ``series:``.
     """
+
+    model_config = _STRICT
 
     min_imdb_rating: float = Field(7.0, ge=0, le=10)
     min_imdb_votes: int = Field(25_000, ge=0)
@@ -79,6 +93,8 @@ class Thresholds(BaseModel):
 class FeatureFlags(BaseModel):
     """Safety switches. Defaults are the *safe* values."""
 
+    model_config = _STRICT
+
     dry_run: bool = True
     auto_approve: bool = False
 
@@ -94,10 +110,52 @@ class Schedule(BaseModel):
     acquire_interval_minutes: int = Field(30, ge=0)  # queue approved candidates
     import_reconcile_interval_minutes: int = Field(60, ge=0)
     backup_interval_minutes: int = Field(1440, ge=0)  # daily DB backup
+    train_interval_minutes: int = Field(1440, ge=0)  # retrain the preference model
+    trash_interval_minutes: int = Field(1440, ge=0)  # purge expired NAS trash
+    upgrades_interval_minutes: int = Field(1440, ge=0)  # look for better copies (F4)
     # Cancel a scheduled job that runs longer than this so a hung NAS/network
     # job can't hold the global lock forever and starve the others (e.g. backup).
     # 0 disables the timeout. Generous by default — legit big copies are slow.
     job_timeout_minutes: int = Field(180, ge=0)
+    # On startup and after the host wakes, run any job whose last success is older
+    # than its interval. The Mac sleeps through interval fires, so without this a
+    # daily job can go days without running.
+    catch_up: bool = True
+
+
+class Scanner(BaseModel):
+    """How much one scan may prune from a root before it refuses (a walk that
+    "lost" that many files is more likely a NAS fault than real deletions).
+
+    Refused when the prune exceeds ``max_prune_rows``, or exceeds both
+    ``prune_floor_rows`` and ``max_prune_percent`` of the root's catalog rows. The
+    floor is what lets a small library lose a file: 1 of 10 is 10%. Override once
+    with ``home-theater scan --force-prune``.
+    """
+
+    max_prune_percent: float = Field(5.0, gt=0, le=100)
+    max_prune_rows: int = Field(100, ge=1)
+    prune_floor_rows: int = Field(5, ge=0)
+    # Abandon (and fail) an SMB walk that takes longer than this. Kept under
+    # schedule.job_timeout_minutes so a stuck walk also fails for manual scans,
+    # which have no job timeout. 0 disables it.
+    walk_timeout_minutes: int = Field(150, ge=0)
+
+
+class Server(BaseModel):
+    """Which ``Host`` headers the dashboard answers to (DNS-rebinding protection).
+
+    The machine's own hostname is always added. ``HOME_THEATER_ALLOWED_HOSTS``
+    (comma-separated) adds more without editing this file.
+    """
+
+    # Exact names or "*.suffix"; a lone "*" turns the check off.
+    allowed_hosts: list[str] = Field(
+        default_factory=lambda: ["localhost", "127.0.0.1", "::1", "*.local"]
+    )
+    # Also accept private/Tailscale IP literals (http://192.168.1.20:8000 from a
+    # phone). A rebinding attack needs a DNS *name*, so IPs don't weaken the check.
+    allow_private_ips: bool = True
 
 
 class Database(BaseModel):
@@ -116,6 +174,8 @@ class Metadata(BaseModel):
 class Discovery(BaseModel):
     """Candidate discovery behaviour (plan §5.4)."""
 
+    model_config = _STRICT
+
     trending: bool = True
     top_rated: bool = False
     watchlist: bool = True  # Trakt watchlist (needs keys + `home-theater trakt-auth`)
@@ -125,6 +185,20 @@ class Discovery(BaseModel):
     trending_window: str = Field("week", pattern="^(day|week)$")
     max_per_source: int = Field(20, ge=1, le=100)
     excluded_genres: list[str] = Field(default_factory=list)
+
+
+class SubtitleSync(BaseModel):
+    """Timing check of subtitles chosen without a hash match (needs ffsubsync + ffmpeg
+    on PATH; missing tools are a skip, not a failure)."""
+
+    model_config = _STRICT
+
+    enabled: bool = False
+    interval_minutes: int = Field(360, ge=1)
+    max_per_run: int = Field(5, ge=1)  # each one reads a whole film over the NAS
+    timeout_minutes: int = Field(15, ge=1)  # hard limit for one file
+    min_offset_seconds: float = Field(0.3, gt=0)  # below this it's already in time
+    max_offset_seconds: float = Field(60.0, gt=0)  # past this the result is distrusted
 
 
 class Subtitles(BaseModel):
@@ -137,6 +211,8 @@ class Subtitles(BaseModel):
       ``.srt`` next to each owned file, driven by our own catalog coverage. No
       Bazarr/Radarr/Sonarr required.
     """
+
+    model_config = _STRICT
 
     languages: list[str] = Field(default_factory=lambda: ["he", "en"])
     # Cap search/download work per sweep so a big backlog doesn't burn provider
@@ -157,6 +233,7 @@ class Subtitles(BaseModel):
     # one is heavily rate-limited. Register yours and set it here.
     opensubtitles_org_user_agent: str = "TemporaryUserAgent"
     request_timeout: float = Field(20.0, gt=0)
+    sync: SubtitleSync = Field(default_factory=SubtitleSync)
 
     @property
     def primary(self) -> str:
@@ -169,6 +246,8 @@ class Taste(BaseModel):
     Unsupervised — works from the owned catalog alone, no approve/reject labels
     needed. Discovery blends the similarity into candidate scores and reasons.
     """
+
+    model_config = _STRICT
 
     enabled: bool = True
     min_library: int = Field(8, ge=2, description="min enriched owned titles per kind")
@@ -265,6 +344,8 @@ class DownloadWindow(BaseModel):
     e.g. 22→6). A manual "grab now" (CLI or the dashboard) always bypasses it.
     """
 
+    model_config = _STRICT
+
     enabled: bool = False
     start_hour: int = Field(2, ge=0, le=23)
     end_hour: int = Field(6, ge=0, le=23)
@@ -288,6 +369,8 @@ class Acquisition(BaseModel):
       (see :class:`Torrent`). Self-contained; no arr stack required.
     """
 
+    model_config = _STRICT
+
     backend: Literal["arr", "torrent"] = "arr"
     movie_quality_profile: str = "HD-1080p"
     series_quality_profile: str = "HD-1080p"
@@ -296,6 +379,68 @@ class Acquisition(BaseModel):
     search_on_add: bool = True
     # Optional nightly window for the scheduled acquire job (dashboard-editable).
     window: DownloadWindow = Field(default_factory=DownloadWindow)
+
+
+class Kodi(BaseModel):
+    """Library refresh and watch history over Kodi's JSON-RPC. Credentials are the
+    KODI_USER / KODI_PASS secrets."""
+
+    model_config = _STRICT
+
+    enabled: bool = False
+    url: str | None = None  # e.g. http://kodi.local:8080/jsonrpc
+    # Kodi path prefix -> catalog prefix. A path no prefix covers is reported.
+    path_map: dict[str, str] = Field(default_factory=dict)
+    # Kodi's lastplayed has no zone. None -> the zone of the host running this app.
+    timezone: str | None = None
+    scan_debounce_seconds: int = Field(900, ge=0)  # quiet time after the last import
+    scan_poll_minutes: int = Field(5, ge=1)  # how often a wanted scan is looked for
+    history_interval_minutes: int = Field(60, ge=1)
+    request_timeout: float = Field(10.0, gt=0)
+
+
+class TraktSync(BaseModel):
+    """Two-way watched state with Trakt (needs TRAKT_* and ``home-theater trakt-auth``)."""
+
+    model_config = _STRICT
+
+    enabled: bool = False
+    push: bool = False  # also send Kodi's watched state to Trakt
+    interval_minutes: int = Field(360, ge=1)
+
+
+class Trakt(BaseModel):
+    model_config = _STRICT
+
+    sync: TraktSync = Field(default_factory=TraktSync)
+
+
+class Trash(BaseModel):
+    """The NAS safety net: what the app deletes from the library is renamed into
+    ``<torrent.library_base_dir>/.home-theater-trash/`` and purged after
+    ``retention_days``. ``enabled: false`` goes back to deleting outright."""
+
+    model_config = _STRICT
+
+    enabled: bool = True
+    retention_days: int = Field(30, ge=1)
+
+
+class Upgrades(BaseModel):
+    """Replace an owned movie with a clearly better release (movies only).
+
+    Off by default, and with ``auto: false`` every replacement waits for a click on
+    the Candidates page. Needs the torrent backend, ``torrent.library_base_dir`` and
+    the trash: the old file always goes to the trash, after the new one is verified.
+    """
+
+    model_config = _STRICT
+
+    enabled: bool = False
+    auto: bool = False  # grab without asking
+    min_seeders: int = Field(10, ge=1)  # raised to torrent.min_seeders if that's higher
+    cooldown_days: int = Field(30, ge=1)  # per title, between searches and after a swap
+    max_titles_per_run: int = Field(10, ge=1)  # each one is a tracker search
 
 
 class Secrets(BaseSettings):
@@ -307,15 +452,16 @@ class Secrets(BaseSettings):
 
     @field_validator("*", mode="before")
     @classmethod
-    def _blank_is_unset(cls, v: object) -> object:
+    def _blank_is_unset(cls, v: object, info: ValidationInfo) -> object:
         """Treat an empty/whitespace env var (e.g. ``OMDB_API_KEY=``) as unset.
 
         Otherwise pydantic builds ``SecretStr("")`` and downstream ``is not None``
-        checks think the provider is configured — then every call 401s.
+        checks think the provider is configured — then every call 401s. Unset means
+        the field's default, not None: ``DASHBOARD_REQUIRE_AUTH=`` is a bool.
         """
 
-        if isinstance(v, str) and v.strip() == "":
-            return None
+        if isinstance(v, str) and v.strip() == "" and info.field_name is not None:
+            return cls.model_fields[info.field_name].default
         return v
 
     # Metadata
@@ -354,6 +500,10 @@ class Secrets(BaseSettings):
     trakt_client_id: str | None = None
     trakt_client_secret: SecretStr | None = None
 
+    # Kodi web server login (used when kodi.enabled).
+    kodi_user: str | None = None
+    kodi_pass: SecretStr | None = None
+
     # Notifications
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str | None = None
@@ -370,6 +520,16 @@ class Secrets(BaseSettings):
     webhook_token: SecretStr | None = None
 
 
+class Digest(BaseModel):
+    """The daily Telegram summary. Runs under the scheduler, so it also needs
+    ``schedule.enabled`` and a Telegram bot in ``.env``."""
+
+    model_config = _STRICT
+
+    enabled: bool = False
+    hour: int = Field(8, ge=0, le=23)  # local time
+
+
 class AppConfig(BaseModel):
     """The fully-resolved application configuration."""
 
@@ -377,6 +537,8 @@ class AppConfig(BaseModel):
     thresholds: Thresholds = Field(default_factory=Thresholds)
     features: FeatureFlags = Field(default_factory=FeatureFlags)
     schedule: Schedule = Field(default_factory=Schedule)
+    server: Server = Field(default_factory=Server)
+    scanner: Scanner = Field(default_factory=Scanner)
     database: Database = Field(default_factory=Database)
     metadata: Metadata = Field(default_factory=Metadata)
     discovery: Discovery = Field(default_factory=Discovery)
@@ -385,5 +547,10 @@ class AppConfig(BaseModel):
     organizer: Organizer = Field(default_factory=Organizer)
     acquisition: Acquisition = Field(default_factory=Acquisition)
     torrent: Torrent = Field(default_factory=Torrent)
+    trash: Trash = Field(default_factory=Trash)
+    upgrades: Upgrades = Field(default_factory=Upgrades)
+    kodi: Kodi = Field(default_factory=Kodi)
+    trakt: Trakt = Field(default_factory=Trakt)
+    digest: Digest = Field(default_factory=Digest)
     enabled_providers: list[str] = Field(default_factory=list)
     secrets: Secrets = Field(default_factory=Secrets, repr=False)

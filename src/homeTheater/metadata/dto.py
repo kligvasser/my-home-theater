@@ -45,6 +45,9 @@ class TmdbTitle:
     episodes_count: int | None = None
     series_status: str | None = None
     seasons: list[TmdbSeason] = field(default_factory=list)  # series details only
+    # TMDb's episode_count includes announced episodes; this is what has aired.
+    last_aired_season: int | None = None
+    last_aired_episode: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

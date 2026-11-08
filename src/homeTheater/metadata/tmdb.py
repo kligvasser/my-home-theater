@@ -1,14 +1,17 @@
 """TMDb client: search, details (with external ids, genres, and taste features),
 and discovery lists.
 
-Uses the v3 API-key query param (works with a free TMDb key). Responses are
-cached via :mod:`.cache` to respect rate limits. Discovery lists (trending /
+A v3 API key can only be sent as a query param, so ``http.get_json`` strips it from
+any exception. A v4 read access token (a JWT, also accepted as ``TMDB_API_KEY``)
+goes in the ``Authorization`` header and never reaches a URL. Responses are cached
+via :mod:`.cache` to respect rate limits. Discovery lists (trending /
 top-rated) use a date-stamped cache key with a 1-day TTL — "trending this week"
 must not be served stale for the full metadata ``cache_days``.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -18,6 +21,7 @@ from ..db.models import TitleKind
 from .cache import cache_get, cache_set
 from .dto import TmdbSeason, TmdbTitle
 from .http import get_json
+from .names import names_match
 
 BASE_URL = "https://api.themoviedb.org/3"
 IMAGE_BASE = "https://image.tmdb.org/t/p/w500"
@@ -25,6 +29,10 @@ PROVIDER = "tmdb"
 PAGE_SIZE = 20  # fixed by the TMDb API
 MAX_LIST_PAGES = 5
 LIST_TTL_DAYS = 1
+# Results per search, and in all per title, worth one extra request for their
+# translated and alternative names when no primary name matched.
+NAME_LOOKUPS_PER_SEARCH = 3
+MAX_NAME_LOOKUPS = 5
 
 # Details payloads changed shape when taste features were added; the version tag
 # keeps stale pre-feature cache entries from being served.
@@ -71,6 +79,10 @@ def _tv_certification(data: dict[str, Any]) -> str | None:
     return None
 
 
+def _has_results(data: dict[str, Any]) -> bool:
+    return bool(data.get("results"))
+
+
 def _names(items: list[dict[str, Any]] | None, limit: int | None = None) -> list[str]:
     out = [i["name"] for i in (items or []) if i.get("name")]
     return out[:limit] if limit else out
@@ -84,8 +96,11 @@ class TMDbClient:
         language: str = "en-US",
         cache_days: int = 14,
     ) -> None:
-        self._api_key = api_key
         self._client = client
+        # JWT-shaped means a v4 token; v3 keys are bare hex and only work as a param.
+        self._bearer = api_key.count(".") == 2
+        self._auth_params = {} if self._bearer else {"api_key": api_key}
+        self._headers = {"Authorization": f"Bearer {api_key}"} if self._bearer else None
         self._language = language
         self._cache_days = cache_days
 
@@ -95,42 +110,115 @@ class TMDbClient:
         params: dict[str, Any],
         cache_key: str,
         ttl_days: int | None = None,
+        keep: Callable[[dict[str, Any]], bool] | None = None,
     ) -> dict[str, Any]:
+        """GET through the cache. A payload failing ``keep`` is neither stored nor
+        served from an older entry."""
+
         ttl = self._cache_days if ttl_days is None else min(ttl_days, self._cache_days)
         cached = cache_get(PROVIDER, cache_key, ttl)
-        if cached is not None:
+        if cached is not None and (keep is None or keep(cached)):
             return cached
-        params = {"api_key": self._api_key, **params}
-        data = await get_json(self._client, f"{BASE_URL}{path}", params)
-        cache_set(PROVIDER, cache_key, data)
+        data = await get_json(
+            self._client,
+            f"{BASE_URL}{path}",
+            {**self._auth_params, **params},
+            headers=self._headers,
+        )
+        if keep is None or keep(data):
+            cache_set(PROVIDER, cache_key, data)
         return data
 
-    async def search(self, title: str, year: int | None, kind: TitleKind) -> int | None:
-        """Return the best-matching TMDb id for a title, or None."""
-
+    async def _search_page(
+        self, title: str, year: int | None, kind: TitleKind
+    ) -> list[dict[str, Any]]:
         if kind is TitleKind.movie:
-            params: dict[str, Any] = {"query": title, "language": self._language}
-            if year:
-                params["year"] = year
-            path, date_field = "/search/movie", "release_date"
+            path, year_param = "/search/movie", "year"
         else:
-            params = {"query": title, "language": self._language}
-            if year:
-                params["first_air_date_year"] = year
-            path, date_field = "/search/tv", "first_air_date"
-
+            path, year_param = "/search/tv", "first_air_date_year"
+        params: dict[str, Any] = {"query": title, "language": self._language}
+        if year:
+            params[year_param] = year
         key = f"search:{kind.value}:{self._language}:{title.lower()}:{year or ''}"
-        data = await self._get(path, params, key)
-        results: list[dict[str, Any]] = data.get("results") or []
-        if not results:
-            return None
+        # An empty answer is not cached: the title may simply not be on TMDb *yet*,
+        # and two weeks of remembered "nothing" is how it stayed unmatched.
+        data = await self._get(path, params, key, keep=_has_results)
+        return list(data.get("results") or [])
 
-        # Prefer an exact-year match when a year is known; else the top result.
-        if year is not None:
-            for r in results:
-                if _year_of(r.get(date_field)) == year:
-                    return int(r["id"])
-        return int(results[0]["id"])
+    async def _all_names(self, tmdb_id: int, kind: TitleKind) -> list[str | None]:
+        """Every name TMDb knows for a title, translations and aliases included."""
+
+        path = f"/movie/{tmdb_id}" if kind is TitleKind.movie else f"/tv/{tmdb_id}"
+        data = await self._get(
+            path,
+            {"append_to_response": "alternative_titles,translations"},
+            f"names:{kind.value}:{tmdb_id}",
+        )
+        names: list[str | None] = [
+            data.get("title"),
+            data.get("name"),
+            data.get("original_title"),
+            data.get("original_name"),
+        ]
+        # /movie keys these under "titles", /tv under "results".
+        aliases = data.get("alternative_titles") or {}
+        for alias in (aliases.get("titles") or []) + (aliases.get("results") or []):
+            names.append(alias.get("title"))
+        for entry in (data.get("translations") or {}).get("translations") or []:
+            translated = entry.get("data") or {}
+            names.append(translated.get("title") or translated.get("name"))
+        return names
+
+    @staticmethod
+    def _pick(
+        title: str, year: int | None, results: list[dict[str, Any]], kind: TitleKind
+    ) -> int | None:
+        """The result whose own name matches, preferring the nearest release year."""
+
+        date_field = "release_date" if kind is TitleKind.movie else "first_air_date"
+        name_fields = ("title", "original_title", "name", "original_name")
+
+        def distance(result: dict[str, Any]) -> int:
+            released = _year_of(result.get(date_field))
+            return abs(released - year) if released is not None and year is not None else 99
+
+        matching = [
+            r
+            for r in results
+            if "id" in r
+            and names_match(
+                title,
+                (r.get(field) for field in name_fields),
+                exact_year=distance(r) == 0,
+            )
+        ]
+        return int(min(matching, key=distance)["id"]) if matching else None
+
+    async def search(self, title: str, year: int | None, kind: TitleKind) -> int | None:
+        """The TMDb id of the title with this name, or None.
+
+        A strict year search misses titles whose folder or filename is a year off
+        (and those TMDb dates differently), so it widens to the neighbouring years
+        and then to no year. A result only counts if a name matches: first its own
+        names, then, for the top few, its translations and aliases, which is what
+        keeps Hebrew and romanized titles matchable.
+        """
+
+        unverified: dict[int, None] = {}
+        attempts = (year, year + 1, year - 1, None) if year else (None,)
+        for attempt in attempts:
+            results = await self._search_page(title, attempt, kind)
+            match = self._pick(title, year, results, kind)
+            if match is not None:
+                return match
+            for result in results[:NAME_LOOKUPS_PER_SEARCH]:
+                if "id" in result:
+                    unverified.setdefault(int(result["id"]))
+
+        for tmdb_id in list(unverified)[:MAX_NAME_LOOKUPS]:
+            if names_match(title, await self._all_names(tmdb_id, kind)):
+                return tmdb_id
+        return None
 
     async def search_results(self, title: str, kind: TitleKind, limit: int = 8) -> list[TmdbTitle]:
         """Top search matches as stubs (id/title/year/poster) — for the UI's
@@ -141,7 +229,9 @@ class TMDbClient:
         else:
             path, date_field = "/search/tv", "first_air_date"
         key = f"searchlist:{kind.value}:{self._language}:{title.lower()}"
-        data = await self._get(path, {"query": title, "language": self._language}, key)
+        data = await self._get(
+            path, {"query": title, "language": self._language}, key, keep=_has_results
+        )
         out: list[TmdbTitle] = []
         for r in data.get("results") or []:
             if "id" not in r:
@@ -210,7 +300,11 @@ class TMDbClient:
         media = "movie" if kind is TitleKind.movie else "tv"
         return await self._discover_list(f"/{media}/top_rated", kind, f"top_rated:{media}", limit)
 
-    async def details(self, tmdb_id: int, kind: TitleKind) -> TmdbTitle:
+    async def details(
+        self, tmdb_id: int, kind: TitleKind, *, ttl_days: int | None = None
+    ) -> TmdbTitle:
+        """Full details. ``ttl_days`` shortens the cache for a caller that needs news."""
+
         if kind is TitleKind.movie:
             path = f"/movie/{tmdb_id}"
             extra = "external_ids,keywords,credits,release_dates"
@@ -218,7 +312,12 @@ class TMDbClient:
             path = f"/tv/{tmdb_id}"
             extra = "external_ids,keywords,credits,content_ratings"
         key = f"details:{_DETAILS_CACHE_VERSION}:{kind.value}:{tmdb_id}:{self._language}"
-        data = await self._get(path, {"language": self._language, "append_to_response": extra}, key)
+        data = await self._get(
+            path,
+            {"language": self._language, "append_to_response": extra},
+            key,
+            ttl_days=ttl_days,
+        )
 
         external = data.get("external_ids") or {}
         imdb_id = data.get("imdb_id") or external.get("imdb_id")
@@ -245,6 +344,7 @@ class TMDbClient:
             seasons = episodes = None
             series_status = None
             season_list = []
+            last_aired: dict[str, Any] = {}
         else:
             name = data.get("name") or data.get("original_name") or ""
             release_date = data.get("first_air_date") or None
@@ -266,6 +366,7 @@ class TMDbClient:
                 for s in (data.get("seasons") or [])
                 if (n := _int_or_none(s.get("season_number"))) is not None
             ]
+            last_aired = data.get("last_episode_to_air") or {}
 
         collection = data.get("belongs_to_collection") or {}
         genres = [g["name"] for g in (data.get("genres") or []) if g.get("name")]
@@ -296,4 +397,6 @@ class TMDbClient:
             episodes_count=episodes,
             series_status=series_status,
             seasons=season_list,
+            last_aired_season=_int_or_none(last_aired.get("season_number")),
+            last_aired_episode=_int_or_none(last_aired.get("episode_number")),
         )

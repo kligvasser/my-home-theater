@@ -11,7 +11,7 @@ from typing import Any
 
 import httpx
 
-from ..errors import TransientProviderError
+from ..errors import TransientProviderError, redact_exc
 from .cache import cache_get, cache_set
 from .dto import OmdbRatings
 from .http import get_json
@@ -48,15 +48,31 @@ class OMDbClient:
         self._client = client
         self._cache_days = cache_days
 
-    async def by_imdb_id(self, imdb_id: str) -> OmdbRatings:
-        key = f"rating:{imdb_id}"
-        cached = cache_get(PROVIDER, key, self._cache_days)
-        if cached is None:
-            cached = await get_json(
+    async def _fetch(self, imdb_id: str) -> dict[str, Any]:
+        """Raw response. An outage or an exhausted quota raises
+        :class:`TransientProviderError`; a dead key stays an ``HTTPStatusError``."""
+
+        try:
+            return await get_json(
                 self._client,
                 BASE_URL,
                 {"apikey": self._api_key, "i": imdb_id},
             )
+        except httpx.TransportError as exc:
+            raise TransientProviderError(f"OMDb: {redact_exc(exc)}") from None
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            # OMDb answers an exhausted daily quota with a 401, like a bad key.
+            quota = status == 401 and "limit" in exc.response.text.lower()
+            if status == 429 or status >= 500 or quota:
+                raise TransientProviderError(f"OMDb: HTTP {status}") from None
+            raise
+
+    async def by_imdb_id(self, imdb_id: str) -> OmdbRatings:
+        key = f"rating:{imdb_id}"
+        cached = cache_get(PROVIDER, key, self._cache_days)
+        if cached is None:
+            cached = await self._fetch(imdb_id)
             # Cache successes and definitive not-founds only. Transient failures
             # ("Request limit reached!" arrives as a 200 + Response=False) must
             # not poison the cache for cache_days.

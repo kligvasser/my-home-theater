@@ -10,6 +10,7 @@ from .service import (
     queue_approved,
     queue_candidate,
     restart_candidate,
+    retry_import,
     sync_downloads,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "queue_approved",
     "queue_candidate",
     "restart_candidate",
+    "retry_import",
     "sync_downloads",
 ]

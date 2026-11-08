@@ -7,20 +7,24 @@ you don't care about.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import httpx
 
 from ..config import AppConfig
-from ..db.base import utcnow
-from ..db.models import JobRun, RunStatus
-from ..db.session import session_scope
+from ..db.models import RunStatus
 from ..errors import NotConfiguredError, redact_exc
+from ..locks import job_lock
 from ..logging_setup import bind_run, clear_run, get_logger
 from .bazarr import BazarrClient, WantedItem
+from .runs import MAX_ERRORS_SHOWN, finish_run, start_run
 
 log = get_logger(__name__)
+
+SWEEP_LOCK = "subtitles"
 
 
 @dataclass
@@ -36,25 +40,32 @@ class SweepStats:
         return asdict(self)
 
 
-async def sweep_subtitles(config: AppConfig) -> Any:
+async def sweep_subtitles(
+    config: AppConfig, *, on_started: Callable[[], None] | None = None
+) -> Any:
     """Run the configured subtitle backend: Bazarr (default) or native providers.
 
     Returns a stats object with ``.as_dict()`` either way (SweepStats or
-    NativeSweepStats), so callers log/serialize it uniformly.
+    NativeSweepStats), so callers log/serialize it uniformly. One sweep runs at a
+    time across processes: a second raises JobBusyError. ``on_started`` fires once
+    the lock is held and the backend's configuration checks have passed.
     """
 
-    if config.subtitles.backend == "native":
-        from .native import sweep_native
+    with job_lock(config, SWEEP_LOCK):
+        if config.subtitles.backend == "native":
+            from .native import sweep_native
 
-        return await sweep_native(config)
-    return await sweep_missing(config)
+            return await sweep_native(config, on_started=on_started)
+        return await sweep_missing(config, on_started=on_started)
 
 
 def _wants_lang(item: WantedItem, languages: set[str]) -> bool:
     return any(lang in languages for lang in item.missing_langs)
 
 
-async def sweep_missing(config: AppConfig) -> SweepStats:
+async def sweep_missing(
+    config: AppConfig, *, on_started: Callable[[], None] | None = None
+) -> SweepStats:
     """Trigger a Bazarr search for every wanted item missing a target language."""
 
     secrets = config.secrets
@@ -64,15 +75,13 @@ async def sweep_missing(config: AppConfig) -> SweepStats:
     languages = set(config.subtitles.languages)
     budget = config.subtitles.max_searches_per_sweep
 
-    with session_scope() as session:
-        run = JobRun(kind="subtitle", started_at=utcnow(), status=RunStatus.running)
-        session.add(run)
-        session.flush()
-        run_id = run.id
+    if on_started is not None:
+        on_started()
+    run_id = await start_run()
 
     bind_run(run_id=run_id, job="subtitle")
     stats = SweepStats()
-    status = RunStatus.success
+    status = RunStatus.failed  # only a sweep that got to the end earns better
     try:
         async with httpx.AsyncClient(timeout=20.0) as http:
             bazarr = BazarrClient(
@@ -111,20 +120,24 @@ async def sweep_missing(config: AppConfig) -> SweepStats:
                     stats.errors.append(f"episode {e.title}: {redact_exc(exc)}")
             if stats.capped:
                 log.info("subtitle.capped", skipped=stats.capped, budget=budget)
-        log.info("subtitle.done", **stats.as_dict())
+        if not stats.errors:
+            status = RunStatus.success
+        elif stats.searched_movies or stats.searched_episodes:
+            status = RunStatus.partial
+        log.info("subtitle.done", status=status.value, **stats.as_dict())
+    except asyncio.CancelledError:
+        stats.errors.append("sweep cancelled or timed out before finishing")
+        raise
     except Exception as exc:
         status = RunStatus.failed
         stats.errors.append(redact_exc(exc))
         log.error("subtitle.failed", error=redact_exc(exc))
     finally:
-        with session_scope() as session:
-            job_run = session.get(JobRun, run_id)
-            if job_run is not None:
-                job_run.finished_at = utcnow()
-                job_run.status = status
-                job_run.stats = stats.as_dict()
-        clear_run()
+        try:
+            await finish_run(run_id, status, stats.as_dict())
+        finally:
+            clear_run()
 
     if status is RunStatus.failed:
-        raise RuntimeError(f"Subtitle sweep failed: {stats.errors}")
+        raise RuntimeError(f"Subtitle sweep failed: {stats.errors[:MAX_ERRORS_SHOWN]}")
     return stats

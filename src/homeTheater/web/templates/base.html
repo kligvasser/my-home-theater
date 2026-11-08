@@ -15,19 +15,28 @@
       <a href="/candidates" class="{{ 'active' if active == 'candidates' }}"{{ ' aria-current="page"' if active == 'candidates' else '' }}>Candidates</a>
       <a href="/activity" class="{{ 'active' if active == 'activity' }}"{{ ' aria-current="page"' if active == 'activity' else '' }}>Activity</a>
       <a href="/subtitles" class="{{ 'active' if active == 'subtitles' }}"{{ ' aria-current="page"' if active == 'subtitles' else '' }}>Subtitles</a>
+      <a href="/watched" class="{{ 'active' if active == 'watched' }}"{{ ' aria-current="page"' if active == 'watched' else '' }}>Watched</a>
       <a href="/insights" class="{{ 'active' if active == 'insights' }}"{{ ' aria-current="page"' if active == 'insights' else '' }}>Insights</a>
       <a href="/gaps" class="{{ 'active' if active == 'gaps' }}"{{ ' aria-current="page"' if active == 'gaps' else '' }}>Gaps</a>
+      <a href="/inbox" class="{{ 'active' if active == 'inbox' }}"{{ ' aria-current="page"' if active == 'inbox' else '' }}>Inbox <span id="inbox-badge" class="nav-badge" hidden></span></a>
+      <a href="/repair" class="{{ 'active' if active == 'repair' }}"{{ ' aria-current="page"' if active == 'repair' else '' }}>Repair</a>
+      <a href="/storage" class="{{ 'active' if active == 'storage' }}"{{ ' aria-current="page"' if active == 'storage' else '' }}>Storage</a>
       <a href="/settings" class="{{ 'active' if active == 'settings' }}"{{ ' aria-current="page"' if active == 'settings' else '' }}>Settings</a>
       <a href="/runs" class="{{ 'active' if active == 'runs' }}"{{ ' aria-current="page"' if active == 'runs' else '' }}>Runs</a>
       <a href="/status" class="{{ 'active' if active == 'status' }}"{{ ' aria-current="page"' if active == 'status' else '' }}>Status</a>
     </nav>
     <button id="lock" class="lockbtn" data-action="lock" type="button" aria-label="Unlock write actions">🔒</button>
   </header>
-  <div id="flash" class="flash" role="alert" aria-live="polite" hidden></div>
+  <div id="flash" class="flash" hidden></div>
+  <div id="flash-status" class="sr-only" role="status"></div>
+  <div id="flash-alert" class="sr-only" role="alert"></div>
+  <div id="act-announce" class="sr-only" role="status"></div>
+  <div id="conn-banner" class="conn-banner" role="status"></div>
   <main>
     {% block content %}{% endblock %}
   </main>
   <footer class="foot">dashboard · v{{ version }}</footer>
   <script src="/static/app.js?v={{ static_v }}" defer></script>
+  <script src="/static/ops.js?v={{ static_v }}" defer></script>
 </body>
 </html>

@@ -9,7 +9,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import delete, select
 
 from ..dashboard import TITLE_SORTS, get_stats, list_titles, recent_runs
-from ..db.models import Candidate, Download, OwnedFile, Subtitle, Title
+from ..db.models import (
+    LIVE_DOWNLOAD_STATES,
+    Candidate,
+    CandidateStatus,
+    Download,
+    OwnedFile,
+    Subtitle,
+    Title,
+)
 from ..db.session import session_scope
 from ..logging_setup import get_logger
 from .auth import require_token
@@ -49,6 +57,10 @@ def api_delete_title(title_id: int) -> dict[str, Any]:
     Catalog-only: nothing on the NAS is touched. If the file still exists on the
     NAS, the next scan will re-add it. Deleting also drops the title's candidate
     history (including rejected = training labels) — the UI warns about that.
+
+    Refused (409) while anything of the title is in flight: its rows are what the
+    sweep tracks that work by, so deleting them would orphan a running torrent or
+    pull the catalog out from under an import. Cancel it first.
     """
 
     with session_scope() as s:
@@ -59,6 +71,21 @@ def api_delete_title(title_id: int) -> dict[str, Any]:
         candidate_ids = list(
             s.scalars(select(Candidate.id).where(Candidate.title_id == title_id)).all()
         )
+        in_flight = s.scalar(
+            select(Candidate.id).where(
+                Candidate.title_id == title_id,
+                Candidate.status.in_((CandidateStatus.queued, CandidateStatus.downloading)),
+            )
+        ) or s.scalar(
+            select(Download.id).where(
+                Download.candidate_id.in_(candidate_ids),
+                Download.state.in_(LIVE_DOWNLOAD_STATES),
+            )
+        )
+        if in_flight is not None:
+            raise HTTPException(
+                status_code=409, detail=f"'{name}' is in flight; cancel it before deleting"
+            )
         if candidate_ids:
             s.execute(delete(Download).where(Download.candidate_id.in_(candidate_ids)))
             s.execute(delete(Candidate).where(Candidate.id.in_(candidate_ids)))

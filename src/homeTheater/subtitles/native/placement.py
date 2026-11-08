@@ -4,15 +4,22 @@ Owned-file paths are SMB UNC (``\\host\share\Movies\...``) from the scanner, but
 the reliable write path is the local SMB mount (same lesson as the torrent
 importer). :func:`resolve_local_media` maps a UNC path onto ``library_base_dir``;
 local paths (tests, mounted media) pass through unchanged. The file is named
-``<media stem>.<lang>.srt`` so the scanner detects its language on the next scan.
+``<media stem>.<lang>.srt`` (or ``.ass``/``.ssa`` for those formats) so the scanner
+detects its language on the next scan.
 """
 
 from __future__ import annotations
 
 import os
+import uuid
 
 from ...config import AppConfig
-from ...errors import NotConfiguredError
+from ...errors import NotConfiguredError, redact_exc
+from ...logging_setup import get_logger
+from .base import InvalidSubtitleError
+from .payload import MAX_DECOMPRESSED_BYTES, SUBTITLE_EXTENSIONS, validate_subtitle
+
+log = get_logger(__name__)
 
 
 def resolve_local_media(media_path: str, config: AppConfig) -> str:
@@ -32,17 +39,78 @@ def resolve_local_media(media_path: str, config: AppConfig) -> str:
     return os.path.join(base, *rel)
 
 
-def subtitle_dest(local_media_path: str, lang: str, subs_folder: str) -> str:
+def library_mounted(config: AppConfig) -> bool:
+    """False when ``library_base_dir`` is set but nothing is mounted there."""
+
+    base = config.subtitles.library_base_dir
+    return not base or os.path.ismount(base)
+
+
+def media_present(path: str) -> bool:
+    """Whether the media file exists. Unlike ``os.path.exists`` an I/O failure raises:
+    a sick share must not look like a missing file."""
+
+    try:
+        os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return True
+
+
+def subtitle_dest(local_media_path: str, lang: str, subs_folder: str, ext: str = ".srt") -> str:
     directory = os.path.dirname(local_media_path)
     stem = os.path.splitext(os.path.basename(local_media_path))[0]
-    return os.path.join(directory, subs_folder, f"{stem}.{lang}.srt")
+    return os.path.join(directory, subs_folder, f"{stem}.{lang}{ext}")
+
+
+def find_valid_subtitle(local_media_path: str, lang: str, subs_folder: str) -> str | None:
+    """Path of a usable subtitle already at the destination, if any.
+
+    A garbage file (an HTML page stored by an older version) is not adoptable; it
+    is left for a fresh download to overwrite.
+    """
+
+    for ext in SUBTITLE_EXTENSIONS:
+        path = subtitle_dest(local_media_path, lang, subs_folder, ext)
+        try:
+            with open(path, "rb") as f:
+                data = f.read(MAX_DECOMPRESSED_BYTES + 1)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        if len(data) > MAX_DECOMPRESSED_BYTES:
+            continue
+        try:
+            validate_subtitle(data, lang)
+        except InvalidSubtitleError:
+            continue
+        return path
+    return None
+
+
+def _remove_quietly(path: str) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log.warning("subtitle.temp_cleanup_failed", path=path, detail=redact_exc(exc))
 
 
 def write_subtitle(dest: str, data: bytes) -> None:
-    """Atomically write ``data`` to ``dest`` (via a ``.part`` sidecar)."""
+    """Atomically write ``data`` to ``dest`` through a uniquely named temp file.
 
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
-    tmp = dest + ".part"
-    with open(tmp, "wb") as f:
-        f.write(data)
-    os.replace(tmp, dest)
+    The temp name is never reused, so a ``.part`` left open on the NAS can't block
+    later writes. The legacy ``<dest>.part`` is removed when possible; if it is
+    still busy that is only logged.
+    """
+
+    directory = os.path.dirname(dest)
+    os.makedirs(directory, exist_ok=True)
+    _remove_quietly(dest + ".part")
+    tmp = os.path.join(directory, f".{uuid.uuid4().hex}.part")
+    try:
+        with open(tmp, "xb") as f:
+            f.write(data)
+        os.replace(tmp, dest)
+    finally:
+        _remove_quietly(tmp)
