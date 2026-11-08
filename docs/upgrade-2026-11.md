@@ -1,12 +1,13 @@
 # Upgrade runbook — November 2026 audit
 
-Moves the live install from `main` to the `audit-fixes-2026-11` code: a bare process and
+Moves the live install from the pre-audit code (tag `pre-audit-2026-11`) to the audit
+code, merged into `main` on 2026-11-08: a bare process and
 an un-stamped database become a launchd service on the Alembic head. Findings are in
 [`audit-2026-11.md`](audit-2026-11.md).
 
 Run everything from the repo root. `database.url` is relative, and `.env` and
-`config.yaml` are read from the working directory. Commit the branch first: rollback
-needs `git checkout main` to work.
+`config.yaml` are read from the working directory. Rollback checks out the tag
+`pre-audit-2026-11` (the old `main`).
 
 ## What changes on first start
 
@@ -177,6 +178,7 @@ recorded since the backup is lost.
    cp -p data/backups/preference_model.pre-audit-2026-11.joblib data/preference_model.joblib
    cp -p data/backups/config.pre-audit-2026-11.yaml config.yaml
    ```
-4. `git checkout main`, and start it the old way.
+4. `git checkout pre-audit-2026-11` (detached; `git switch -c rollback` to work on it), and
+   start it the old way.
 
 Media and subtitles imported since stay on the NAS, and the next scan catalogs them.
