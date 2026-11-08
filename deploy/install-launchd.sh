@@ -68,6 +68,9 @@ render_plist >"$TARGET"
 plutil -lint "$TARGET"
 
 launchctl bootstrap "$DOMAIN" "$TARGET"
+# RunAtLoad alone did not start it on a first install (2026-11-08: loaded, runs = 0).
+launchctl enable "$DOMAIN/$LABEL"
+launchctl kickstart "$DOMAIN/$LABEL"
 
 PYTHON=$("$ROOT/.venv/bin/python" -c 'import os, sys; print(os.path.realpath(sys.executable))')
 cat <<NOTE

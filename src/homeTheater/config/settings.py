@@ -23,6 +23,11 @@ class NASPaths(BaseModel):
     # NAS's IP. Catalog paths keep SMB_HOST either way: it only changes where the
     # socket goes, never OwnedFile.path. None -> resolve SMB_HOST at each walk.
     connect_host: str | None = None
+    # Scan through this macOS SMB mount (e.g. /Volumes/Elements_25A1-1) instead of
+    # opening SMB connections. Same catalog paths (still keyed on SMB_HOST), and no
+    # Local Network permission needed under launchd. The mount must be this user's
+    # smbfs mount of ``share``, or the scan fails closed. None -> scan over SMB.
+    mount_dir: str | None = None
 
 
 # Models a dashboard override can reach. A typo'd key is rejected rather than

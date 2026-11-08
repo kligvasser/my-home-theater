@@ -191,6 +191,13 @@ in the service layer.
   process (a wedged mount hangs forever). An empty folder under `/Volumes` isn't the
   share, so it's never probed. `nas.connect_host` pins the scanner's socket to an IP
   when `.local` resolution is flaky; catalog paths keep `SMB_HOST` either way.
+- **Scanning under launchd** goes through the mount (`nas.mount_dir`): macOS Local
+  Network privacy silently denies a launchd tool's own SMB sockets (`Errno 65`). The
+  walk runs in a killable `python -I -S` child with an empty environment, skips
+  symlinks and nested volumes, checks the volume is this user's smbfs mount of the
+  share (`statfs`), and maps names back to smbclient's form in `nas_paths.py`: NFC,
+  and Services-for-Mac code points (a trailing dot is `\uf029` over SMB). Everything
+  that turns a UNC path into a mount path goes through `nas_paths`.
 - **ktuvit login** isn't a plain hash: scrape the rotating `encryptionSalt` from
   the homepage, then `PBKDF2-HMAC-SHA1(salt, email, 3000, 16)` → AES-CBC encrypt
   the password (IV = email chars as hex bytes, 16-padded) → SHA256 → base64.

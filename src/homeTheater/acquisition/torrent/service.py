@@ -255,10 +255,11 @@ def _mount_to_unc(dest: str, config: AppConfig) -> str:
     host = config.secrets.smb_host
     share = config.nas.share
     if base and host and share:
-        b = base.rstrip("/")
-        if dest.startswith(b):
-            rel = dest[len(b) :].lstrip("/").replace("/", "\\")
-            return f"\\\\{host}\\{share}\\{rel}"
+        from ...nas_paths import mount_to_unc
+
+        unc = mount_to_unc(dest, base, host, share)
+        if unc is not None:
+            return unc
     return dest
 
 

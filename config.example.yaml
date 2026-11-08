@@ -9,6 +9,12 @@ nas:
   # Address to dial for scans when SMB_HOST is a .local name, e.g. the NAS's IP.
   # Catalog paths keep SMB_HOST either way. null -> resolve SMB_HOST at each walk.
   connect_host: null
+  # Scan through the macOS SMB mount instead of opening SMB connections. Needed
+  # under launchd: macOS blocks a service's own LAN connections (Local Network
+  # privacy, no prompt for a command-line tool), but not reads through a mount.
+  # Same catalog paths. The scan refuses anything but this user's smbfs mount of
+  # `share` from SMB_HOST/connect_host. null -> scan over SMB.
+  mount_dir: null
 
 thresholds:
   # Global bars; movies and series can override below (series accumulate far

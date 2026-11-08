@@ -262,6 +262,8 @@ def _library_dirs(config: AppConfig) -> list[str]:
         dirs.append(config.torrent.library_base_dir)
     if config.subtitles.backend == "native" and config.subtitles.library_base_dir:
         dirs.append(config.subtitles.library_base_dir)
+    if config.nas.mount_dir:  # the scan reads through it
+        dirs.append(config.nas.mount_dir)
     return list(dict.fromkeys(dirs))
 
 

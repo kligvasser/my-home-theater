@@ -137,9 +137,14 @@ chmod 600 .env
 .venv/bin/pre-commit install
 ```
 
-Set `nas.connect_host` in `config.yaml` to the NAS's IP (recommended: scans have failed
-on `.local` resolution). Catalog paths keep `SMB_HOST`, so nothing is re-keyed. Restart
-with `launchctl kickstart -k gui/$(id -u)/com.homeTheater.app`.
+Set `nas.mount_dir: /Volumes/<share>` in `config.yaml` before relying on scheduled scans.
+Under launchd the service can't open its own LAN connections: macOS Local Network
+privacy denies them with `[Errno 65] No route to host` and never prompts, or lists, a
+command-line tool. Reads through the Finder mount aren't affected, and the mount walk
+gives the catalog's exact UNC paths (checked: 1361 of 1361 on 2026-11-08), so nothing
+is re-keyed. It refuses any volume that isn't this user's `smbfs` mount of `nas.share`
+from `SMB_HOST` / `nas.connect_host`. Restart with
+`launchctl kickstart -k gui/$(id -u)/com.homeTheater.app`.
 
 ## Off-by-default features
 

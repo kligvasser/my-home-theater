@@ -33,10 +33,14 @@ def resolve_local_media(media_path: str, config: AppConfig) -> str:
             "Owned files are SMB paths; set subtitles.library_base_dir to the "
             "mounted share (e.g. /Volumes/Elements_25A1-1) so subs can be written."
         )
-    # \\host\share\A\B\file.mkv -> drop host + share, keep the rest.
-    parts = [p for p in media_path.lstrip("\\").split("\\") if p]
-    rel = parts[2:]  # [host, share, *rel]
-    return os.path.join(base, *rel)
+    # \\host\share\A\B\file.mkv -> <base>/A/B/file.mkv, undoing the SMB name
+    # mapping (Crime.101.2026\uf029 is the folder Crime.101.2026. on the mount) and
+    # refusing a path that would land outside the mount, e.g. via a NAS symlink.
+    # A bad path raises MountPathError (a ValueError): that item fails, the sweep
+    # goes on.
+    from ...nas_paths import unc_to_mount
+
+    return unc_to_mount(media_path, base)
 
 
 def library_mounted(config: AppConfig) -> bool:
@@ -104,8 +108,12 @@ def write_subtitle(dest: str, data: bytes) -> None:
     still busy that is only logged.
     """
 
+    from ...nas_paths import require_no_redirect
+
     directory = os.path.dirname(dest)
+    require_no_redirect(os.path.dirname(directory))  # before makedirs follows a link
     os.makedirs(directory, exist_ok=True)
+    require_no_redirect(directory)
     _remove_quietly(dest + ".part")
     tmp = os.path.join(directory, f".{uuid.uuid4().hex}.part")
     try:

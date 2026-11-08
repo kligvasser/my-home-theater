@@ -231,8 +231,12 @@ def library_path(config: AppConfig, catalog_path: str) -> str | None:
     if not base:
         return None
     if catalog_path.startswith("\\\\"):
-        parts = [p for p in catalog_path.lstrip("\\").split("\\") if p]
-        return os.path.join(base, *parts[2:]) if len(parts) > 2 else None
+        from .nas_paths import MountPathError, unc_to_mount
+
+        try:
+            return unc_to_mount(catalog_path, base)
+        except MountPathError:
+            return None
     root = os.path.normpath(base) + os.sep
     return catalog_path if os.path.normpath(catalog_path).startswith(root) else None
 

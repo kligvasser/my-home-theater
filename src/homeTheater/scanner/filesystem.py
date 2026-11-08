@@ -34,6 +34,8 @@ from typing import Any, Protocol, runtime_checkable
 
 from ..errors import redact_exc
 from ..logging_setup import get_logger
+from . import _mountwalk
+from ._mountwalk import MountIdentityError
 
 log = get_logger(__name__)
 
@@ -73,7 +75,7 @@ _TRANSIENT_MESSAGES = (
 
 # Last address each ``.local`` name resolved to, for when mDNS drops out mid-run.
 _last_resolved: dict[str, str] = {}
-_active_walks: weakref.WeakSet[SMBFileSystem] = weakref.WeakSet()
+_active_walks: weakref.WeakSet[SMBFileSystem | MountedFileSystem] = weakref.WeakSet()
 
 
 def is_transient_smb_error(exc: BaseException) -> bool:
@@ -198,6 +200,158 @@ class LocalFileSystem:
                 except OSError:
                     size = 0
                 yield FileEntry(path=full, name=name, parent=dirpath, size=size)
+
+
+_MOUNTWALK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_mountwalk.py")
+# Minimal environment for the walker: no secrets, no PYTHON* overrides.
+_CHILD_ENV = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
+# What may come back on the child's stderr into an error message (and so a log).
+_SAFE_STDERR = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _-=.,:;'()/"
+)
+
+
+def _sanitize(text: bytes) -> str:
+    decoded = text.decode("ascii", "replace").strip()
+    return "".join(ch if ch in _SAFE_STDERR else "?" for ch in decoded)[:300]
+
+
+class MountedFileSystem:
+    """Walk the NAS through its macOS SMB mount (``/Volumes/<share>``), naming every
+    file exactly as :class:`SMBFileSystem` would, so the catalog is unchanged.
+
+    Needs no network access of its own: macOS's mount does the SMB traffic, which
+    is why a launchd service without Local Network permission can still scan. All
+    mount I/O (identity check included) runs in a killable child (``_mountwalk.py``)
+    with an empty environment. The walk fails closed on a read error, a volume that
+    isn't the share, skipped entries, or a timeout. Read-only: never writes.
+    """
+
+    def __init__(
+        self,
+        base_dir: str,
+        host: str,
+        share: str,
+        *,
+        accept_hosts: tuple[str, ...] = (),
+        walk_timeout: float | None = None,
+        ensure_mounted: Callable[[], None] | None = None,
+        verify_identity: bool = True,
+    ) -> None:
+        self.base_dir = base_dir.rstrip("/") or "/"
+        self.host = host
+        self.share = share
+        self._hosts = tuple(h for h in (host, *accept_hosts) if h)
+        self._walk_timeout = walk_timeout
+        self._ensure_mounted = ensure_mounted
+        self._verify_identity = verify_identity
+        self._aborted = threading.Event()
+        self._proc: Any = None
+        self._lock = threading.Lock()
+
+    def resolve(self, root: str) -> str:
+        # Byte-for-byte SMBFileSystem._unc(root): the root itself is not re-encoded.
+        cleaned = root.strip("\\/").replace("/", "\\")
+        return "\\\\" + "\\".join([self.host, self.share, cleaned])
+
+    def abort(self) -> None:
+        self._aborted.set()
+        with self._lock:
+            proc = self._proc
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+
+    def _check_aborted(self) -> None:
+        if self._aborted.is_set():
+            raise WalkAbortedError(f"mount walk of {self.share} was aborted")
+
+    def _argv(self, root: str) -> list[str]:
+        argv = [sys.executable, "-I", "-S", _MOUNTWALK, self.base_dir, root]
+        if self._verify_identity:
+            return [*argv, self.share, str(os.getuid()), *self._hosts]
+        return [*argv, _mountwalk.NO_VERIFY]
+
+    def _run(self, root: str) -> tuple[int, bytes, bytes]:
+        import subprocess
+
+        with self._lock:
+            self._check_aborted()
+            self._proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+                self._argv(root),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=_CHILD_ENV,
+                close_fds=True,
+            )
+        proc = self._proc
+        try:
+            out, err = proc.communicate(timeout=self._walk_timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise WalkAbortedError(f"mount walk of {root!r} timed out") from None
+        finally:
+            with self._lock:
+                self._proc = None
+            if proc.poll() is None:  # an exception mid-read: never leave it running
+                proc.kill()
+                proc.wait()
+        self._check_aborted()
+        return proc.returncode, out, err
+
+    def _list(self, root: str) -> list[tuple[list[str], int]]:
+        import json
+
+        code, out, err = self._run(root)
+        if code == _mountwalk.EXIT_NOT_MOUNTED and self._ensure_mounted is not None:
+            # The one parent-side mount call, made only once the child has found
+            # nothing mounted (so nothing there can hang): remount, then retry.
+            self._ensure_mounted()
+            code, out, err = self._run(root)
+        detail = _sanitize(err) or f"exit {code}"
+        if code in (_mountwalk.EXIT_IDENTITY, _mountwalk.EXIT_NOT_MOUNTED):
+            raise MountIdentityError(detail)
+        if code != 0:
+            raise OSError(f"mount walk of {root!r} failed: {detail}")
+        entries: list[tuple[list[str], int]] = []
+        done: int | None = None
+        for line in out.decode("utf-8").splitlines():
+            record = json.loads(line)
+            if "done" in record:
+                done = int(record["done"])
+                continue
+            parts, size = record["p"], record["s"]
+            if not isinstance(parts, list) or not all(isinstance(p, str) for p in parts):
+                raise OSError("mount walk returned a malformed entry")
+            entries.append((parts, int(size)))
+        if done is None or done != len(entries):
+            raise OSError(f"mount walk of {root!r} ended early")
+        return entries
+
+    def walk(self, root: str) -> Iterator[FileEntry]:
+        from ..nas_paths import encode_component
+
+        if any(c in ("", ".", "..") for c in root.strip("/").split("/")):
+            raise ValueError(f"unsafe library root {root!r}")
+        _active_walks.add(self)
+        started = time.time()
+        try:
+            listed = self._list(root)
+        finally:
+            _active_walks.discard(self)
+        identity = self.resolve(root)
+        entries = []
+        for parts, size in listed:
+            if not parts:
+                raise OSError("mount walk returned a malformed entry")
+            names = [encode_component(p) for p in parts]
+            parent = "\\".join([identity, *names[:-1]])
+            entries.append(
+                FileEntry(path=parent + "\\" + names[-1], name=names[-1], parent=parent, size=size)
+            )
+        log.info("scan.mount_walked", files=len(entries), seconds=round(time.time() - started, 1))
+        yield from entries
 
 
 class SMBFileSystem:

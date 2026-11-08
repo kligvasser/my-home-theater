@@ -12,6 +12,7 @@ from .filesystem import (
     FileEntry,
     FileSystem,
     LocalFileSystem,
+    MountedFileSystem,
     SMBFileSystem,
     abort_active_walks,
     reset_smb_pool,
@@ -23,6 +24,7 @@ __all__ = [
     "FileEntry",
     "FileSystem",
     "LocalFileSystem",
+    "MountedFileSystem",
     "SMBFileSystem",
     "ParsedMedia",
     "ScanStats",
@@ -56,16 +58,38 @@ def build_filesystem(config: AppConfig) -> FileSystem:
     if not share:
         raise NotConfiguredError("nas.share is not set in config.yaml (the SMB share name).")
 
+    walk_timeout = config.scanner.walk_timeout_minutes * 60 or None
+    password = secrets.smb_pass.get_secret_value() if secrets.smb_pass else None
+    if config.nas.mount_dir:
+        return _mounted_filesystem(config, host, share, password, walk_timeout)
     # No (or password-less) credentials => guest/public share, common on
     # consumer NAS; SMBFileSystem opens a guest session in that case.
-    password = secrets.smb_pass.get_secret_value() if secrets.smb_pass else None
     return SMBFileSystem(
         host=host,
         share=share,
         username=secrets.smb_user,
         password=password,
         connect_host=config.nas.connect_host,
-        walk_timeout=config.scanner.walk_timeout_minutes * 60 or None,
+        walk_timeout=walk_timeout,
+    )
+
+
+def _mounted_filesystem(
+    config: AppConfig, host: str, share: str, password: str | None, walk_timeout: float | None
+) -> MountedFileSystem:
+    from ..acquisition.torrent.importer import SmbMount, ensure_mounted
+
+    base = config.nas.mount_dir or ""
+    # Same self-heal as the importer: one `mount volume` if the share dropped
+    # (sleep), with the URL fed on stdin so the password never reaches `ps`.
+    remount = SmbMount(host=host, share=share, username=config.secrets.smb_user, password=password)
+    return MountedFileSystem(
+        base,
+        host,
+        share,
+        accept_hosts=tuple(h for h in (config.nas.connect_host,) if h),
+        walk_timeout=walk_timeout,
+        ensure_mounted=lambda: ensure_mounted(base, remount),
     )
 
 
