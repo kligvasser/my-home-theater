@@ -318,9 +318,13 @@ build and test them independently.
 ### 5.9 `scheduler` / orchestrator
 - APScheduler jobs: periodic NAS scan, discovery refresh, subtitle sweep,
   download monitor, import/reconcile sweep. Each job writes a `job_run`.
-- Global concurrency guard so jobs don't stampede the NAS or APIs. This also
-  protects SQLite: **enable WAL mode + a `busy_timeout`** so concurrent job
-  writes don't hit `database is locked`.
+- Per-resource locks (`JOB_RESOURCES` in `scheduler/jobs.py`): jobs sharing a
+  resource run one at a time, unrelated ones run side by side, and an advisory
+  `flock` per job (`locks.py`) covers CLI and dashboard runs. SQLite stays safe with
+  **WAL mode + a `busy_timeout`** so concurrent job writes don't hit
+  `database is locked`.
+- Deadlines are wall-clock, and after a restart or wake any job past its interval
+  catches up from `job_run` (`scheduler/catchup.py`), because the host sleeps.
 - Add a **reconciliation job**: catalog vs. NAS filesystem vs. Radarr/Sonarr —
   handle files deleted on the NAS or imports the app didn't originate.
 - **Acceptance:** jobs run on their intervals, are individually toggleable, and

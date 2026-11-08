@@ -15,40 +15,68 @@ by setting `acquisition.backend: torrent` in `config.yaml`.
 
 1. `queue`/`acquire` takes each approved candidate, builds a search query from its
    title (and year, for movies), and searches every enabled source concurrently.
-2. `select.py` drops under-seeded and wrong-resolution releases, then ranks the
-   rest by resolution preference (your `thresholds.allowed_resolutions`, or
-   `torrent.resolutions`) and seeder count, and picks one.
-3. In dry-run it logs the intended grab and stops. Otherwise it hands the magnet
-   to Transmission and records a `Download` row keyed by the torrent infohash.
+2. `select.py` drops under-seeded, wrong-resolution and wrong-title releases (the
+   whole release title must match, for movies and seasons alike), and sizes outside
+   300 MiB–150 GiB for a movie, 40 MiB–40 GiB for an episode, 200 MiB–500 GiB for a
+   pack; an unreported size passes. It ranks the rest: hashes that went dead last,
+   then the surest year, resolution preference (your `thresholds.allowed_resolutions`,
+   or `torrent.resolutions`) and seeder count.
+3. In dry-run it logs the intended grab and stops. A grab is refused unless the
+   download disk keeps `torrent.min_free_gb` after this release and everything still
+   downloading. Otherwise it hands the magnet to Transmission and records a `Download`
+   row keyed by the torrent infohash.
 4. `sync` polls Transmission and advances each download. When a **movie**
    finishes it is copied into the NAS library layout
    (`Movies/<Title (Year)>/<Title (Year)>.<ext>`), and only then does the
-   candidate flip to `imported`. A failed copy leaves the download in
-   `completed` and is retried on the next sweep — the candidate is not advanced
-   until the file is in place.
+   candidate flip to `imported`. A failed copy leaves the download in `completed`
+   and retries with a growing gap (see below) — the candidate is not advanced until
+   the file is in place.
+
+A download with no progress for `torrent.stale_after_hours` fails as `stalled:` and
+leaves Transmission, at any percentage. Time queued in Transmission and long gaps
+between sweeps (host asleep) don't count, and a hand-paused torrent is exempt.
+A stalled hash stays eligible but ranks last. A movie then shows as `failed`; a season
+returns to `approved` and is re-grabbed after 1 h, doubling to 24 h, for 5 tries.
 
 ## Library import
 
 After a torrent completes, `sync` finds the primary video file (the file itself
-for a single-file torrent, else the largest non-sample media file in the folder),
-copies it into the library, and verifies the copy by size before it counts as
-imported. Writes go to a `.part` sidecar and are atomically renamed into place.
+for a single-file torrent, else the largest non-sample media file in the folder) and
+copies it into the library. Writes go to `<name>.part`, then atomically rename into
+place. A copy counts only after a read-back: the size, plus sampled chunks (head,
+tail, three in the middle, or the whole of a small file) compared with the source, read
+again from the NAS at the final path with the mount still there. A file already at the
+destination has to pass the same check.
+
+An existing library file is never overwritten. A different file there parks the import
+as `needs_attention:` with both copies kept. A torrent with a real video that didn't
+import (say, an episode with no parsable name) is `held:`: what did import is cataloged,
+local data stays, and every sweep looks again.
+
+A failed import retries after 15 minutes, doubling to 6 hours. After 5 failures of the
+item itself it parks as `needs_attention:` until someone fixes it and presses **Retry
+import**, which downloads nothing. NAS faults (link errors, full or read-only share)
+don't count against the item; they back off the whole sweep instead.
 
 | Config (`torrent:`) | Default | Effect |
 |---|---|---|
 | `import_to_library` | `true` | Copy finished movies into the NAS layout. |
 | `library_base_dir` | `null` | `null` → write to the NAS over SMB (`nas.*` + `SMB_*` creds). Set a local/mounted path to copy there instead. |
 | `delete_local_after_import` | `false` | `true` → remove the torrent + its local files after a successful import (a true "move"). `false` keeps the local copy **seeding**. |
-| `seed_ratio_limit` | `0.0` | Stop seeding once a torrent completes (`0.0`), so it doesn't keep uploading before the post-import removal runs. Negative = seed indefinitely. |
+| `seed_ratio_limit` | `0.0` | Stop seeding once a torrent completes (`0.0`), so it doesn't keep uploading before the post-import removal runs. Set per torrent with `torrent-set` after the add. Negative = seed indefinitely. |
 
-**This is the app's only write path to the NAS** (the scanner is read-only).
+The scanner never writes to the NAS. Besides this import, the subtitle backend writes
+into `Subs/`, the health probe writes a temp file, and cleanup, upgrades and the trash
+rename files.
 
-Copies **resume**: if the SMB link drops mid-transfer (WD MyCloud does this on
-sustained multi-GB writes, surfacing as `[Errno 5] Input/output error`), the
-partial `.part` is kept and the next sweep appends from where it stopped rather
-than re-copying from zero, so a large file completes across several sweeps. A
-transport fault also backs the whole sweep off so a faulting share isn't
-hammered file-by-file.
+Copies **resume** through the mount (`library_base_dir` set): if the SMB link drops
+mid-transfer (WD MyCloud does this on sustained multi-GB writes, surfacing as `[Errno
+5] Input/output error`), the partial `.part` is kept and the next sweep appends from
+where it stopped, so a large file completes across several sweeps. It resumes only when
+the `.part.meta` sidecar proves the same source (size, mtime, infohash) and the last
+bytes match; anything else starts over. The direct SMB target never resumes. A
+transport fault also backs the whole sweep off so a faulting share isn't hammered
+file-by-file.
 
 Guest/password-less shares are often read-only for writes — if imports fail with
 a permission error, set `SMB_USER`/`SMB_PASS` in `.env` to an account that can
@@ -139,9 +167,9 @@ the app can move them out via Transmission (`torrent-set-location`) — restart 
 item, or set the download dir and re-grab.
 
 Large imports copy over SMB one at a time; if the mount drops mid-copy the sync
-stops importing for that run and retries the rest next sweep (so one failure
-doesn't cascade). If big copies repeatedly break the mount, prefer an
-authenticated SMB mount over guest.
+stops importing for that run and picks up on a later sweep (so one failure doesn't
+cascade). If big copies repeatedly break the mount, prefer an authenticated SMB mount
+over guest.
 
 ## Watching the pipeline (dashboard)
 
@@ -158,8 +186,10 @@ candidate and **Grab approved now** on Activity always bypass it. Approve leaves
 candidate "scheduled" (grabbed in the next window); "Grab now" is immediate.
 
 **Stop seeding after import.** With `torrent.delete_local_after_import: true`, a
-movie is removed from Transmission (and its local copy deleted) once it's copied
-to the NAS, so it no longer uploads.
+finished download is removed from Transmission (and its local copy deleted) after
+`imported` commits, so it no longer uploads. A crash in between leaves a `local copy
+removal pending` marker the next sweep finishes, and removal waits while the mount is
+gone. A `held:` or `needs_attention:` download keeps its local data.
 
 ## Season grabs
 
@@ -177,13 +207,16 @@ follows the rules below; seasons that haven't started airing wait for the
 "new season" discovery source to surface them later.
 
 A season-scoped candidate (discovery's "new season of a series you own") grabs
-the season pack when one exists — releases are **season-verified** with guessit,
-so a `Title Season N` search can't grab another season's pack. While a season is
-still airing there is no pack, so the backend grabs the available episodes one
-release each and the candidate returns to `approved` when they finish; the next
-acquire run tops up newly-aired episodes (coverage tracked against the season's
-announced episode count, `features.season_episodes`, and episodes already on the
-NAS are never re-downloaded) until the season completes.
+the season pack when one exists — releases are **season-verified** with guessit and
+must carry the show's name, so a `Title Season N` search can't grab another show or
+another season's pack. While a season is still airing there is no pack, so the backend
+grabs the available episodes one release each and the candidate returns to `approved`
+when they finish; the next acquire run tops up newly-aired episodes (coverage is what
+actually reached the library, against the season's announced episode count,
+`features.season_episodes`, and episodes already on the NAS are never re-downloaded)
+until the season completes. With a known count it probes every episode up to it. A
+finished season left with a hole where a download failed ends `failed`, so Retry shows;
+an ended show that merely falls short of its announced count completes.
 
 A completed series torrent (single episode or a whole pack) is imported the same
 way movies are: each media file is copied into `TV Shows/<Series>/Season NN/`
@@ -198,16 +231,71 @@ two folders.
 `home-theater cleanup` (dry run) / `--apply`, or the 🧹 **Cleanup** panel on the
 Status page, finds and removes two kinds of junk safely:
 
-- **NAS extras** — featurette/behind-the-scenes files (no `SxxExx`) that older
-  builds copied into TV season folders. Found by walking the mounted library and
-  classifying with the same parser the scanner/importer use.
-- **Stuck torrents** — completed torrents Transmission still holds that are
-  already imported (a redundant seed) or orphaned (no live download). A torrent
-  whose import is still *pending* is never touched, so nothing that hasn't
-  reached the NAS is removed.
+- **NAS extras** — samples, trailers and featurettes in the TV library, on positive
+  evidence only (an extras folder, or the word in the filename, never a file with
+  an episode number). Found by walking the mounted library.
+- **Stuck torrents** — completed torrents Transmission still holds whose every
+  download is imported with its NAS copy verified. Anything else is reported as
+  unmanaged and never removed.
 
-Nothing is deleted without an explicit `--apply` / **Apply** press; deletions go
-through the OS mount (the WD MyCloud rejects `smbclient` deletes).
+Nothing is removed without an explicit `--apply` / **Apply** press, and NAS extras go
+to the trash, not away.
+
+## Trash
+
+Everything the app removes from the library is renamed into
+`<library_base_dir>/.home-theater-trash/<date>/<original relative path>`: same volume,
+so instant, and never a copy. If the rename can't happen the file stays where it is and
+the failure is reported; a file is never deleted instead. The scanner and the extras
+finder skip the folder (it's a dot-directory).
+
+| Config | Default | Effect |
+|---|---|---|
+| `trash.enabled` | `true` | `false` makes cleanup delete outright, and blocks upgrades. |
+| `trash.retention_days` | `30` | Purged this long after trashing (minimum 1). |
+| `schedule.trash_interval_minutes` | `1440` | How often the purge job runs. |
+
+`home-theater trash list | restore <id> | purge [--dry-run]`, the Trash section on the
+Status page, or the token-gated `GET /api/trash`, `POST /api/trash/{id}/restore` and
+`POST /api/trash/purge`. Restore refuses to overwrite (409) and the file re-enters
+the catalog on the next scan. Restore and purge take the `sync` lock, so they wait for
+imports. Purge works only from database records, re-checks that each one resolves inside
+the trash root, unlinks without following symlinks, and leaves unrecorded files alone.
+
+Temp files (`.part`, sidecars) and a 0-byte leftover at an import's destination hold
+nothing worth keeping and are removed directly. The trash needs
+`torrent.library_base_dir`; the SMB-only target has no trash, and no upgrades.
+
+Local data is a separate check: the import reads sampled chunks back from the NAS (A2)
+before the torrent and its local copy can be removed.
+
+## Quality upgrades
+
+Movies only, off by default (`upgrades.enabled`). Needs the torrent backend,
+`library_base_dir` and the trash. Run by the `upgrades` job
+(`schedule.upgrades_interval_minutes`) or `home-theater upgrades`, which only propose.
+
+A proposal is a normal candidate with `source=upgrade` and a reason, and appears at the
+top of the Candidates page. With `upgrades.auto: false` nothing downloads until someone
+approves it. `auto: true` approves it, still subject to `features.dry_run` and the
+download window. Rejecting one isn't a dislike: upgrades are never training labels.
+
+A release qualifies when it's provably better on source tier (CAM/TS < TV/DVD < WEB <
+BluRay < Remux) or resolution, and no worse on the other. Same tier and resolution
+never qualifies. It needs `upgrades.min_seeders`, a year in its name, and no dub,
+hardcoded-subtitle, upscale or 3D tag. A title is searched once per
+`upgrades.cooldown_days`, at most `upgrades.max_titles_per_run` per run, and only with a
+single owned file of known quality. The catalog has no source column, so the owned
+tier comes from the release it was imported from, then the file and folder names. With
+neither, only a resolution jump can qualify.
+
+The grab takes exactly the proposed release, never a fresh search. The new file lands as
+`Movies/<Title (Year)>/<Title (Year)> [1080p BluRay].<ext>`, so it can't collide with
+the old one, and is read back there. Only then does the old file go to the trash, and
+only if it's still the size that was approved. Any failure leaves the original in
+place: a failed copy retries like any import, and a failed swap keeps both files and
+parks for **Retry import**. Subtitles for the old filename stay in `Subs/`; the new
+file gets its own from the usual fetch.
 
 ## Limitations
 
