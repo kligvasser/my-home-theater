@@ -1,13 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  macOS launchd service for always-on running under conda.
+  macOS launchd service. Install with deploy/install-launchd.sh, which also adjusts
+  the paths below if the project or home folder differs.
 
-  Install:
-    1. Edit the paths below (conda env + project dir).
-    2. cp deploy/com.homeTheater.app.plist ~/Library/LaunchAgents/
-    3. launchctl load ~/Library/LaunchAgents/com.homeTheater.app.plist
-    4. launchctl start com.homeTheater.app
-  Logs go to <project>/data/launchd.{out,err}.log. Unload with `launchctl unload`.
+  The program is a small wrapper (see home-theater-launchd.sh): it waits for the NAS
+  mount, holds an idle-sleep assertion, rotates the logs, then execs the real app.
+  launchd itself does not expand ~, create log folders, or rotate logs.
+
+  Restart policy: only a failed exit restarts the app, at most every 30 seconds, so
+  a clean stop stays stopped and a crash loop can't spin.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -16,10 +17,11 @@
     <key>Label</key>
     <string>com.homeTheater.app</string>
 
-    <!-- Run the console script from the conda env. Adjust to your paths. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/kligvasser/miniconda3/envs/my-home-theater/bin/home-theater</string>
+        <string>/Users/kligvasser/Projects/my-home-theater/deploy/home-theater-launchd.sh</string>
+        <string>/Users/kligvasser/Projects/my-home-theater/.venv/bin/home-theater</string>
+        <string>serve</string>
     </array>
 
     <key>WorkingDirectory</key>
@@ -31,16 +33,30 @@
         <string>/Users/kligvasser/Projects/my-home-theater/config.yaml</string>
         <key>LOG_JSON</key>
         <string>true</string>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <!-- Wait for this mount before starting; 120s, then start anyway. -->
+        <key>HOME_THEATER_MOUNT</key>
+        <string>/Volumes/Elements_25A1-1</string>
+        <key>HOME_THEATER_MOUNT_WAIT_SECONDS</key>
+        <string>120</string>
+        <key>HOME_THEATER_LOG_DIR</key>
+        <string>/Users/kligvasser/Library/Logs/home-theater</string>
     </dict>
 
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
 
     <key>StandardOutPath</key>
-    <string>/Users/kligvasser/Projects/my-home-theater/data/launchd.out.log</string>
+    <string>/Users/kligvasser/Library/Logs/home-theater/out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/kligvasser/Projects/my-home-theater/data/launchd.err.log</string>
+    <string>/Users/kligvasser/Library/Logs/home-theater/err.log</string>
 </dict>
 </plist>

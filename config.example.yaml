@@ -6,6 +6,9 @@ nas:
   share: Elements_25A1-1
   movies_root: Movies
   tv_root: TV Shows
+  # Address to dial for scans when SMB_HOST is a .local name, e.g. the NAS's IP.
+  # Catalog paths keep SMB_HOST either way. null -> resolve SMB_HOST at each walk.
+  connect_host: null
 
 thresholds:
   # Global bars; movies and series can override below (series accumulate far
@@ -35,6 +38,32 @@ schedule:
   acquire_interval_minutes: 30            # queue approved candidates to the arrs
   import_reconcile_interval_minutes: 60   # 0 disables a job
   backup_interval_minutes: 1440           # daily SQLite backup
+  train_interval_minutes: 1440            # retrain the preference model
+  trash_interval_minutes: 1440            # purge expired NAS trash
+  upgrades_interval_minutes: 1440         # look for better copies (needs upgrades.enabled)
+  job_timeout_minutes: 180                # wall-clock limit per job; 0 = none
+  catch_up: true                          # on startup/wake, run jobs overdue per job_run
+
+# Host headers the dashboard answers to (DNS-rebinding protection). This machine's
+# hostname is always allowed. Add any other name you browse to, e.g. a Tailscale
+# *.ts.net name or a custom DNS name; a refused host gets a plain 400 and a
+# http.host_refused log line. HOME_THEATER_ALLOWED_HOSTS (comma-separated) adds more.
+server:
+  allowed_hosts: [localhost, 127.0.0.1, "::1", "*.local"]
+  allow_private_ips: true   # also accept LAN/Tailscale IPs: http://192.168.1.20:8000
+# (The /docs API browser is off unless the environment sets HOME_THEATER_DOCS=1.)
+
+scanner:
+  # A scan refuses to prune a root (run marked failed, rows kept) when the walk
+  # would remove more than max_prune_rows, or more than max_prune_percent of the
+  # root once past prune_floor_rows. The floor keeps small libraries workable: 1
+  # of 10 files is 10%, but up to 5 files may always go. A root that reads empty
+  # while the catalog has rows under it is always refused. One-off override for
+  # real mass deletions: `home-theater scan --force-prune`.
+  max_prune_percent: 5
+  max_prune_rows: 100
+  prune_floor_rows: 5
+  walk_timeout_minutes: 150   # abandon (and fail) an SMB walk after this; 0 = none
 
 database:
   url: sqlite:///data/home_theater.db
@@ -72,6 +101,37 @@ subtitles:
   library_base_dir: null
   hearing_impaired: false
   opensubtitles_user_agent: "my-home-theater v1"
+  # Timing check for subtitles chosen without a hash match. Needs the native backend
+  # and the optional ffsubsync + ffmpeg commands on PATH (a launchd PATH won't have
+  # them unless you add their folder); missing tools are a skip noted on Status.
+  sync:
+    enabled: false
+    interval_minutes: 360
+    max_per_run: 5            # each one reads a whole film over the NAS
+    timeout_minutes: 15       # hard limit per file
+    min_offset_seconds: 0.3   # smaller shifts count as already in time
+    max_offset_seconds: 60    # larger ones are distrusted and left alone
+
+# Kodi JSON-RPC: library scan after imports, watch history into watch_state.
+# Login comes from KODI_USER / KODI_PASS. Kodi being off is normal, never an error.
+kodi:
+  enabled: false
+  url: null                   # e.g. http://kodi.local:8080/jsonrpc
+  # Kodi path prefix -> catalog prefix; unmatched paths are reported on /watched.
+  path_map: {}
+  #   "smb://NAS/Share/": "\\\\NAS\\Share\\"
+  timezone: null              # Kodi's lastplayed zone, e.g. Asia/Jerusalem; null = this host's
+  scan_debounce_seconds: 900  # scan after this long with no further import
+  scan_poll_minutes: 5
+  history_interval_minutes: 60
+  request_timeout: 10
+
+# Two-way watched state (needs TRAKT_* and `home-theater trakt-auth`).
+trakt:
+  sync:
+    enabled: false
+    push: false               # also send Kodi's plays to Trakt's history
+    interval_minutes: 360
 
 # Library folder structure, pushed to Radarr/Sonarr/Bazarr with
 # `home-theater apply-naming` (or the Settings-page button):
@@ -147,6 +207,31 @@ torrent:
   require_hd: true                  # only grab HD; reject cam/TS/TC/screener + avi/xvid + no-res fakes
   min_free_gb: 5                    # skip grabbing when the download dir has < this many GB free
                                     # import (a real "move"); false keeps seeding
+
+# Morning digest on Telegram: what arrived, what failed, what needs you, NAS free space.
+# Needs schedule.enabled and TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID. A digest missed while
+# the Mac slept goes out once on wake, never twice for a day.
+digest:
+  enabled: false
+  hour: 8        # local time, 0-23
+
+# What the app deletes from the NAS is renamed into
+# <torrent.library_base_dir>/.home-theater-trash/<date>/<original path> and purged
+# after retention_days. enabled: false makes cleanup delete outright.
+trash:
+  enabled: true
+  retention_days: 30
+
+# Replace an owned MOVIE with a clearly better release: a real source tier jump
+# (CAM/TS < TV/DVD < WEB < BluRay < Remux) or a resolution jump, and never worse on
+# the other. Needs the torrent backend, library_base_dir and the trash. The old file
+# goes to the trash only after the new one is verified in the library.
+upgrades:
+  enabled: false
+  auto: false             # false: proposals wait for a click on the Candidates page
+  min_seeders: 10         # raised to torrent.min_seeders if that's higher
+  cooldown_days: 30       # per title, between searches and after a swap
+  max_titles_per_run: 10  # each one is a tracker search
 
 # Free-form list of provider names you've enabled (metadata/library/subtitle).
 enabled_providers:

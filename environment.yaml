@@ -3,7 +3,7 @@ channels:
   - conda-forge
   - nodefaults
 dependencies:
-  - python=3.12
+  - python=3.13
   - pip
   # libmagic backs python-magic for media file sniffing (optional but handy)
   - libmagic
@@ -24,6 +24,8 @@ dependencies:
       - httpx                 # all REST clients (TMDb/OMDb/Radarr/Sonarr/Bazarr)
       - smbprotocol           # SMB2/3 to the WD MyCloud NAS
       - guessit               # filename -> title/season/episode/quality
+      - cryptography          # ktuvit login (AES-CBC)
+      - scikit-learn          # taste similarity + preference model
 
       # --- Scheduling / orchestration ---
       - apscheduler
@@ -37,5 +39,7 @@ dependencies:
       - pytest-asyncio
       - respx                 # mock httpx in tests
       - ruff
+      - black
       - mypy
+      - types-PyYAML
       - pre-commit

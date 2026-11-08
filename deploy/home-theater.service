@@ -1,7 +1,7 @@
 # systemd unit for an always-on Linux box (mini-PC / NAS with systemd).
 #
 # Install:
-#   1. Edit User, WorkingDirectory, and the conda env path below.
+#   1. Edit User, WorkingDirectory, and the venv path below.
 #   2. sudo cp deploy/home-theater.service /etc/systemd/system/
 #   3. sudo systemctl daemon-reload
 #   4. sudo systemctl enable --now home-theater
@@ -11,6 +11,8 @@
 Description=my-home-theater dashboard & scheduler
 After=network-online.target
 Wants=network-online.target
+# If the library is a network mount, wait for it:
+#RequiresMountsFor=/mnt/nas
 
 [Service]
 Type=simple
@@ -18,10 +20,10 @@ User=kligvasser
 WorkingDirectory=/home/kligvasser/Projects/my-home-theater
 Environment=HOME_THEATER_CONFIG=/home/kligvasser/Projects/my-home-theater/config.yaml
 Environment=LOG_JSON=true
-# Point at the conda env's console script.
-ExecStart=/home/kligvasser/miniconda3/envs/my-home-theater/bin/home-theater
+ExecStart=/home/kligvasser/Projects/my-home-theater/.venv/bin/home-theater serve
+# A clean stop stays stopped; a crash loop retries slowly, and never gives up.
 Restart=on-failure
-RestartSec=5
+RestartSec=30
 
 # Hardening: the service is network-exposed and holds API keys, so keep the
 # rest of the system read-only. Only the app's data dir (SQLite DB, backups)

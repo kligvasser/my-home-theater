@@ -29,6 +29,7 @@ dependencies = [
     "pyyaml",
     "structlog",
     "scikit-learn",
+    "cryptography",  # ktuvit login (AES-CBC)
 ]
 
 [project.optional-dependencies]
@@ -50,7 +51,7 @@ home-theater = "homeTheater.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-homeTheater = ["web/templates/*.html", "web/static/*.css"]
+homeTheater = ["web/templates/*.html", "web/static/*.css", "web/static/*.js"]
 
 [tool.black]
 line-length = 100
