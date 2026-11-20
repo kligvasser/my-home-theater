@@ -67,7 +67,7 @@ home-theater subtitles  # fetch missing subtitles (bazarr or native backend)
 home-theater subtitle-sync  # timing check with ffsubsync (subtitles.sync)
 home-theater reconcile  # reconcile arr-owned items into the catalog
 home-theater backup     # timestamped SQLite backup
-home-theater cleanup    # find NAS extras + stuck torrents (dry run; --apply to remove)
+home-theater cleanup    # find NAS extras, stuck torrents + library junk (dry run; --apply to remove)
 home-theater trash list | restore <id> | purge [--dry-run]   # the NAS trash
 home-theater upgrades   # propose better copies of owned movies; never downloads
 home-theater repair-titles  # merge series split by filename (dry run; --apply to merge)

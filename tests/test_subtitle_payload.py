@@ -301,3 +301,27 @@ def test_hearing_impaired_preference_decides_a_tie(wanted: bool) -> None:
     captions = _result("Movie.2020.1080p", hearing_impaired=True)
     top = rank_results([plain, captions], MEDIA, hearing_impaired=wanted)[0]
     assert top.hearing_impaired is wanted
+
+
+def test_provider_placeholder_is_not_a_subtitle() -> None:
+    from homeTheater.subtitles.native.base import InvalidSubtitleError
+    from homeTheater.subtitles.native.payload import validate_subtitle
+
+    placeholder = (
+        b"1\n00:00:00,001 --> 04:00:00,002\n"
+        b"Become OpenSubtitles.org VIP member \nto get subtitles -> osdb.link/vip\n"
+    )
+    with pytest.raises(InvalidSubtitleError, match="placeholder"):
+        validate_subtitle(placeholder, "en")
+
+
+def test_real_subtitle_carrying_the_same_advert_is_kept() -> None:
+    from homeTheater.subtitles.native.payload import validate_subtitle
+
+    cues = "".join(
+        f"{i}\n00:{i // 60:02d}:{i % 60:02d},000 --> 00:{i // 60:02d}:{i % 60:02d},900\n"
+        f"A line of dialogue, number {i}.\n\n"
+        for i in range(1, 200)
+    )
+    advert = "200\n01:00:00,000 --> 01:00:05,000\nSupport us: osdb.link/vip\n"
+    assert validate_subtitle((cues + advert).encode(), "en").ext == ".srt"

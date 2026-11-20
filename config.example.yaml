@@ -46,6 +46,7 @@ schedule:
   backup_interval_minutes: 1440           # daily SQLite backup
   train_interval_minutes: 1440            # retrain the preference model
   trash_interval_minutes: 1440            # purge expired NAS trash
+  junk_interval_minutes: 1440             # clear library junk (needs junk.enabled)
   upgrades_interval_minutes: 1440         # look for better copies (needs upgrades.enabled)
   job_timeout_minutes: 180                # wall-clock limit per job; 0 = none
   catch_up: true                          # on startup/wake, run jobs overdue per job_run
@@ -227,6 +228,22 @@ digest:
 trash:
   enabled: true
   retention_days: 30
+
+# Library junk: files in the movie and TV folders that nothing plays or reads.
+# Placeholder subtitles (a provider's over-the-limit advert), release notes
+# (.txt, scene .nfo), screenshots and stray images, torrent padding, samples and
+# promo clips beside a movie, .part downloads untouched for partial_days, what's
+# left in a folder whose video is gone, OS metadata and empty folders. Kodi .nfo
+# files and artwork (poster.jpg, *-fanart.jpg, ...) are kept; anything unrecognised
+# is reported and never removed. Removed files go to the trash above (deleted
+# outright if the trash is off). `home-theater cleanup` previews, `--apply` removes;
+# enabled: true also runs it every schedule.junk_interval_minutes.
+junk:
+  enabled: false
+  auto_limit: 200         # a scheduled run finding more removes nothing; run cleanup --apply
+  partial_days: 7
+  remove_archives: false  # true: also remove small .zip/.rar/.7z (zipped subtitles)
+  archive_max_mb: 50      # larger archives are never touched
 
 # Replace an owned MOVIE with a clearly better release: a real source tier jump
 # (CAM/TS < TV/DVD < WEB < BluRay < Remux) or a resolution jump, and never worse on

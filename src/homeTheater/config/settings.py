@@ -117,6 +117,7 @@ class Schedule(BaseModel):
     backup_interval_minutes: int = Field(1440, ge=0)  # daily DB backup
     train_interval_minutes: int = Field(1440, ge=0)  # retrain the preference model
     trash_interval_minutes: int = Field(1440, ge=0)  # purge expired NAS trash
+    junk_interval_minutes: int = Field(1440, ge=0)  # clear library junk (needs junk.enabled)
     upgrades_interval_minutes: int = Field(1440, ge=0)  # look for better copies (F4)
     # Cancel a scheduled job that runs longer than this so a hung NAS/network
     # job can't hold the global lock forever and starve the others (e.g. backup).
@@ -431,6 +432,25 @@ class Trash(BaseModel):
     retention_days: int = Field(30, ge=1)
 
 
+class Junk(BaseModel):
+    """Scheduled removal of library junk (:mod:`homeTheater.junk`): release notes,
+    screenshots, torrent padding, subtitle archives, abandoned partial downloads,
+    samples and placeholder subtitles. Everything goes to the trash. ``enabled`` only
+    gates the scheduled job; ``home-theater cleanup --apply`` always includes junk."""
+
+    model_config = _STRICT
+
+    enabled: bool = False
+    # A scheduled run that finds more than this removes nothing and asks for a manual
+    # `cleanup --apply`: that many at once deserves a look first.
+    auto_limit: int = Field(200, ge=1)
+    partial_days: int = Field(7, ge=1)  # a .part untouched this long is abandoned
+    # Zipped subtitles and the like. Off by default: a zip can be the only copy of a
+    # subtitle, and Kodi can open one by hand.
+    remove_archives: bool = False
+    archive_max_mb: int = Field(50, ge=1)  # larger archives are never touched
+
+
 class Upgrades(BaseModel):
     """Replace an owned movie with a clearly better release (movies only).
 
@@ -553,6 +573,7 @@ class AppConfig(BaseModel):
     acquisition: Acquisition = Field(default_factory=Acquisition)
     torrent: Torrent = Field(default_factory=Torrent)
     trash: Trash = Field(default_factory=Trash)
+    junk: Junk = Field(default_factory=Junk)
     upgrades: Upgrades = Field(default_factory=Upgrades)
     kodi: Kodi = Field(default_factory=Kodi)
     trakt: Trakt = Field(default_factory=Trakt)

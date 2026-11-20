@@ -46,6 +46,7 @@ JOB_RESOURCES = {
     "acquire": "downloads",
     "reconcile": "downloads",
     "trash": "downloads",  # takes the sync lock, so it can't overlap an import
+    "junk": "downloads",  # same lock, same reason
     "upgrades": "upgrades",
     "digest": "digest",
     "storage": "storage",
@@ -65,6 +66,7 @@ GUARD_RECORDED = frozenset(
         "train",
         "digest",
         "trash",
+        "junk",
         "upgrades",
         "subtitle_sync",
         "kodi",
@@ -387,6 +389,31 @@ async def run_trash_job(config: AppConfig) -> None:
         return f"🗑 Purged {stats.purged} trashed file(s)" if stats.purged else None
 
     await _guarded("trash", config, body, on_timeout=cancel.set)
+
+
+async def run_junk_job(config: AppConfig) -> None:
+    """Send library junk to the trash (see :mod:`homeTheater.junk`)."""
+
+    from ..junk import apply_junk
+
+    cancel = threading.Event()
+
+    async def body() -> str | None:
+        cfg = await _config_for_run()
+        if not cfg.junk.enabled:
+            raise JobSkippedError("junk.enabled is off")
+        result = await apply_junk(cfg, limit=cfg.junk.auto_limit, cancel=cancel)
+        if result.get("refused"):
+            raise RuntimeError(
+                f"junk: {result['refused']} file(s) found, over junk.auto_limit "
+                f"({cfg.junk.auto_limit}); review with `home-theater cleanup`"
+            )
+        if result["errors"]:
+            raise RuntimeError(f"junk: {'; '.join(result['errors'][:5])}")
+        removed = result["junk_removed"]
+        return f"🧹 Cleared {removed} junk file(s) from the library" if removed else None
+
+    await _guarded("junk", config, body, on_timeout=cancel.set)
 
 
 async def run_upgrades_job(config: AppConfig) -> None:

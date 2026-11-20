@@ -34,7 +34,12 @@ from .base import (
     SubtitleSourceError,
     raise_for_http,
 )
-from .payload import fetch_capped, unpack_subtitle
+from .payload import (
+    PLACEHOLDER_MAX_CHARS,
+    fetch_capped,
+    is_placeholder_subtitle,
+    unpack_subtitle,
+)
 
 log = get_logger(__name__)
 
@@ -187,7 +192,15 @@ class OpenSubtitlesOrgSource:
             timeout=self._timeout,
             headers={"User-Agent": self._ua},
         )
-        return unpack_subtitle(data, result.season, result.episode)
+        body = unpack_subtitle(data, result.season, result.episode)
+        # Past its download limit the site keeps answering 200 with a one-line advert
+        # in place of every subtitle. Asking again this sweep only fetches more of them.
+        head = body[: PLACEHOLDER_MAX_CHARS + 1]
+        if len(body) <= PLACEHOLDER_MAX_CHARS and is_placeholder_subtitle(
+            head.decode("utf-8", errors="replace")
+        ):
+            raise SourceQuotaError("opensubtitles_org: download limit reached (placeholder served)")
+        return body
 
 
 def _check_status(method: str, res: dict[str, Any]) -> None:

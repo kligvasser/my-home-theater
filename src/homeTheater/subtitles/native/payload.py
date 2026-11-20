@@ -41,6 +41,11 @@ _SRT_TIMING_RE = re.compile(
 )
 _ASS_DIALOGUE_RE = re.compile(r"^\s*Dialogue\s*:", re.MULTILINE | re.IGNORECASE)
 _HTML_PREFIXES = ("<!doctype", "<html", "<head", "<body", "<?xml")
+# What a provider serves instead of a subtitle once its download limit is used up: one
+# cue, hours long, advertising a paid plan. Real subtitles carry the same advert as a
+# line among hundreds, so only a file this short counts.
+PLACEHOLDER_MAX_CHARS = 2048
+_PLACEHOLDER_MARKERS = ("osdb.link/vip", "opensubtitles.org vip member")
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +226,15 @@ def decode_subtitle(data: bytes, lang: str) -> str:
     return text
 
 
+def is_placeholder_subtitle(text: str) -> bool:
+    """True for a provider's "you are over the limit" notice dressed up as a subtitle."""
+
+    if len(text) > PLACEHOLDER_MAX_CHARS:
+        return False
+    lowered = text.lower()
+    return any(marker in lowered for marker in _PLACEHOLDER_MARKERS)
+
+
 def validate_subtitle(data: bytes, lang: str) -> ValidatedSubtitle:
     """Return ``data`` as UTF-8 plus its true extension, or raise InvalidSubtitleError."""
 
@@ -233,6 +247,8 @@ def validate_subtitle(data: bytes, lang: str) -> ValidatedSubtitle:
         raise InvalidSubtitleError("HTML page, not a subtitle")
     if lowered.startswith("webvtt"):
         raise InvalidSubtitleError("WebVTT is not supported")
+    if is_placeholder_subtitle(text):
+        raise InvalidSubtitleError("provider placeholder (download limit notice), not a subtitle")
 
     controls = sum(1 for c in text if ord(c) < 32 and c not in "\t\n\r\f")
     if controls > len(text) // 100:

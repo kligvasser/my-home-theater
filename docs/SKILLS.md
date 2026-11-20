@@ -70,6 +70,10 @@ kept alive by launchd (`deploy/install-launchd.sh`) or systemd.
   (season-aware: an S3 import completes the S3 candidate, not any live sibling).
 - `cleanup.py` — dry-run-first janitor: send NAS extras to the trash and remove
   stuck torrents (verified imports only).
+- `junk.py` — library junk (placeholder subtitles, release notes, screenshots,
+  padding, samples, abandoned `.part` files, empty folders): `find_junk` plans,
+  `remove_junk` trashes. Part of `cleanup`, and the `junk` job when `junk.enabled`.
+  Junk needs positive evidence; unrecognised files are reported, never removed.
 - `trash.py` — every NAS delete: rename into `.home-theater-trash`, restore, purge.
 - `upgrades.py` — propose clearly better copies of owned movies (candidates with
   `source=upgrade`); the swap itself is in `importer.retire_replaced_file`.
@@ -156,8 +160,8 @@ in the service layer.
   Never let one bad item sink a whole sweep — catch per-item, keep going.
 - **Safety.** `features.dry_run` gates every grab. Default to non-destructive; look
   before deleting/overwriting NAS files. A NAS delete goes through
-  `trash.move_to_trash`, never `os.remove`; only temp files and 0-byte leftovers are
-  removed directly.
+  `trash.move_to_trash`, never `os.remove`; only temp files, 0-byte leftovers and OS
+  metadata (`.DS_Store`, which Finder writes back) are removed directly.
 - **Formatting.** The formatter is **black** (line-length 100) + **ruff** + **mypy
   strict-ish**. Format only files you touch — the repo has some pre-existing
   black/ruff-format drift; a tree-wide `ruff format` creates churn.

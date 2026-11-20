@@ -61,6 +61,8 @@ def _optional_jobs(config: AppConfig) -> dict[str, int]:
         out["kodi_scan"] = config.kodi.scan_poll_minutes
     if config.trakt.sync.enabled:
         out["trakt_sync"] = config.trakt.sync.interval_minutes
+    if config.junk.enabled:
+        out["junk"] = config.schedule.junk_interval_minutes
     return out
 
 

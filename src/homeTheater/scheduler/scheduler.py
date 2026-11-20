@@ -16,6 +16,7 @@ from .jobs import (
     run_acquire_job,
     run_backup_job,
     run_discovery_job,
+    run_junk_job,
     run_kodi_job,
     run_kodi_scan_job,
     run_reconcile_job,
@@ -45,6 +46,7 @@ _JOBS = {
     "kodi_scan": run_kodi_scan_job,
     "trakt_sync": run_trakt_sync_job,
     "trash": run_trash_job,
+    "junk": run_junk_job,
     "upgrades": run_upgrades_job,
 }
 

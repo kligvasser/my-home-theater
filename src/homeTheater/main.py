@@ -327,7 +327,7 @@ def backup() -> None:
     log.info("backup.cli_done", dest=str(dest))
 
 
-def cleanup(apply: bool = False) -> None:
+def cleanup(apply: bool = False, verbose: bool = False) -> None:
     """Find (and with --apply, remove) NAS extras + stuck completed torrents."""
 
     import asyncio
@@ -359,6 +359,27 @@ def cleanup(apply: bool = False) -> None:
     for note in plan.notes:
         print(f"note: {note}")
 
+    from .junk import apply_junk, plan_junk
+
+    try:
+        junk = asyncio.run(plan_junk(config))
+    except JobBusyError as exc:
+        print(f"Cleanup skipped: {redact_exc(exc)}")
+        raise SystemExit(2) from None
+    print(f"Library junk: {len(junk.files)} file(s), {junk.total_bytes / 1e9:.2f} GB")
+    for reason, (count, size) in junk.by_reason().items():
+        print(f"  {count:5d}  {size / 1e6:9.1f} MB  {reason}")
+    if verbose:
+        for f in junk.files:
+            print(f"  [{f.reason}] {f.path}")
+    print(f"Empty folders: {len(junk.empty_dirs)}")
+    if junk.unrecognised:
+        print(f"Unrecognised files (never removed): {len(junk.unrecognised)}")
+    for path in junk.unrecognised:
+        print(f"  {path}")
+    for note in junk.notes:
+        print(f"note: {note}")
+
     if not apply:
         print("\nDry run. Re-run with --apply to remove the above (NAS files go to the trash).")
         return
@@ -374,9 +395,18 @@ def cleanup(apply: bool = False) -> None:
         print(f"Cleanup skipped: {redact_exc(exc)}")
         raise SystemExit(2) from None
     log.info("cleanup.cli_done", **{k: v for k, v in result.items() if k != "notes"})
+    try:
+        junk_result = asyncio.run(apply_junk(config))
+    except JobBusyError as exc:
+        print(f"Cleanup skipped: {redact_exc(exc)}")
+        raise SystemExit(2) from None
+    for error in junk_result["errors"]:
+        print(f"error: {error}")
     print(
         f"\nRemoved {result.get('extras_deleted', 0)} extra file(s), "
-        f"removed {result.get('torrents_removed', 0)} torrent(s)."
+        f"removed {result.get('torrents_removed', 0)} torrent(s), "
+        f"cleared {junk_result['junk_removed']} junk file(s) "
+        f"and {junk_result['dirs_removed']} empty folder(s)."
     )
     for err in result.get("errors", []):
         print(f"  error: {err}")
@@ -508,9 +538,10 @@ def main() -> None:
     sub.add_parser("train", help="train the preference classifier from approve/reject labels")
     sub.add_parser("backup", help="write a timestamped SQLite backup")
     cleanup_p = sub.add_parser(
-        "cleanup", help="find NAS extras + stuck torrents (dry run unless --apply)"
+        "cleanup", help="find NAS extras, stuck torrents and junk (dry run unless --apply)"
     )
     cleanup_p.add_argument("--apply", action="store_true", help="actually delete/remove")
+    cleanup_p.add_argument("--verbose", action="store_true", help="list every junk file")
     trash_p = sub.add_parser("trash", help="list, restore or purge the NAS trash")
     trash_sub = trash_p.add_subparsers(dest="trash_action", required=True)
     trash_sub.add_parser("list", help="show what's restorable")
@@ -556,7 +587,7 @@ def main() -> None:
     elif args.command == "backup":
         backup()
     elif args.command == "cleanup":
-        cleanup(apply=args.apply)
+        cleanup(apply=args.apply, verbose=args.verbose)
     elif args.command == "trash":
         trash(
             args.trash_action,

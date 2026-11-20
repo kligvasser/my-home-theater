@@ -262,8 +262,8 @@ the catalog on the next scan. Restore and purge take the `sync` lock, so they wa
 imports. Purge works only from database records, re-checks that each one resolves inside
 the trash root, unlinks without following symlinks, and leaves unrecorded files alone.
 
-Temp files (`.part`, sidecars) and a 0-byte leftover at an import's destination hold
-nothing worth keeping and are removed directly. The trash needs
+Temp files (`.part`, sidecars), a 0-byte leftover at an import's destination and OS
+metadata (`.DS_Store`) hold nothing worth keeping and are removed directly. The trash needs
 `torrent.library_base_dir`; the SMB-only target has no trash, and no upgrades.
 
 Local data is a separate check: the import reads sampled chunks back from the NAS (A2)

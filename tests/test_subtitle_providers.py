@@ -430,3 +430,28 @@ async def test_ktuvit_download_picks_the_right_episode_from_a_zip() -> None:
     )
     async with httpx.AsyncClient() as http:
         assert await KtuvitSource("me@x.com", "pw", http).download(result) == b"second"
+
+
+@respx.mock
+async def test_org_placeholder_download_is_a_quota_error() -> None:
+    import gzip
+
+    placeholder = (
+        b"1\n00:00:00,001 --> 04:00:00,002\n"
+        b"Become OpenSubtitles.org VIP member \nto get subtitles -> osdb.link/vip\n"
+    )
+    respx.get("https://dl.org/p.gz").mock(
+        return_value=httpx.Response(200, content=gzip.compress(placeholder))
+    )
+    async with httpx.AsyncClient() as http:
+        source = _org(http)
+        with pytest.raises(SourceQuotaError, match="download limit"):
+            await source.download(
+                SubtitleResult(
+                    source="opensubtitles_org",
+                    lang="en",
+                    name="p",
+                    score=0,
+                    ref={"link": "https://dl.org/p.gz"},
+                )
+            )
