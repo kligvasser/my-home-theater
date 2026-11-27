@@ -73,6 +73,7 @@ home-theater upgrades   # propose better copies of owned movies; never downloads
 home-theater repair-titles  # merge series split by filename (dry run; --apply to merge)
 home-theater train      # retrain the preference model
 home-theater kodi-sync  # read Kodi watch history, send any due library scan
+home-theater nfo        # write Kodi .nfo + artwork for movies and shows (offline Kodi scans)
 home-theater trakt-sync # pull Trakt watched history (and push, if trakt.sync.push)
 ```
 

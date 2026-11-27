@@ -19,6 +19,7 @@ from .jobs import (
     run_junk_job,
     run_kodi_job,
     run_kodi_scan_job,
+    run_nfo_job,
     run_reconcile_job,
     run_scan_job,
     run_subtitle_job,
@@ -47,6 +48,7 @@ _JOBS = {
     "trakt_sync": run_trakt_sync_job,
     "trash": run_trash_job,
     "junk": run_junk_job,
+    "nfo": run_nfo_job,
     "upgrades": run_upgrades_job,
 }
 

@@ -74,6 +74,10 @@ kept alive by launchd (`deploy/install-launchd.sh`) or systemd.
   padding, samples, abandoned `.part` files, empty folders): `find_junk` plans,
   `remove_junk` trashes. Part of `cleanup`, and the `junk` job when `junk.enabled`.
   Junk needs positive evidence; unrecognised files are reported, never removed.
+- `kodi_nfo.py` — Kodi `.nfo` + poster/fanart for each owned movie and show (plus a
+  minimal `.nfo` per episode), from the catalog and cached TMDb details, so Kodi scans with "Local information only". The
+  `nfo` command, and the `nfo` job when `nfo.enabled`. Never overwrites a Kodi `.nfo`
+  it didn't write.
 - `trash.py` — every NAS delete: rename into `.home-theater-trash`, restore, purge.
 - `upgrades.py` — propose clearly better copies of owned movies (candidates with
   `source=upgrade`); the swap itself is in `importer.retire_replaced_file`.

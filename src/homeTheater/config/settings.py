@@ -118,6 +118,7 @@ class Schedule(BaseModel):
     train_interval_minutes: int = Field(1440, ge=0)  # retrain the preference model
     trash_interval_minutes: int = Field(1440, ge=0)  # purge expired NAS trash
     junk_interval_minutes: int = Field(1440, ge=0)  # clear library junk (needs junk.enabled)
+    nfo_interval_minutes: int = Field(60, ge=0)  # write Kodi .nfo + artwork (needs nfo.enabled)
     upgrades_interval_minutes: int = Field(1440, ge=0)  # look for better copies (F4)
     # Cancel a scheduled job that runs longer than this so a hung NAS/network
     # job can't hold the global lock forever and starve the others (e.g. backup).
@@ -451,6 +452,17 @@ class Junk(BaseModel):
     archive_max_mb: int = Field(50, ge=1)  # larger archives are never touched
 
 
+class Nfo(BaseModel):
+    """Kodi metadata on the NAS (:mod:`homeTheater.kodi_nfo`): an ``.nfo`` and artwork
+    beside each owned movie, so Kodi can scan with "Local information only" and no
+    internet. ``enabled`` gates the scheduled job; ``home-theater nfo`` always runs."""
+
+    model_config = _STRICT
+
+    enabled: bool = False
+    artwork: bool = True  # also fetch <video>-poster and <video>-fanart from TMDb
+
+
 class Upgrades(BaseModel):
     """Replace an owned movie with a clearly better release (movies only).
 
@@ -574,6 +586,7 @@ class AppConfig(BaseModel):
     torrent: Torrent = Field(default_factory=Torrent)
     trash: Trash = Field(default_factory=Trash)
     junk: Junk = Field(default_factory=Junk)
+    nfo: Nfo = Field(default_factory=Nfo)
     upgrades: Upgrades = Field(default_factory=Upgrades)
     kodi: Kodi = Field(default_factory=Kodi)
     trakt: Trakt = Field(default_factory=Trakt)

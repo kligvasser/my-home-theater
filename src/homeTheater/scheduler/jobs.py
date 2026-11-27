@@ -47,6 +47,7 @@ JOB_RESOURCES = {
     "reconcile": "downloads",
     "trash": "downloads",  # takes the sync lock, so it can't overlap an import
     "junk": "downloads",  # same lock, same reason
+    "nfo": "downloads",  # writes beside the videos an import is placing
     "upgrades": "upgrades",
     "digest": "digest",
     "storage": "storage",
@@ -67,6 +68,7 @@ GUARD_RECORDED = frozenset(
         "digest",
         "trash",
         "junk",
+        "nfo",
         "upgrades",
         "subtitle_sync",
         "kodi",
@@ -414,6 +416,25 @@ async def run_junk_job(config: AppConfig) -> None:
         return f"🧹 Cleared {removed} junk file(s) from the library" if removed else None
 
     await _guarded("junk", config, body, on_timeout=cancel.set)
+
+
+async def run_nfo_job(config: AppConfig) -> None:
+    """Write Kodi ``.nfo`` files and artwork beside owned movies."""
+
+    from ..kodi_nfo import run_export
+
+    cancel = threading.Event()
+
+    async def body() -> str | None:
+        cfg = await _config_for_run()
+        if not cfg.nfo.enabled:
+            raise JobSkippedError("nfo.enabled is off")
+        stats = await run_export(cfg, cancel)
+        if stats.errors:
+            raise RuntimeError(f"nfo: {'; '.join(stats.errors[:5])}")
+        return None
+
+    await _guarded("nfo", config, body, on_timeout=cancel.set)
 
 
 async def run_upgrades_job(config: AppConfig) -> None:

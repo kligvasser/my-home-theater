@@ -48,6 +48,9 @@ REASON_SAMPLE = "sample or promo clip"
 REASON_SAMPLE_SUBTITLE = "subtitle of a sample"
 REASON_OS = "OS metadata"
 REASON_ORPHAN = "left in a folder with no video"
+REASON_STALE_NFO = "metadata of a removed video"
+# What kodi_nfo stamps on the files it writes (kept in step by a test).
+_OUR_NFO_MARKER = "<!-- written by my-home-theater -->"
 
 # Removed outright: Finder writes these back whenever the share is browsed, so
 # trashing them would fill the trash with files nobody could want restored.
@@ -167,18 +170,24 @@ def _is_kodi_art(name: str) -> bool:
     return any(stem == art or stem.endswith(f"-{art}") for art in _KODI_ART)
 
 
-def _is_kodi_nfo(path: str, *, named_for_video: bool) -> bool:
+def _nfo_verdict(path: str, *, named_for_video: bool) -> str | None:
     """A Kodi ``.nfo`` is XML, or a scraper URL in a file Kodi would look at (named
     after its video, or ``movie.nfo``/``tvshow.nfo``). Anything else is a release
-    note. Unreadable counts as Kodi's: keeping a release note costs nothing."""
+    note. One of ours that has outlived its video is stale. Unreadable counts as
+    Kodi's: keeping a release note costs nothing."""
 
     try:
-        head = _read_head(path, _NFO_SNIFF_BYTES).lower()
+        head = _read_head(path, _NFO_SNIFF_BYTES)
     except OSError:
-        return True
-    if any(marker in head for marker in _NFO_XML_MARKERS):
-        return True
-    return named_for_video and any(marker in head for marker in _NFO_URL_MARKERS)
+        return None
+    if _OUR_NFO_MARKER in head and not named_for_video:
+        return REASON_STALE_NFO
+    lowered = head.lower()
+    if any(marker in lowered for marker in _NFO_XML_MARKERS):
+        return None
+    if named_for_video and any(marker in lowered for marker in _NFO_URL_MARKERS):
+        return None
+    return REASON_RELEASE_NOTE
 
 
 def _is_placeholder_file(entry: _Entry) -> bool:
@@ -224,8 +233,7 @@ def _classify_simple(
     if ext == ".nfo":
         stem = os.path.splitext(lowered)[0]
         named = stem in _NFO_FOLDER_NAMES or (os.path.dirname(entry.path), stem) in video_stems
-        kodi = _is_kodi_nfo(entry.path, named_for_video=named)
-        return None if kodi else REASON_RELEASE_NOTE
+        return _nfo_verdict(entry.path, named_for_video=named)
     if ext in _IMAGE_EXTENSIONS:
         return None if _is_kodi_art(name) else REASON_IMAGE
     if ext in _ARCHIVE_EXTENSIONS:

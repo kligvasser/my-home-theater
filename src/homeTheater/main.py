@@ -132,6 +132,35 @@ def subtitle_sync() -> None:
     log.info("subtitle_sync.cli_done", **stats.as_dict())
 
 
+def nfo() -> None:
+    """Write Kodi .nfo files and artwork beside every owned movie and show."""
+
+    import asyncio
+
+    from .config import get_config
+    from .db import init_db
+    from .kodi_nfo import run_export
+
+    _configure()
+    config = get_config()
+    init_db()
+    try:
+        stats = asyncio.run(run_export(config))
+    except JobBusyError as exc:
+        print(f"Export skipped: {redact_exc(exc)}")
+        raise SystemExit(2) from None
+    print(
+        f"Movies: {stats.movies}  shows: {stats.shows}  episodes: {stats.episodes}  "
+        f".nfo written: {stats.nfo_written}  "
+        f"unchanged: {stats.nfo_unchanged}  left alone (not ours): {stats.nfo_foreign}  "
+        f"artwork written: {stats.artwork_written}  missing on NAS: {stats.missing}"
+    )
+    for error in stats.errors:
+        print(f"error: {error}")
+    if stats.errors:
+        raise SystemExit(1)
+
+
 def kodi_sync() -> None:
     """Read Kodi's watch history and send any library scan that is due."""
 
@@ -528,6 +557,7 @@ def main() -> None:
     sub.add_parser("subtitles", help="ask Bazarr to search for missing subtitles")
     sub.add_parser("subtitle-sync", help="check subtitle timing with ffsubsync")
     sub.add_parser("kodi-sync", help="read Kodi watch history, send any due library scan")
+    sub.add_parser("nfo", help="write Kodi .nfo files and artwork beside owned movies and shows")
     sub.add_parser("trakt-sync", help="pull Trakt watched history (and push, if enabled)")
     sub.add_parser("acquire", help="queue approved candidates to Radarr/Sonarr")
     sub.add_parser("sync", help="advance in-flight download states from Radarr/Sonarr")
@@ -568,6 +598,8 @@ def main() -> None:
         subtitle_sync()
     elif args.command == "kodi-sync":
         kodi_sync()
+    elif args.command == "nfo":
+        nfo()
     elif args.command == "trakt-sync":
         trakt_sync()
     elif args.command == "acquire":

@@ -63,6 +63,8 @@ def _optional_jobs(config: AppConfig) -> dict[str, int]:
         out["trakt_sync"] = config.trakt.sync.interval_minutes
     if config.junk.enabled:
         out["junk"] = config.schedule.junk_interval_minutes
+    if config.nfo.enabled:
+        out["nfo"] = config.schedule.nfo_interval_minutes
     return out
 
 

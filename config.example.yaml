@@ -47,6 +47,7 @@ schedule:
   train_interval_minutes: 1440            # retrain the preference model
   trash_interval_minutes: 1440            # purge expired NAS trash
   junk_interval_minutes: 1440             # clear library junk (needs junk.enabled)
+  nfo_interval_minutes: 60                # write Kodi .nfo + artwork (needs nfo.enabled)
   upgrades_interval_minutes: 1440         # look for better copies (needs upgrades.enabled)
   job_timeout_minutes: 180                # wall-clock limit per job; 0 = none
   catch_up: true                          # on startup/wake, run jobs overdue per job_run
@@ -244,6 +245,17 @@ junk:
   partial_days: 7
   remove_archives: false  # true: also remove small .zip/.rar/.7z (zipped subtitles)
   archive_max_mb: 50      # larger archives are never touched
+
+# Kodi metadata on the NAS, so Kodi needs no internet to scan, built from the catalog.
+# Movies: <video>.nfo, <video>-poster.jpg, <video>-fanart.jpg. Shows: tvshow.nfo,
+# poster.jpg and fanart.jpg in the show folder, and a <video>.nfo per episode that
+# says only which episode it is ("Episode 4"). In Kodi set both sources to "Local
+# information only". A Kodi .nfo written by anything else is left alone.
+# `home-theater nfo` runs it once; enabled: true runs it every
+# schedule.nfo_interval_minutes.
+nfo:
+  enabled: false
+  artwork: true
 
 # Replace an owned MOVIE with a clearly better release: a real source tier jump
 # (CAM/TS < TV/DVD < WEB < BluRay < Remux) or a resolution jump, and never worse on
